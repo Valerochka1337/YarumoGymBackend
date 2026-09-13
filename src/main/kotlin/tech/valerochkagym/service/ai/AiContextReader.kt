@@ -34,6 +34,10 @@ data class CalendarCapturedContext(
   val notes: List<Map<String, Any>>,
   val sourceRows: List<CalendarSourceRow>,
   val dataQuality: List<String>,
+  val workouts: List<CalendarWorkout> = emptyList(),
+  val olderFacts: List<CalendarFact> = emptyList(),
+  val capturedAtMillis: Long = 0,
+  val windowStartMillis: Long = 0,
 )
 
 data class CalendarCandidateSource(val id: String, val payload: tools.jackson.databind.JsonNode)
@@ -47,7 +51,13 @@ data class CalendarFact(
   val actualWeightPresent: Boolean,
   val actualWeightKg: Double?,
   val legacyWeightKg: Double?,
+  val results: Map<String, Double?> = emptyMap(),
+  val legacyFields: List<String> = emptyList(),
+  val setType: String? = null,
+  val timeSource: String = "COMPLETED_AT",
 )
+
+data class CalendarWorkout(val id: String, val startedAtMillis: Long, val finishedAtMillis: Long)
 
 data class CalendarSourceRow(val kind: String, val key: String, val utf8Bytes: Int)
 
@@ -236,30 +246,45 @@ class AiContextReader(
           capturedAt,
         )
       if (workoutKeys.size > 64) throw aiError("ai_context_too_large")
-      workoutKeys.forEach { account("workout", it.id, it.bytes) }
+      // Only three older parents, using the same indexed owner/time predicate. No all-history scan.
+      val olderKeys =
+        jdbc.query(
+          "SELECT id,octet_length(payload::text) FROM records WHERE user_id=? AND kind='workout' AND NOT deleted AND jsonb_typeof(payload->'finishedAt')='number' AND ((payload->>'finishedAt')::numeric)<? ORDER BY ((payload->>'finishedAt')::numeric) DESC,id ASC LIMIT 3",
+          { rs, _ -> WorkoutKey(rs.getObject(1, java.util.UUID::class.java), rs.getInt(2)) },
+          identity.userId,
+          windowStart,
+        )
+      val historyKeys = workoutKeys + olderKeys
+      historyKeys.forEach { account("workout", it.id, it.bytes) }
       val workoutRows =
-        if (workoutKeys.isEmpty()) emptyList()
+        if (historyKeys.isEmpty()) emptyList()
         else
           jdbc.query(
-            "SELECT id,payload::text FROM records WHERE user_id=? AND kind='workout' AND NOT deleted AND jsonb_typeof(payload->'finishedAt')='number' AND ((payload->>'finishedAt')::numeric)>=? AND ((payload->>'finishedAt')::numeric)<=? ORDER BY ((payload->>'finishedAt')::numeric) DESC,id ASC LIMIT 65",
+            "SELECT id,payload::text FROM records WHERE user_id=? AND kind='workout' AND NOT deleted AND id IN (${historyKeys.joinToString(",") { "?" }}) ORDER BY ((payload->>'finishedAt')::numeric) DESC,id ASC",
             { rs, _ ->
               rs.getObject(1, java.util.UUID::class.java) to json.readTree(rs.getString(2))
             },
-            identity.userId,
-            windowStart,
-            capturedAt,
+            *(arrayOf(identity.userId) + historyKeys.map { it.id }),
           )
       val quality = mutableListOf<String>()
       val facts = mutableListOf<CalendarFact>()
+      val olderFacts = mutableListOf<CalendarFact>()
+      val workouts = mutableListOf<CalendarWorkout>()
       val notes = mutableListOf<Map<String, Any>>()
       workoutRows.forEach { (workoutId, payload) ->
         val started = payload["startedAt"]?.takeUnless { it.isNull }?.asLong()
         val finished = payload["finishedAt"]?.takeUnless { it.isNull }?.asLong()
-        val validParent = started != null && finished != null && finished <= capturedAt
+        val validParent =
+          started != null &&
+            finished != null &&
+            started >= 0 &&
+            started <= finished &&
+            finished <= capturedAt
         if (!validParent) {
           quality += "INVALID_TEMPORAL_FACT_EXCLUDED"
           return@forEach
         }
+        workouts += CalendarWorkout(workoutId.toString(), started, finished)
         if (includeNotes)
           payload["note"]
             ?.takeUnless { it.isNull }
@@ -280,17 +305,26 @@ class AiContextReader(
           section["sets"]?.toList().orEmpty().forEachIndexed { index, set ->
             if (set["isCompleted"]?.asBoolean() != true) return@forEachIndexed
             val factTime = set["completedAt"]?.takeUnless { it.isNull }?.asLong() ?: started
-            if (
-              factTime < started ||
-                factTime > finished ||
-                factTime < windowStart ||
-                factTime > capturedAt
-            ) {
+            if (factTime < started || factTime > finished || factTime > capturedAt) {
               quality += "INVALID_TEMPORAL_FACT_EXCLUDED"
               return@forEachIndexed
             }
-            if (facts.size == 8192) throw aiError("ai_context_too_large")
-            facts +=
+            val destination = if (factTime >= windowStart) facts else olderFacts
+            if (destination.size == 8192) throw aiError("ai_context_too_large")
+            val legacyFields = mutableListOf<String>()
+            val results =
+              listOf("weightKg", "reps", "durationSec", "speedKmh", "inclinePct").associateWith {
+                key ->
+                val actualKey = "actual" + key.replaceFirstChar { it.uppercase() }
+                val value =
+                  if (set.has(actualKey)) set[actualKey]
+                  else {
+                    legacyFields += key
+                    set[key]
+                  }
+                value?.takeIf { it.isNumber }?.asDouble()?.takeIf { it.isFinite() }
+              }
+            destination +=
               CalendarFact(
                 exerciseId,
                 factTime,
@@ -300,8 +334,13 @@ class AiContextReader(
                 set.has("actualWeightKg"),
                 set["actualWeightKg"]?.takeUnless { it.isNull }?.asDouble(),
                 set["weightKg"]?.takeUnless { it.isNull }?.asDouble(),
+                results,
+                legacyFields,
+                set["setType"]?.takeUnless { it.isNull }?.asString(),
+                if (set["completedAt"]?.isNumber == true) "COMPLETED_AT"
+                else "WORKOUT_START_FALLBACK",
               )
-            if (includeNotes)
+            if (includeNotes && factTime >= windowStart)
               set["note"]
                 ?.takeUnless { it.isNull }
                 ?.asString()
@@ -397,6 +436,10 @@ class AiContextReader(
         boundedNotes,
         sourceRows,
         quality.distinct(),
+        workouts,
+        olderFacts,
+        capturedAt,
+        windowStart,
       )
     }!!
 

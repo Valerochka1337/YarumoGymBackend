@@ -539,7 +539,7 @@ class CalendarAiCaptureIntegrationTest {
       simple.map { it["exerciseId"].asString() },
     )
     assertEquals(150, simple.first()["priority"].asInt())
-    assertEquals(150, simple.first()["coverage"].asInt())
+    assertFalse(simple.first().has("coverage"))
 
     reset()
     val boundedOwner = owner()
@@ -548,7 +548,7 @@ class CalendarAiCaptureIntegrationTest {
     val context =
       providerContext(boundedOwner, priority = allMuscles().map { it["muscle"] as String })
     assertEquals(2500, context["candidates"][0]["priority"].asInt())
-    assertEquals(20_480_000, context["candidates"][0]["coverage"].asInt())
+    assertEquals(8192, context["history"]["recentWorkouts"][0]["completedSetsInWindow"].asInt())
 
     repeat(500) { offset ->
       workout(
@@ -579,6 +579,17 @@ class CalendarAiCaptureIntegrationTest {
     assertTrue(plan.contains("records_calendar_ai_history"), plan)
     assertTrue(plan.contains("Limit"), plan)
     assertFalse(plan.contains("jsonb_array_elements"), plan)
+    val olderPlan =
+      db
+        .query(
+          "EXPLAIN (COSTS OFF) SELECT id,octet_length(payload::text) FROM records WHERE user_id=? AND kind='workout' AND NOT deleted AND jsonb_typeof(payload->'finishedAt')='number' AND ((payload->>'finishedAt')::numeric)<? ORDER BY ((payload->>'finishedAt')::numeric) DESC,id ASC LIMIT 3",
+          { rs, _ -> rs.getString(1) },
+          boundedOwner.userId,
+          capturedAt - 28L * 86_400_000,
+        )
+        .joinToString("\n")
+    assertTrue(olderPlan.contains("records_calendar_ai_history"), olderPlan)
+    assertTrue(olderPlan.contains("Limit"), olderPlan)
   }
 
   @Test
@@ -1424,6 +1435,96 @@ class CalendarAiCaptureIntegrationTest {
       0,
       db.queryForObject("SELECT count(*) FROM records WHERE kind='calendar_plan'", Int::class.java),
     )
+  }
+
+  @Test
+  fun `older finished parents are bounded and never restore monthly load or assigned weight`() {
+    val owner = owner()
+    val target = exercise(owner)
+    repeat(5) { index ->
+      val time = capturedAt - (40L + index) * 86_400_000
+      workout(
+        owner,
+        UUID.randomUUID(),
+        time - 1000,
+        time,
+        sets(target, 2, actual = 90.0),
+        note = "old-private-note",
+      )
+    }
+    val otherOwner = owner()
+    workout(
+      otherOwner,
+      UUID.randomUUID(),
+      capturedAt - 30L * 86_400_000 - 1000,
+      capturedAt - 30L * 86_400_000,
+      sets(target, 1, actual = 999.0),
+    )
+    val context = capture(owner, includeNotes = true)
+    assertTrue(context.facts.isEmpty())
+    assertEquals(3, context.workouts.size)
+    assertEquals(6, context.olderFacts.size)
+    assertTrue(context.notes.isEmpty())
+    assertNull(projectedWeight(owner, target))
+    val history = providerContext(owner)["history"]
+    assertEquals(40, history["localDaysSinceLastFinished"].asInt())
+    assertEquals(0, history["remainingWindowWeeks"].sumOf { it["totals"]["completedSets"].asInt() })
+    assertEquals(6, history["recentWorkouts"].sumOf { it["completedSetsOutsideWindow"].asInt() })
+  }
+
+  @Test
+  fun `actual result presence and corrected deleted unfinished history remain truthful`() {
+    val owner = owner()
+    val target = exercise(owner, type = "CARDIO")
+    val workout = UUID.randomUUID()
+    val set =
+      mapOf(
+        "isCompleted" to true,
+        "actualReps" to null,
+        "reps" to 8,
+        "actualDurationSec" to 120,
+        "durationSec" to 90,
+        "actualSpeedKmh" to 7.5,
+        "actualInclinePct" to 2.0,
+        "setType" to "CARDIO",
+      )
+    workout(
+      owner,
+      workout,
+      capturedAt - 1000,
+      capturedAt - 1,
+      listOf(
+        mapOf(
+          "exerciseId" to target.toString(),
+          "sectionId" to UUID.randomUUID().toString(),
+          "sets" to listOf(set, set + ("isCompleted" to false)),
+        )
+      ),
+    )
+    val fact = capture(owner).facts.single()
+    assertNull(fact.results["reps"])
+    assertFalse("reps" in fact.legacyFields)
+    assertEquals(120.0, fact.results["durationSec"])
+    assertEquals(7.5, fact.results["speedKmh"])
+    assertEquals("WORKOUT_START_FALLBACK", fact.timeSource)
+    db.update(
+      "UPDATE records SET payload=jsonb_set(payload,'{exercises,0,sets,0,actualDurationSec}','180') WHERE user_id=? AND id=?",
+      owner.userId,
+      workout,
+    )
+    assertEquals(180.0, capture(owner).facts.single().results["durationSec"])
+    db.update(
+      "UPDATE records SET payload=jsonb_set(payload,'{finishedAt}','null') WHERE user_id=? AND id=?",
+      owner.userId,
+      workout,
+    )
+    assertTrue(capture(owner).facts.isEmpty())
+    db.update(
+      "UPDATE records SET deleted=true,payload=null WHERE user_id=? AND id=?",
+      owner.userId,
+      workout,
+    )
+    assertTrue(capture(owner).facts.isEmpty())
   }
 
   private fun rawRequest(
