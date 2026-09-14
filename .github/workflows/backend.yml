@@ -97,7 +97,7 @@ jobs:
       needs.changes.outputs.code == 'true' &&
       ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
        (github.event_name == 'workflow_dispatch' && inputs.deploy_production &&
-        (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feat/calendar-ai')))
+        (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feat/calendar-ai' || github.ref == 'refs/heads/feat/web-browser-auth')))
     runs-on: ubuntu-latest
     permissions:
       contents: read
