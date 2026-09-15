@@ -1,0 +1,70 @@
+{
+  "version": "strength-compact-v1",
+  "appliesTo": "STRENGTH only; all other goals retain calendar-v3 selection, context and weight carryover",
+  "limits": {
+    "candidates": 24,
+    "latestExerciseIds": 29,
+    "windowParents": 64,
+    "windowFacts": 8192,
+    "latestFactBytes": 4096,
+    "providerContextBytes": 262144
+  },
+  "selection": "hard eligibility then HIGH80/NORMAL40 + overdue2perday capped28days (unknown14) + compound20 - recent120 - weighted seven-day muscle coverage capped40; score descending, priority descending, exercise UUID; exclude most recent <=7day workout exercises when min(6,max(3,durationMinutes/10)) strength alternatives exist; otherwise penalized fallback; require first ranked focus in accepted output",
+  "latest": "one WORK/null strength-compatible completed set per eligible selected/key exercise; actual weight and reps key presence preferred over legacy, then finishedAt descending/workout UUID/section UUID/set index; actual null never falls back; legacy numeric values withheld from provider but existing server legacy carryover retained; no historical type/equipment snapshot is claimed",
+  "windows": "closed rolling 7/28 days ending at capturedAt, overlap and are not additive; completed sets counted once; frequency counts distinct workouts; actualVolume kg*reps includes only both actual values, never legacy/planned reps; muscle counts count mapped sets, not inferred movement taxonomy",
+  "privacy": "only selected/eligible key exercise identities; latest actual weight/reps with explicit source, exercise-based movement units and mapped muscle aggregates; optional effort enums ordered latest finished first (null is clear), no workout/section/owner IDs or notes in strengthFacts; no health/recovery/readiness inference; no new output fields or provider-prescribed weights; STRENGTH replaces generic history and mass entirely, candidate observation pointers removed; lastWorkoutExerciseIds contains only eligible selected exercise IDs to describe repeat facts, never workout IDs.",
+  "expectedFacts": {
+    "version": "strength-compact-v1",
+    "latest": [
+      {
+        "exerciseId": "00000000-0000-0000-0000-000000000001",
+        "weightSource": "ACTUAL",
+        "weightKg": 50.0,
+        "repsSource": "ACTUAL",
+        "reps": 8.0
+      }
+    ],
+    "movementUnits": {
+      "last7Days": [
+        {
+          "exerciseId": "00000000-0000-0000-0000-000000000001",
+          "workoutFrequency": 1,
+          "completedSetCount": 3,
+          "actualVolume": 800.0
+        }
+      ],
+      "last28Days": [
+        {
+          "exerciseId": "00000000-0000-0000-0000-000000000001",
+          "workoutFrequency": 2,
+          "completedSetCount": 4,
+          "actualVolume": 1100.0
+        }
+      ]
+    },
+    "muscles": {
+      "last7Days": [
+        {
+          "muscle": "QUADS",
+          "workoutFrequency": 1,
+          "completedSetCount": 3
+        }
+      ],
+      "last28Days": [
+        {
+          "muscle": "QUADS",
+          "workoutFrequency": 2,
+          "completedSetCount": 4
+        }
+      ]
+    },
+    "efforts": [
+      {
+        "effort": "HARD"
+      }
+    ],
+    "lastWorkoutExerciseIds": [
+      "00000000-0000-0000-0000-000000000001"
+    ]
+  }
+}

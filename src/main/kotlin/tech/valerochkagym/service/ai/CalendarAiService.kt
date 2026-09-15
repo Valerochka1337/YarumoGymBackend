@@ -81,25 +81,115 @@ class CalendarAiService(
           captured.facts,
           captured.profile?.trainingGoal,
         )
-      val candidates =
-        CalendarCandidateSelector.select(
-          eligible,
-          captured.facts + captured.olderFacts,
-          listOfNotNull(
-              request.preferences,
-              request.currentState,
-              captured.profile?.manualConstraints,
+      val isStrength = captured.profile?.trainingGoal == "STRENGTH"
+      val eligibleById = eligible.associateBy { it["exerciseId"] as String }
+      val strengthKeys =
+        captured.strengthPriorities.filterKeys { eligibleById[it]?.get("type") == "STRENGTH" }
+      val rankingFacts = captured.facts + captured.olderFacts
+      val keyHistory =
+        if (isStrength && strengthKeys.isNotEmpty())
+          contexts
+            .captureStrengthPlannerFacts(
+              identity,
+              request.expectedRevision,
+              request.expectedCatalogRevision,
+              strengthKeys.keys,
+              captured.capturedAtMillis,
+              emptySet(),
             )
-            .joinToString("\n"),
-        )
+            .latestFacts
+        else emptyList()
+      val selection =
+        if (isStrength) {
+          if (eligible.none { it["type"] == "STRENGTH" }) throw aiError("ai_context_stale")
+          StrengthPlannerFacts.select(
+            eligible.map { row ->
+              @Suppress("UNCHECKED_CAST") val muscles = row["muscles"] as List<Map<String, Any>>
+              StrengthPlannerFacts.Candidate(
+                row["exerciseId"] as String,
+                row["type"] as String,
+                muscles.associate { it["muscle"] as String to it["contribution"] as Int },
+              )
+            },
+            (rankingFacts + keyHistory).distinctBy {
+              listOf(it.workoutId, it.sectionId, it.setIndex)
+            },
+            captured.workouts.map { StrengthPlannerFacts.Workout(it.id, it.finishedAtMillis) },
+            strengthKeys,
+            request.availableDurationMinutes,
+            captured.capturedAtMillis,
+          )
+        } else null
+      val candidates =
+        if (selection != null) selection.ranked.map { eligibleById.getValue(it.exerciseId) }
+        else
+          CalendarCandidateSelector.select(
+            eligible,
+            rankingFacts,
+            listOfNotNull(
+                request.preferences,
+                request.currentState,
+                captured.profile?.manualConstraints,
+              )
+              .joinToString("\n"),
+          )
       if (candidates.isEmpty()) throw aiError("ai_context_stale")
+      val strengthCapture =
+        if (isStrength)
+          contexts.captureStrengthPlannerFacts(
+            identity,
+            request.expectedRevision,
+            request.expectedCatalogRevision,
+            candidates.mapTo(mutableSetOf()) { it["exerciseId"] as String } + strengthKeys.keys,
+            captured.capturedAtMillis,
+            captured.workouts.mapTo(mutableSetOf()) { it.id },
+          )
+        else null
+      val compact =
+        strengthCapture?.let { history ->
+          @Suppress("UNCHECKED_CAST")
+          val muscles =
+            eligible.associate { row ->
+              (row["exerciseId"] as String) to
+                (row["muscles"] as List<Map<String, Any>>).associate {
+                  it["muscle"] as String to it["contribution"] as Int
+                }
+            }
+          StrengthPlannerFacts.compact(
+            captured.facts,
+            candidates.mapTo(mutableSetOf()) { it["exerciseId"] as String },
+            strengthKeys.keys,
+            captured.capturedAtMillis,
+            muscles,
+            history.efforts,
+            history.latestFacts,
+          )
+        }
+      val projectionFacts = strengthCapture?.latestFacts ?: captured.facts
       val context =
-        CalendarPlannerContext.serialize(json, captured, request, candidates, eligible.size)
+        CalendarPlannerContext.serialize(
+          json,
+          captured,
+          request,
+          candidates,
+          eligible.size,
+          selection,
+          compact,
+        )
+      val instruction =
+        CalendarPlannerContext.instruction +
+          if (isStrength)
+            "\nSTRENGTH: selection.focusExerciseId must occur in result.exercises. Use only the ranked candidates. " +
+              "strengthFacts version strength-compact-v1 contains explicit saved observations, not weight prescriptions. " +
+              "Never emit weight fields. LEGACY/UNKNOWN numeric values are unavailable. Movement units are exercise-based; " +
+              "lastWorkoutExerciseIds lists observed selected exercises in the latest finished workout. 7/28-day windows overlap, so do not add them or add latest tuples to volume. Efforts are optional user ratings " +
+              "ordered by latest finished workout first; null means cleared, not easy. Do not infer recovery, injury or readiness."
+          else ""
       var output =
         provider.generate(
           AiProviderInput(
             false,
-            CalendarPlannerContext.instruction,
+            instruction,
             context,
             schema,
             schemaName = "calendar_draft",
@@ -108,8 +198,9 @@ class CalendarAiService(
         )
       if (Thread.currentThread().isInterrupted || !Instant.now(clock).isBefore(attempt.deadlineAt))
         throw aiError("ai_timeout")
+      output = validator.validatePlanner(output)
       var draft =
-        validateAndProject(validator.validatePlanner(output), request, candidates, captured.facts)
+        validateAndProject(output, request, candidates, projectionFacts, selection?.focusExerciseId)
       // At most one correction, only for a broad unconstrained pool and enough remaining lease.
       if (
         PlannerDuration.seconds(draft.exercises) <
@@ -132,13 +223,13 @@ class CalendarAiService(
             " seconds. Target " +
             request.availableDurationMinutes * 60 +
             " seconds. Reconsider composition once, without padding sets, repetitions or rest just to fill time. " +
-            "If meaningful volume cannot meet the target, return the shorter plan with a shortfall reason. Previous output: " +
+            "If meaningful volume cannot meet the target, return only the shorter plan. Previous output: " +
             output.toString()
         output =
           provider.generate(
             AiProviderInput(
               false,
-              CalendarPlannerContext.instruction,
+              instruction,
               correction,
               schema,
               schemaName = "calendar_draft",
@@ -146,19 +237,18 @@ class CalendarAiService(
             )
           )
         draft =
-          validateAndProject(validator.validatePlanner(output), request, candidates, captured.facts)
+          validateAndProject(
+            validator.validatePlanner(output),
+            request,
+            candidates,
+            projectionFacts,
+            selection?.focusExerciseId,
+          )
       }
       if (Thread.currentThread().isInterrupted || !Instant.now(clock).isBefore(attempt.deadlineAt))
         throw aiError("ai_timeout")
       val explanation =
-        PlannerExplanationFactory.create(
-          draft,
-          request,
-          captured,
-          candidates,
-          eligible.size,
-          output,
-        )
+        PlannerExplanationFactory.create(draft, request, captured, candidates, eligible.size)
       val final =
         tx.execute {
           hooks.beforeFinalLock()
@@ -458,6 +548,7 @@ class CalendarAiService(
     request: CalendarDraftRequest,
     candidates: List<Map<String, Any>>,
     facts: List<CalendarFact>,
+    focusExerciseId: String? = null,
   ): ApprovalDraft {
     val result = raw["result"] ?: throw aiError("ai_invalid_response")
     val exercises = result["exercises"]?.toList().orEmpty()
@@ -473,6 +564,7 @@ class CalendarAiService(
     val ids = exercises.map { it["exerciseId"]?.asString() }
     if (ids.any { it == null || it !in candidateTypes } || ids.distinct().size != ids.size)
       throw aiError("ai_invalid_response")
+    if (focusExerciseId != null && focusExerciseId !in ids) throw aiError("ai_invalid_response")
     val planned =
       exercises.map { e ->
         val type = candidateTypes.getValue(e["exerciseId"].asString())

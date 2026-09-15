@@ -20,6 +20,8 @@ internal object CalendarPlannerContext {
     request: CalendarDraftRequest,
     selected: List<Map<String, Any>>,
     eligibleCount: Int,
+    strengthSelection: StrengthPlannerFacts.Selection? = null,
+    strengthFacts: StrengthPlannerFacts.CompactFacts? = null,
   ): String {
     val zone = ZoneId.of(request.timeZoneId)
     fun local(time: Long) = Instant.ofEpochMilli(time).atZone(zone).toOffsetDateTime().toString()
@@ -167,7 +169,10 @@ internal object CalendarPlannerContext {
             "preferences" to request.preferences,
           ),
         "candidates" to candidates,
-        "selection" to mapOf("eligibleCount" to eligibleCount, "selectedCount" to selected.size),
+        "selection" to
+          (mapOf("eligibleCount" to eligibleCount, "selectedCount" to selected.size) +
+            if (strengthSelection == null) emptyMap()
+            else mapOf("focusExerciseId" to strengthSelection.focusExerciseId)),
         "profile" to captured.profile,
         "mass" to captured.mass,
         "notes" to
@@ -216,7 +221,41 @@ internal object CalendarPlannerContext {
             "additionalObservationsNotAdditionalVolume" to extra.values,
           ),
       )
-    return json.writeValueAsString(payload).also {
+    val providerPayload =
+      if (strengthFacts == null) payload
+      else
+        (payload - setOf("history", "mass")) +
+          mapOf(
+            "contextVersion" to "calendar-strength-v1",
+            "notes" to
+              captured.notes
+                .filter { it["kind"] != "EXERCISE_HINT" || it["canonicalId"] in candidateIds }
+                .map { if (it["kind"] == "EXERCISE_HINT") it else it - "canonicalId" },
+            "candidates" to candidates.map { it - setOf("lastObservationIds", "historyStatus") },
+            "strengthFacts" to
+              mapOf(
+                "version" to "strength-compact-v1",
+                "lastWorkoutExerciseIds" to
+                  all
+                    .filter { it.workoutId == latest?.id && it.exerciseId in candidateIds }
+                    .map { it.exerciseId }
+                    .distinct()
+                    .sorted(),
+                "latest" to strengthFacts.latest,
+                "movementUnits" to
+                  mapOf(
+                    "last7Days" to strengthFacts.last7Days,
+                    "last28Days" to strengthFacts.last28Days,
+                  ),
+                "muscles" to
+                  mapOf(
+                    "last7Days" to strengthFacts.musclesLast7Days,
+                    "last28Days" to strengthFacts.musclesLast28Days,
+                  ),
+                "efforts" to strengthFacts.efforts.map { mapOf("effort" to it.effort) },
+              ),
+          )
+    return json.writeValueAsString(providerPayload).also {
       if (it.toByteArray(Charsets.UTF_8).size > MAX_BYTES) throw aiError("ai_context_too_large")
     }
   }

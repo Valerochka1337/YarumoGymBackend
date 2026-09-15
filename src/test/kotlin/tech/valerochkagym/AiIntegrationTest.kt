@@ -61,7 +61,7 @@ class AiIntegrationTest {
 
     override fun generate(input: AiProviderInput): JsonNode {
       calls++
-      return plannerFixture(input, handler(input))
+      return handler(input)
     }
   }
 
@@ -978,7 +978,7 @@ class AiIntegrationTest {
         java.nio.file.Path.of("src/test/resources/calendar-ai-contract.json")
       )
     assertEquals(
-      "cb30da2705acc61d45f86f0a1eda0f16c33c3b7052355de9444a815312106709",
+      "b66b834f596b24e85569c23c841cb0c82ee256ef5f6ee595e12d2dc51209d3ee",
       java.security.MessageDigest.getInstance("SHA-256").digest(calendar).joinToString("") {
         "%02x".format(it)
       },

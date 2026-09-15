@@ -14,8 +14,7 @@
           "additionalProperties": false,
           "required": [
             "name",
-            "exercises",
-            "rationale"
+            "exercises"
           ],
           "properties": {
             "name": {
@@ -29,43 +28,6 @@
               "maxItems": 12,
               "items": {
                 "$ref": "#/$defs/ProviderExercise"
-              }
-            },
-            "rationale": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "selection",
-                "repeat",
-                "shortfall"
-              ],
-              "properties": {
-                "selection": {
-                  "type": "string",
-                  "enum": [
-                    "CONTINUITY",
-                    "PRIORITY",
-                    "GOAL_BALANCE",
-                    "CONSTRAINTS"
-                  ]
-                },
-                "repeat": {
-                  "type": "string",
-                  "enum": [
-                    "CONTINUITY",
-                    "PRIORITY",
-                    "LIMITED_OPTIONS",
-                    "NONE"
-                  ]
-                },
-                "shortfall": {
-                  "type": "string",
-                  "enum": [
-                    "VOLUME_LIMIT",
-                    "CONSTRAINTS",
-                    "NONE"
-                  ]
-                }
               }
             }
           }

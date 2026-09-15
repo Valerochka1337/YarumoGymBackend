@@ -34,6 +34,8 @@ class RecordValidator(
         "schedule",
         "exercise_hint",
         "profile",
+        "strength_planner_profile",
+        "workout_effort",
       ) + calendarKinds
     val measurementFields =
       setOf(
@@ -384,9 +386,48 @@ class RecordValidator(
     if (equipment != equipment.sorted()) bad("Оборудование должно быть отсортировано")
   }
 
+  private fun strengthPlannerProfile(n: JsonNode) {
+    val fields = setOf("schemaVersion", "syncId", "updatedAt", "keyExercises")
+    shape(n, fields)
+    if (fields.any { !n.has(it) }) bad("Профиль силы требует все поля")
+    number(n, "schemaVersion", true, true, min = 1.0, max = 1.0)
+    calendarUuid(n["syncId"])
+    number(n, "updatedAt", true, true, max = Long.MAX_VALUE.toDouble())
+    val keys = array(n, "keyExercises", 5)
+    val priorities = mutableListOf<String>()
+    val ids = mutableListOf<String>()
+    keys.forEach {
+      shape(it, setOf("exerciseId", "priority"))
+      ids += calendarUuid(it["exerciseId"]).toString()
+      val priority = text(it, "priority")
+      if (priority !in setOf("HIGH", "NORMAL")) bad("Некорректный приоритет упражнения")
+      priorities += priority
+    }
+    if (ids.distinct().size != ids.size) bad("Повтор ключевого упражнения")
+    val canonical =
+      keys.sortedWith(
+        compareBy<JsonNode> { it["priority"].asString() != "HIGH" }
+          .thenBy { it["exerciseId"].asString() }
+      )
+    if (keys != canonical) bad("Ключевые упражнения должны быть канонически упорядочены")
+  }
+
+  private fun workoutEffort(n: JsonNode) {
+    val fields = setOf("schemaVersion", "syncId", "workoutId", "updatedAt", "effort")
+    shape(n, fields)
+    if (fields.any { !n.has(it) }) bad("Оценка тренировки требует все поля")
+    number(n, "schemaVersion", true, true, min = 1.0, max = 1.0)
+    calendarUuid(n["syncId"])
+    calendarUuid(n["workoutId"])
+    number(n, "updatedAt", true, true, max = Long.MAX_VALUE.toDouble())
+    if (!n["effort"].isNull) enum(n, "effort", setOf("EASY", "MODERATE", "HARD"))
+  }
+
   fun validate(kind: String, n: JsonNode) {
     when (kind) {
       "profile" -> profile(n)
+      "strength_planner_profile" -> strengthPlannerProfile(n)
+      "workout_effort" -> workoutEffort(n)
       "exercise_hint" -> {
         shape(n, setOf("text", "updatedAt"))
         annotation(n, "text", false)
@@ -594,6 +635,32 @@ class RecordValidator(
       .forEach { r ->
         val n = r.payload!!
         when (r.kind) {
+          "strength_planner_profile" -> {
+            val old = before[RecordKey(r.kind, r.id)]?.payload
+            val oldKeys =
+              old?.get("keyExercises")?.toList()?.map { it["exerciseId"].asString() }.orEmpty()
+            n["keyExercises"].forEach { key ->
+              val exerciseId = calendarUuid(key["exerciseId"])
+              // Existing preferences remain readable and removable after a catalog lifecycle
+              // change. Only a newly selected id must be a live strength exercise.
+              if (exerciseId.toString() !in oldKeys) {
+                val exercise = records[RecordKey("exercise", exerciseId)]
+                if (
+                  exercise?.deleted != false ||
+                    exercise.payload?.get("type")?.asString() != "STRENGTH"
+                )
+                  bad("Ключевое упражнение требует доступное силовое упражнение")
+              }
+            }
+          }
+          "workout_effort" -> {
+            if (RecordKey(r.kind, r.id) in changed) {
+              val workoutId = calendarUuid(n["workoutId"])
+              val workout = records[RecordKey("workout", workoutId)]
+              if (workout?.deleted != false || workout.payload?.get("finishedAt")?.isNull != false)
+                bad("Оценка требует завершённую тренировку")
+            }
+          }
           "gym" -> n["exerciseIds"].forEach { ref("exercise", it) }
           "routine",
           "workout" -> {
@@ -692,6 +759,7 @@ class RecordValidator(
     }
     when (r.kind) {
       "exercise_hint" -> refs.add(RecordKey("exercise", r.id))
+      "strength_planner_profile" -> n["keyExercises"].forEach { add("exercise", it["exerciseId"]) }
       "gym" -> n["exerciseIds"].forEach { add("exercise", it) }
       "routine",
       "workout" -> {

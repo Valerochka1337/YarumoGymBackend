@@ -17,9 +17,9 @@ class CalendarAiContractTest {
       )
     val digest =
       MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
-    assertEquals("cb30da2705acc61d45f86f0a1eda0f16c33c3b7052355de9444a815312106709", digest)
+    assertEquals("b66b834f596b24e85569c23c841cb0c82ee256ef5f6ee595e12d2dc51209d3ee", digest)
     val contract = json.readTree(bytes)
-    assertEquals(2, contract["schemaVersion"].asInt())
+    assertEquals(3, contract["schemaVersion"].asInt())
     assertEquals(
       (1..11).map { "V-%03d".format(it) },
       contract["vectors"].toList().map { it["id"].asString() },

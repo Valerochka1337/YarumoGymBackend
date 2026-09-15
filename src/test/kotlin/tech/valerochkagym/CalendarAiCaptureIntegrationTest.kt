@@ -74,7 +74,7 @@ class CalendarAiCaptureIntegrationTest {
 
     override fun generate(input: AiProviderInput): JsonNode {
       calls++
-      return plannerFixture(input, handler(input))
+      return handler(input)
     }
   }
 
@@ -1529,7 +1529,7 @@ class CalendarAiCaptureIntegrationTest {
   }
 
   @Test
-  fun `synthetic latest load survives capture filtering prompt projection and explanation without double volume`() {
+  fun `contradictory obsolete rationale does not reject plan or override factual explanation`() {
     val owner = owner()
     val first = exercise(owner)
     val second = exercise(owner)
@@ -1563,7 +1563,7 @@ class CalendarAiCaptureIntegrationTest {
         """{"result":{"name":"Synthetic session","exercises":[
         {"exerciseId":"$first","restSeconds":90,"plannedSets":[{"reps":12,"durationSec":null},{"reps":10,"durationSec":null},{"reps":8,"durationSec":null},{"reps":6,"durationSec":null}]},
         {"exerciseId":"$second","restSeconds":90,"plannedSets":[{"reps":12,"durationSec":null},{"reps":10,"durationSec":null},{"reps":8,"durationSec":null},{"reps":6,"durationSec":null}]}],
-        "rationale":{"selection":"GOAL_BALANCE","repeat":"CONTINUITY","shortfall":"VOLUME_LIMIT"}}}"""
+        "rationale":{"selection":"invented","repeat":"NONE","shortfall":"NONE"}}}"""
       )
     }
     val response = actions.calendar(owner, json.writeValueAsBytes(raw))
@@ -1572,7 +1572,9 @@ class CalendarAiCaptureIntegrationTest {
     assertEquals(2880L, explanation.minimumSeconds)
     assertEquals(listOf(first.toString()), explanation.repeatedExerciseIds)
     assertEquals(capturedAt - 1000, explanation.lastFinishedAtMillis)
-    assertEquals("VOLUME_LIMIT", explanation.shortfallReason)
+    assertEquals("UNSPECIFIED", explanation.selectionReason)
+    assertEquals("UNSPECIFIED", explanation.repeatReason)
+    assertEquals("UNSPECIFIED", explanation.shortfallReason)
     assertEquals(
       42.0,
       response.proposal.snapshot.draft.exercises.first().plannedSets.first().weightKg,
@@ -1588,14 +1590,14 @@ class CalendarAiCaptureIntegrationTest {
   }
 
   @Test
-  fun `broad pool gets only one duration correction and explanation preserves unresolved shortfall`() {
+  fun `AI answers without rationale succeed through one correction and preserve factual shortfall`() {
     val owner = owner()
     val exercises = (1..6).map { exercise(owner) }
     provider.handler = { providerResponse(exercises.first()) }
     val response = actions.calendar(owner, rawRequest())
     assertEquals(2, provider.calls)
     assertEquals(
-      "VOLUME_LIMIT",
+      "UNSPECIFIED",
       explanations.read(owner, response.proposal.proposalId).shortfallReason,
     )
     assertEquals(1, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))

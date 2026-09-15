@@ -104,7 +104,7 @@ nullable. equipmentRequirementState — KNOWN или UNKNOWN; KNOWN с пуст�
 Клиент передаёт `X-Gym-Capabilities: calendar-plans` для `GET/POST /v1/sync`,
 `GET /v1/sync/changes` и обоих вариантов `GET /v1/records/*`. Заголовок допускает
 список через запятую; сервер возвращает в `X-Gym-Capabilities` только пересечение
-с поддержанными возможностями. Поддерживаются `calendar-plans`, `annotated-workout-writes`, `exercise-hint`, `profile`; ответ содержит только запрошенное пересечение.
+с поддержанными возможностями. Поддерживаются `calendar-plans`, `annotated-workout-writes`, `exercise-hint`, `profile`, `strength-planner-personalization`; ответ содержит только запрошенное пересечение.
 Неизвестные capability игнорируются. Клиент считает отсутствующий/пустой ответ
 отсутствием поддержки и сохраняет неподдерживаемые локальные данные и outbox.
 
@@ -269,6 +269,56 @@ syncId, ownerId и измерений. Unknown не заполняется до�
 После provider call выполняется прежняя повторная проверка ревизии и сессии.
 Контракт: `src/test/resources/basic-profile-sync-contract.json`, SHA-256
 `1bec288ad8d841efaf645af13ac5ea1cbe2b53c841846589c8101cfe3f524ed6`.
+
+## Персонализация силового планирования — capability `strength-planner-personalization`
+
+Два owner-bound sync records открываются только после согласования capability. Их точный
+wire fixture — `src/test/resources/strength-planner-personalization-sync-contract.json`.
+
+- `strength_planner_profile` — единственный неудаляемый record владельца. Его `id` и
+  `payload.syncId` равны `UUID.nameUUIDFromBytes(UTF8("ValerochkaGym.strength-planner-profile.v1:" + ownerUuid))`.
+  Payload: `{schemaVersion:1,syncId,updatedAt,keyExercises}`. Список содержит 0…5 уникальных
+  живых `STRENGTH` exercise IDs, сначала `HIGH`, затем `NORMAL`, и UUID в каждом приоритете.
+  Пустой список очищает выбор. Устаревшая ссылка после архивации остаётся читаемой и может быть
+  удалена, но новая ссылка обязана вести на live силовое упражнение.
+- `workout_effort` — `{schemaVersion:1,syncId,workoutId,updatedAt,effort}`; effort равен
+  `null`, `EASY`, `MODERATE` или `HARD`. ID вычисляется из
+  `ValerochkaGym.workout-effort.v1:<ownerUuid>:<workoutUuid>`. Живой record допускается только
+  для завершённой живой тренировки. При удалении workout сервер добавляет tombstone effort в ту
+  же revision, включая удаление старым клиентом без capability; точный replay остаётся идемпотентным.
+
+Без capability оба kind скрываются до snapshot/changes pagination, list и single-record lookup;
+POST с ними отклоняется `426 capability_required` до ledger. Rollout server-first: клиент хранит
+локальные payload и pending bytes до согласования, не синтезирует удаление при downgrade.
+
+### Контекст планировщика для цели STRENGTH
+
+Сервер применяет прежние ограничения доступности/архива/оборудования, затем детерминированно
+ранжирует до 24 силовых кандидатов с учётом ключей HIGH/NORMAL, давности, базовых упражнений
+и недавних повторов. Первое упражнение становится обязательным `selection.focusExerciseId`:
+ответ без него отклоняется целиком. Недостаток альтернатив допускает ограниченный повтор;
+причина этого решения остаётся серверной.
+
+`calendar-strength-v1` передаёт `strengthFacts` версии `strength-compact-v1`: до 29 последних
+совместимых пар вес/повторы для выбранных и доступных ключевых упражнений, объём и частоту
+за скользящие 7/28 дней, группы мышц по каталогу и добровольную оценку усилия. Последний
+совместимый результат ищется и за пределами обычных трёх старых тренировок. ACTUAL означает
+сохранённое фактическое поле; явный null не заменяется плановым значением. Числа из LEGACY
+не передаются модели; прежний серверный перенос старого веса сохраняется. Объём kg×reps
+суммируется только при фактическом весе и фактических повторах. Окна пересекаются, складывать
+их нельзя. `lastWorkoutExerciseIds` содержит только выбранные exercise IDs последней
+завершённой тренировки. Оценки усилия упорядочены от новой тренировки к старой; null — очистка.
+
+Для STRENGTH прежняя детализация истории, ссылки на наблюдения и масса тела не входят в
+контекст. Сырые тренировки, идентификаторы владельца/тренировок/подходов и health ledger не
+добавляются. Из усилия не выводятся восстановление, травма или готовность. Модель по-прежнему
+не назначает вес; сервер переносит его из истории. Остальные цели сохраняют прежний путь.
+Контракт и точный пример: `src/test/resources/strength-planner-context-contract.json`.
+Изменения записей инвалидируют план через существующую проверку owner/catalog revision.
+
+Отдельное исправление factual rationale (`6be6994`) не включено в эту ветку: при подготовке
+публикации нужно согласовать общие участки `CalendarAiService` и тестового provider fixture.
+Эта доработка не вводит новых требований rationale или полей схемы ответа.
 
 ## Ручные медицинские записи: health-ledger-v1
 
