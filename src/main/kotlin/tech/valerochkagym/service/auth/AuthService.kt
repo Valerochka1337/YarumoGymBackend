@@ -24,7 +24,6 @@ import tech.valerochkagym.repository.model.RefreshEntity
 import tech.valerochkagym.repository.model.SessionEntity
 import tech.valerochkagym.repository.model.UserEntity
 import tech.valerochkagym.repository.trainingproposal.TrainingProposalAccountCleanup
-import tech.valerochkagym.repository.trainingproposal.TrainingProposalAuthorSnapshots
 import tech.valerochkagym.service.model.Identity
 import tech.valerochkagym.utils.Crypto
 
@@ -43,7 +42,6 @@ class AuthService(
   private val clock: Clock,
   private val healthCleanup: tech.valerochkagym.repository.health.HealthAccountCleanup,
   private val proposalCleanup: TrainingProposalAccountCleanup,
-  private val proposalAuthors: TrainingProposalAuthorSnapshots,
 ) {
   private val passwords = Argon2PasswordEncoder(16, 32, 1, 19456, 2)
   private val dummyHash = passwords.encode(crypto.token())
@@ -276,7 +274,6 @@ class AuthService(
         if (!consume(identity.email, "delete", code)) false
         else {
           challenges.removeEmail(identity.email)
-          proposalAuthors.detachLiveAccount(identity.userId)
           proposalCleanup.removeRecipientLocked(identity.userId)
           healthCleanup.removeLocked(identity.userId)
           users.remove(identity.userId)

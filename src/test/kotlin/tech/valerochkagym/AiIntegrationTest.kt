@@ -978,7 +978,7 @@ class AiIntegrationTest {
         java.nio.file.Path.of("src/test/resources/calendar-ai-contract.json")
       )
     assertEquals(
-      "42714ea6086c8d7349543cfdb3d11cfac86d04fe67b15ec743ff388f4e31b18e",
+      "cb30da2705acc61d45f86f0a1eda0f16c33c3b7052355de9444a815312106709",
       java.security.MessageDigest.getInstance("SHA-256").digest(calendar).joinToString("") {
         "%02x".format(it)
       },

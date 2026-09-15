@@ -28,8 +28,6 @@ data class PlannedSet(
 
 data class RejectRequest(val version: Int, val reason: String?)
 
-data class RevokeRequest(val version: Int)
-
 data class ProposalAuthor(val kind: String, val accountId: UUID?)
 
 data class ProposalSnapshot(

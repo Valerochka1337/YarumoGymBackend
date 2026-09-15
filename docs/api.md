@@ -288,44 +288,6 @@ Health storage limits: `gym.health.max-bytes=209715200` и
 Проверка всей операции атомарна до выделения событий; exact replay бесплатен.
 Превышение — 409 `health_account_limit`. Это storage quota, не AI usage limit.
 
-### Coach relations (stage 23)
-
-`/v1/coach-relations` is a dedicated consent API. It never uses `/sync`, `/records`, coach journal,
-health, or AI disclosure as a cross-account read surface. The frozen JSON contract is
-`vibe/contracts/coach-relations-contract.json` (byte-identical test resource).
-
-- `POST /invitations` takes `{operationId}` and returns a one-time visible seven-day token.
-  Exact create replay returns `409 invite_token_not_replayable`; no stored plaintext token exists.
-- `POST /invitations/accept` takes `{operationId,token,calendar,completedWorkouts}`. Both consent
-  booleans are mandatory. Same recipient and grants can replay; another recipient cannot consume it.
-- `GET /clients`, `GET /coaches`: bounded directory, actor/mode/revision-bound cursor.
-- `POST /{relationId}/revoke`: bilateral terminal revoke. It never changes accepted recipient records.
-- `GET /{relationId}/calendar`, `GET /{relationId}/completed-workouts`: separate grants, at most 50
-  items and 1 MiB. Only allowlisted fields are projected. Completed sets expose actual metrics;
-  explicit actual null remains null, absent actual field falls back to its legacy completed metric.
-  Unfinished sets, notes, target/original metrics and health are excluded. Valid empty/large historical
-  arrays retain their existing limits. A single item over the response byte budget returns 413.
-- `POST /{relationId}/training-proposals`, `PUT /{relationId}/training-proposals/{proposalId}`,
-  `POST /{relationId}/training-proposals/{proposalId}/revoke`: server derives COACH author and immutable
-  origin relation. Old relations and legacy proposals without origin never authorize pending approval.
-  The legacy PLAN-01 revoke endpoint remains denied because it has no operation ID.
-  PLAN-01 accepts recipient-edited previews after live validation. The author version remains immutable; approval retains the exact accepted request bytes for replay and audit.
-
-All relation mutators validate strict UTF-8 JSON with a 512 KiB budget and bind operation UUID globally
-per actor to action, route, resource tuple and raw SHA-256. Create/accept ledgers omit raw secret bodies;
-other ledgers retain exact request bytes. Projection cursors expire after 15 minutes, and revision
-changes return `409 relation_snapshot_changed`.
-
-Coach-relations cryptography derives separate invite-token and cursor keys from `gym.token-pepper`.
-`gym.coach-relations.key-version` defaults to 1. During pepper rotation set a new version and retain
-prior keys through `gym.coach-relations.retained-key-versions` (comma-separated version integers),
-`gym.coach-relations.keys.<version>.pepper` and
-`gym.coach-relations.keys.<version>.retire-at-millis`. The retirement timestamp must be at least eight
-days after the last issuance under that version. Only current-version keys issue new tokens; retained
-keys only verify. After retirement invitations resolve as absent and cursors return `cursor_key_retired`.
-Keep pepper material in deployment secret configuration, never in source control.
-
-
 ## Live Coach
 
 Authenticated `GET /v1/ai/coach-models`, `POST /v1/ai/coach-turn` and `POST /v1/ai/coach-turn/stream` provide a bounded stateless tool-calling exchange. Request/response contract, limits and model settings: [Live Coach contract](../vibe/live-coach-plan.md). Workout operations execute only in the Android application after local validation and confirmation. These routes do not require a synced active workout or read health/profile records.

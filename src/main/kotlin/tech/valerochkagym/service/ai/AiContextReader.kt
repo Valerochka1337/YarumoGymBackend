@@ -6,10 +6,7 @@ import java.time.ZoneId
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.stereotype.Service
 import org.springframework.transaction.support.TransactionTemplate
-import tech.valerochkagym.controller.advice.unauthorized
 import tech.valerochkagym.controller.model.AiContextRevision
-import tech.valerochkagym.repository.auth.SessionRepository
-import tech.valerochkagym.repository.auth.UserRepository
 import tech.valerochkagym.repository.catalog.CatalogStateRepository
 import tech.valerochkagym.repository.catalog.StandardRepository
 import tech.valerochkagym.repository.data.HeadRepository
@@ -68,23 +65,20 @@ class AiContextReader(
   private val heads: HeadRepository,
   private val records: RecordRepository,
   private val standard: StandardRepository,
-  private val users: UserRepository,
-  private val sessions: SessionRepository,
   private val json: ObjectMapper,
   private val clock: Clock,
-  private val relations: tech.valerochkagym.repository.coachrelation.CoachRelationRepositories,
+  private val sessionGuard: tech.valerochkagym.service.auth.IdentitySessionGuard,
   private val jdbc: JdbcTemplate,
 ) {
   fun verifyCalendarAdmission(identity: Identity, revision: Long, catalogRevision: Long) {
     tx.executeWithoutResult {
-      relations.guards(identity.userId)
       val common = catalog.readLock()
       if (!heads.existsById(identity.userId)) {
-        if (!users.existsById(identity.userId)) unauthorized()
+        sessionGuard.lock(identity)
         throw aiError("ai_context_stale")
       }
       val head = heads.readLock(identity.userId)
-      relations.session(identity)
+      sessionGuard.lock(identity)
       if (head.revision != revision || common.revision != catalogRevision)
         throw aiError("ai_context_stale")
     }
@@ -100,14 +94,13 @@ class AiContextReader(
     requestedGymIds: List<String>,
   ): CalendarCapturedContext =
     tx.execute {
-      relations.guards(identity.userId)
       val common = catalog.readLock()
       if (!heads.existsById(identity.userId)) {
-        if (!users.existsById(identity.userId)) unauthorized()
+        sessionGuard.lock(identity)
         throw aiError("ai_context_stale")
       }
       val head = heads.readLock(identity.userId)
-      relations.session(identity)
+      sessionGuard.lock(identity)
       val now = Instant.now(clock)
       val sourceRows = mutableListOf<CalendarSourceRow>()
       fun account(kind: String, id: java.util.UUID, bytes: Int) {
@@ -450,21 +443,11 @@ class AiContextReader(
     includeExercises: Boolean,
   ): AiCapturedContext =
     tx.execute {
-      relations.guards(identity.userId)
       val common = catalog.readLock()
       // A client with no acknowledged owner head is not sync-ready. Do not create one here.
       if (!heads.existsById(identity.userId)) throw aiError("ai_context_stale")
       val head = heads.readLock(identity.userId)
-      val session = sessions.findById(identity.sessionId).orElse(null) ?: unauthorized()
-      val now = Instant.now()
-      if (
-        session.userId != identity.userId ||
-          session.revokedAt != null ||
-          !session.accessExpiresAt.isAfter(now) ||
-          !session.refreshExpiresAt.isAfter(now) ||
-          !users.existsById(identity.userId)
-      )
-        unauthorized()
+      sessionGuard.lock(identity)
       if (head.revision != revision || common.revision != catalogRevision)
         throw aiError("ai_context_stale")
       val personal =
