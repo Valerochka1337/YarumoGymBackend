@@ -39,6 +39,52 @@ class InstallNginxRoutesTest(unittest.TestCase):
         self.assertEqual(once, twice)
         self.assertEqual(1, twice.count(MODULE.BEGIN))
 
+    def test_routes_are_inserted_into_https_server_when_http_server_comes_first(self):
+        current = """server {
+    listen 80;
+    server_name api.valerochkagym.tech;
+    location / { return 301 https://$host$request_uri; }
+}
+server {
+    listen 443 ssl;
+    server_name api.valerochkagym.tech;
+    location ~ "^/preview/[A-Za-z0-9_-]{43}$" { return 404; }
+    location ^~ / { try_files $uri $uri/ /index.html; }
+}
+"""
+
+        merged = MODULE.merge(current, self.source)
+        http, https = MODULE.server_blocks(merged)
+
+        self.assertNotIn(MODULE.BEGIN, merged[slice(*http)])
+        self.assertIn(MODULE.BEGIN, merged[slice(*https)])
+        self.assertLess(
+            merged[slice(*https)].index("location ^~ /r/"),
+            merged[slice(*https)].index("location ^~ / {"),
+        )
+
+    def test_managed_routes_are_relocated_from_http_to_https_server(self):
+        block = MODULE.marked_block(self.source)
+        current = f"""server {{
+    listen 80;
+    server_name api.valerochkagym.tech;
+{block}
+    location / {{ return 301 https://$host$request_uri; }}
+}}
+server {{
+    listen [::]:443 ssl;
+    server_name api.valerochkagym.tech;
+    location ^~ / {{ try_files $uri $uri/ /index.html; }}
+}}
+"""
+
+        merged = MODULE.merge(current, self.source)
+        http, https = MODULE.server_blocks(merged)
+
+        self.assertEqual(1, merged.count(MODULE.BEGIN))
+        self.assertNotIn(MODULE.BEGIN, merged[slice(*http)])
+        self.assertIn(MODULE.BEGIN, merged[slice(*https)])
+
     def test_unmanaged_public_route_is_rejected(self):
         current = self.current.replace(
             "    location / {",
