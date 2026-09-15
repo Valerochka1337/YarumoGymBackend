@@ -1,8 +1,30 @@
 # Протокол API
 
 Полный список endpoints и моделей: [OpenAPI](openapi.json).
-Кроме `/v1/auth/*`, запросы требуют `Authorization: Bearer <accessToken>`.
+Кроме `/v1/auth/*` и публичного предпросмотра программ, запросы требуют `Authorization: Bearer <accessToken>`.
 Владелец определяется только сессией. Ошибки: `{code,message}`.
+
+## Неизменяемые ссылки на программы
+
+Автор создаёт снимок личной синхронизированной программы через
+`POST /v1/routine-shares` с `{operationId,routineId,expectedRevision,catalogRevision}`.
+`expectedRevision` — revision всей account head, а не revision записи программы. Ответ содержит
+`{shareId,url,routineId,createdAt}`. Одна программа имеет до 50 активных ссылок; их возвращает
+`GET /v1/routine-shares?routineId={uuid}&limit=1..50`, а
+`POST /v1/routine-shares/{shareId}/revoke` с `{operationId}` отзывает ссылку идемпотентно.
+
+Публичный `GET /v1/routine-shares/preview/{token}` возвращает только
+`{title,estimatedDurationSeconds,exercises}`. У упражнения есть `{exerciseKey,name,type,sets,restSeconds}`;
+подход содержит только nullable `weightKg,reps,durationSec,speedKmh,inclinePct`. Ответ не раскрывает
+автора, исходную программу, зал, заметки, историю или профиль. `GET /r/{token}` выдаёт тот же allowlisted
+снимок как HTML со ссылкой на актуальный Android APK. Оба публичных ответа имеют `Cache-Control: no-store`,
+`Referrer-Policy: no-referrer` и `X-Robots-Tag: noindex, nofollow`.
+
+Получатель вызывает `POST /v1/routine-shares/preview/{token}/import` с `{operationId}`. Сервер создаёт
+независимую личную программу и возвращает `{routineId,revision,importedAt,alreadyImported}`. Повтор
+возвращает исходный receipt; после отзыва даже повтор импорта получает `404 share_unavailable`, а уже
+сохранённая копия остаётся у получателя. Стандартные упражнения сохраняют canonical UUID. Личное
+упражнение снимка получает отдельный UUID получателя и никогда не объединяется по имени.
 
 ## Запись и повтор запросов
 

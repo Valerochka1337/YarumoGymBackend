@@ -1939,6 +1939,50 @@
         ]
       }
     },
+    "/v1/routine-shares": {
+      "post": {
+        "tags": ["routine-share-controller"],
+        "operationId": "createRoutineShare",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateRoutineShareRequest"}}}},
+        "responses": {"200": {"description": "Immutable public link", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RoutineShareCreated"}}}}}
+      },
+      "get": {
+        "tags": ["routine-share-controller"],
+        "operationId": "listRoutineShares",
+        "parameters": [{"name": "routineId", "in": "query", "required": true, "schema": {"type": "string", "format": "uuid"}}, {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 50}}],
+        "responses": {"200": {"description": "Active links", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RoutineShareList"}}}}}
+      }
+    },
+    "/v1/routine-shares/{shareId}/revoke": {
+      "post": {
+        "tags": ["routine-share-controller"], "operationId": "revokeRoutineShare",
+        "parameters": [{"name": "shareId", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RevokeRoutineShareRequest"}}}},
+        "responses": {"200": {"description": "Revoked link", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RoutineShareRevoked"}}}}}
+      }
+    },
+    "/v1/routine-shares/preview/{token}": {
+      "get": {
+        "tags": ["routine-share-public-controller"], "operationId": "previewRoutineShare", "security": [],
+        "parameters": [{"name": "token", "in": "path", "required": true, "schema": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"}}],
+        "responses": {"200": {"description": "Allowlisted immutable snapshot", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RoutineSharePreview"}}}}, "404": {"description": "share_unavailable"}}
+      }
+    },
+    "/v1/routine-shares/preview/{token}/import": {
+      "post": {
+        "tags": ["routine-share-controller"], "operationId": "importRoutineShare",
+        "parameters": [{"name": "token", "in": "path", "required": true, "schema": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ImportRoutineShareRequest"}}}},
+        "responses": {"200": {"description": "Imported routine receipt", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RoutineShareImport"}}}}, "404": {"description": "share_unavailable"}}
+      }
+    },
+    "/r/{token}": {
+      "get": {
+        "tags": ["routine-share-public-controller"], "operationId": "routineShareHtml", "security": [],
+        "parameters": [{"name": "token", "in": "path", "required": true, "schema": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"}}],
+        "responses": {"200": {"description": "Escaped public HTML preview with Android APK CTA", "content": {"text/html": {"schema": {"type": "string"}}}}, "404": {"description": "Unavailable HTML page"}}
+      }
+    },
     "/v1/ai/coach-prompt": {
       "get": {
         "tags": [
@@ -2641,6 +2685,17 @@
           }
         }
       },
+      "CreateRoutineShareRequest": {"type": "object", "required": ["operationId", "routineId", "expectedRevision", "catalogRevision"], "properties": {"operationId": {"type": "string", "format": "uuid"}, "routineId": {"type": "string", "format": "uuid"}, "expectedRevision": {"type": "integer", "format": "int64"}, "catalogRevision": {"type": "integer", "format": "int64"}}},
+      "RevokeRoutineShareRequest": {"type": "object", "required": ["operationId"], "properties": {"operationId": {"type": "string", "format": "uuid"}}},
+      "ImportRoutineShareRequest": {"type": "object", "required": ["operationId"], "properties": {"operationId": {"type": "string", "format": "uuid"}}},
+      "RoutineShareCreated": {"type": "object", "properties": {"shareId": {"type": "string", "format": "uuid"}, "url": {"type": "string", "format": "uri"}, "routineId": {"type": "string", "format": "uuid"}, "createdAt": {"type": "integer", "format": "int64"}}},
+      "RoutineShareList": {"type": "object", "properties": {"items": {"type": "array", "items": {"$ref": "#/components/schemas/RoutineShareListItem"}}}},
+      "RoutineShareListItem": {"type": "object", "properties": {"shareId": {"type": "string", "format": "uuid"}, "routineId": {"type": "string", "format": "uuid"}, "url": {"type": "string", "format": "uri"}, "createdAt": {"type": "integer", "format": "int64"}, "active": {"type": "boolean"}}},
+      "RoutineShareRevoked": {"type": "object", "properties": {"shareId": {"type": "string", "format": "uuid"}, "revokedAt": {"type": "integer", "format": "int64"}}},
+      "RoutineShareImport": {"type": "object", "properties": {"routineId": {"type": "string", "format": "uuid"}, "revision": {"type": "integer", "format": "int64"}, "importedAt": {"type": "integer", "format": "int64"}, "alreadyImported": {"type": "boolean"}}},
+      "RoutineSharePreview": {"type": "object", "required": ["title", "estimatedDurationSeconds", "exercises"], "properties": {"title": {"type": "string"}, "estimatedDurationSeconds": {"type": "integer", "format": "int64"}, "exercises": {"type": "array", "items": {"$ref": "#/components/schemas/RoutineSharePreviewExercise"}}}},
+      "RoutineSharePreviewExercise": {"type": "object", "properties": {"exerciseKey": {"type": "string", "format": "uuid"}, "name": {"type": "string"}, "type": {"type": "string"}, "sets": {"type": "array", "items": {"$ref": "#/components/schemas/RoutineSharePreviewSet"}}, "restSeconds": {"type": "integer"}}},
+      "RoutineSharePreviewSet": {"type": "object", "properties": {"weightKg": {"type": ["number", "null"]}, "reps": {"type": ["integer", "null"]}, "durationSec": {"type": ["integer", "null"]}, "speedKmh": {"type": ["number", "null"]}, "inclinePct": {"type": ["number", "null"]}}},
       "CoachPromptResponse": {
         "type": "object",
         "required": [

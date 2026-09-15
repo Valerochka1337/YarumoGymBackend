@@ -1,5 +1,6 @@
 package tech.valerochkagym.utils
 
+import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
 import javax.crypto.Mac
@@ -26,5 +27,18 @@ class Crypto(@Value("\${gym.token-pepper}") pepper: String) {
     Mac.getInstance("HmacSHA256").run {
       init(SecretKeySpec(key, "HmacSHA256"))
       doFinal(value.toByteArray()).joinToString("") { "%02x".format(it) }
+    }
+
+  fun sha256(value: String): String =
+    MessageDigest.getInstance("SHA-256").digest(value.toByteArray()).joinToString("") {
+      "%02x".format(it)
+    }
+
+  fun routineShareToken(authorId: java.util.UUID, operationId: java.util.UUID): String =
+    Mac.getInstance("HmacSHA256").run {
+      init(SecretKeySpec(key, "HmacSHA256"))
+      Base64.getUrlEncoder()
+        .withoutPadding()
+        .encodeToString(doFinal("routine-share:$authorId:$operationId".toByteArray()))
     }
 }
