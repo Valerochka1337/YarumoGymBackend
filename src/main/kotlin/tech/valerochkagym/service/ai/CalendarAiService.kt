@@ -38,9 +38,10 @@ class CalendarAiService(
   private val clock: Clock,
   private val relations: tech.valerochkagym.repository.coachrelation.CoachRelationRepositories,
   private val hooks: CalendarAiExecutionHooks,
+  private val explanations: PlannerExplanationStore,
 ) {
   private val schema: JsonNode by lazy {
-    javaClass.getResourceAsStream("/ai/calendar-output-schema.json")!!.use(json::readTree)
+    javaClass.getResourceAsStream("/ai/calendar-planner-output-v3.json")!!.use(json::readTree)
   }
 
   fun create(
@@ -94,7 +95,7 @@ class CalendarAiService(
       if (candidates.isEmpty()) throw aiError("ai_context_stale")
       val context =
         CalendarPlannerContext.serialize(json, captured, request, candidates, eligible.size)
-      val output =
+      var output =
         provider.generate(
           AiProviderInput(
             false,
@@ -102,12 +103,62 @@ class CalendarAiService(
             context,
             schema,
             schemaName = "calendar_draft",
+            timeoutMillis = attempt.deadlineAt.toEpochMilli() - clock.millis(),
           )
         )
       if (Thread.currentThread().isInterrupted || !Instant.now(clock).isBefore(attempt.deadlineAt))
         throw aiError("ai_timeout")
-      val draft =
-        validateAndProject(validator.validateCalendar(output), request, candidates, captured.facts)
+      var draft =
+        validateAndProject(validator.validatePlanner(output), request, candidates, captured.facts)
+      // At most one correction, only for a broad unconstrained pool and enough remaining lease.
+      if (
+        PlannerDuration.seconds(draft.exercises) <
+          PlannerDuration.minimumSeconds(request.availableDurationMinutes) &&
+          candidates.size >= 6 &&
+          request.currentState == null &&
+          request.preferences == null &&
+          captured.profile?.manualConstraints.isNullOrBlank() &&
+          Instant.now(clock).plusSeconds(20).isBefore(attempt.deadlineAt)
+      ) {
+        contexts.verifyCalendarAdmission(
+          identity,
+          request.expectedRevision,
+          request.expectedCatalogRevision,
+        )
+        val correction =
+          context +
+            "\nCORRECTION: Previous draft estimated " +
+            PlannerDuration.seconds(draft.exercises) +
+            " seconds. Target " +
+            request.availableDurationMinutes * 60 +
+            " seconds. Reconsider composition once, without padding sets, repetitions or rest just to fill time. " +
+            "If meaningful volume cannot meet the target, return the shorter plan with a shortfall reason. Previous output: " +
+            output.toString()
+        output =
+          provider.generate(
+            AiProviderInput(
+              false,
+              CalendarPlannerContext.instruction,
+              correction,
+              schema,
+              schemaName = "calendar_draft",
+              timeoutMillis = minOf(20_000, attempt.deadlineAt.toEpochMilli() - clock.millis()),
+            )
+          )
+        draft =
+          validateAndProject(validator.validatePlanner(output), request, candidates, captured.facts)
+      }
+      if (Thread.currentThread().isInterrupted || !Instant.now(clock).isBefore(attempt.deadlineAt))
+        throw aiError("ai_timeout")
+      val explanation =
+        PlannerExplanationFactory.create(
+          draft,
+          request,
+          captured,
+          candidates,
+          eligible.size,
+          output,
+        )
       val final =
         tx.execute {
           hooks.beforeFinalLock()
@@ -146,6 +197,7 @@ class CalendarAiService(
                 draft,
               )
             )
+          explanations.save(proposal.proposalId, proposal.currentVersion, explanation)
           val response =
             CalendarDraftResponse(
               request.requestId,
@@ -423,7 +475,6 @@ class CalendarAiService(
     val ids = exercises.map { it["exerciseId"]?.asString() }
     if (ids.any { it == null || it !in candidateTypes } || ids.distinct().size != ids.size)
       throw aiError("ai_invalid_response")
-    var knownDuration = 0
     val planned =
       exercises.map { e ->
         val type = candidateTypes.getValue(e["exerciseId"].asString())
@@ -431,10 +482,9 @@ class CalendarAiService(
         if (rest != null && rest !in 0..900) throw aiError("ai_invalid_response")
         val sets = e["plannedSets"]?.toList().orEmpty()
         if (sets.size !in 1..10) throw aiError("ai_invalid_response")
-        knownDuration += (rest ?: 0) * (sets.size - 1)
         PlannedExercise(
           e["exerciseId"].asString(),
-          rest,
+          rest ?: 90,
           sets.map { s ->
             val reps = s["reps"]?.takeUnless(JsonNode::isNull)?.asInt()
             val duration = s["durationSec"]?.takeUnless(JsonNode::isNull)?.asInt()
@@ -443,7 +493,6 @@ class CalendarAiService(
                 (type != "STRENGTH" && (reps != null || duration !in 1..7200))
             )
               throw aiError("ai_invalid_response")
-            if (type != "STRENGTH") knownDuration += duration!!
             val weight =
               if (type == "STRENGTH")
                 facts
@@ -462,7 +511,8 @@ class CalendarAiService(
           },
         )
       }
-    if (knownDuration > request.availableDurationMinutes * 60) throw aiError("ai_invalid_response")
+    if (PlannerDuration.seconds(planned) > request.availableDurationMinutes * 60L)
+      throw aiError("ai_invalid_response")
     return ApprovalDraft(
       result["name"].asString(),
       request.gymIds,

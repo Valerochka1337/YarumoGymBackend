@@ -23,6 +23,8 @@ class HttpOpenAiChatCompletionsProvider(
   override val available = true
 
   override fun generate(input: AiProviderInput): JsonNode {
+    val requestDeadlineMillis = minOf(deadlineMillis, input.timeoutMillis ?: deadlineMillis)
+    if (requestDeadlineMillis <= 0) throw aiError("ai_timeout")
     var pending: CompletableFuture<HttpResponse<ByteArray>>? = null
     try {
       val parts = mutableListOf<Map<String, Any>>(mapOf("type" to "text", "text" to input.context))
@@ -60,13 +62,13 @@ class HttpOpenAiChatCompletionsProvider(
         )
       val request =
         HttpRequest.newBuilder(settings.endpoint)
-          .timeout(Duration.ofMillis(deadlineMillis))
+          .timeout(Duration.ofMillis(requestDeadlineMillis))
           .header("Content-Type", "application/json")
           .header("Authorization", "Bearer ${settings.key}")
           .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body)))
           .build()
       pending = client.sendAsync(request) { BoundedAiBodySubscriber(256 * 1024) }
-      val response = pending.get(deadlineMillis, TimeUnit.MILLISECONDS)
+      val response = pending.get(requestDeadlineMillis, TimeUnit.MILLISECONDS)
       if (response.statusCode() != 200) throw aiError("ai_unavailable")
       val root = json.readTree(response.body())
       val choices = root["choices"]
