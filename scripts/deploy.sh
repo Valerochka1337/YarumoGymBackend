@@ -11,7 +11,7 @@ cp .env "$env_backup"
 cleanup() {
   local status=$?
   if [[ "$status" != 0 && -f "$env_backup" ]]; then cp "$env_backup" .env; fi
-  rm -f "$env_backup" incoming/smtp.json incoming/ai.json incoming/ai-encryption.json
+  rm -f "$env_backup" incoming/smtp.json incoming/ai.json incoming/ai-encryption.json incoming/nginx.conf incoming/install-nginx-routes.py
 }
 trap cleanup EXIT
 compose=(docker compose --env-file .env -f compose.production.yaml)
@@ -38,8 +38,54 @@ set_image() {
   printf 'BACKEND_IMAGE=%s\n' "$value" >> .env.next
   mv .env.next .env
 }
+install_nginx_routes() {
+  local target backup candidate headers body share_status root_status
+  if [[ ! -f incoming/nginx.conf && ! -f incoming/install-nginx-routes.py ]]; then return 0; fi
+  [[ -f incoming/nginx.conf && -f incoming/install-nginx-routes.py ]] || {
+    echo 'Nginx deployment files are missing' >&2
+    return 1
+  }
+  target=$(readlink -f /etc/nginx/sites-enabled/api.valerochkagym.tech)
+  [[ -f "$target" ]] || {
+    echo 'Installed api.valerochkagym.tech server block was not found' >&2
+    return 1
+  }
+  backup=$(mktemp nginx.rollback.XXXXXX)
+  candidate=$(mktemp nginx.candidate.XXXXXX)
+  headers=$(mktemp nginx.headers.XXXXXX)
+  body=$(mktemp nginx.body.XXXXXX)
+  cp "$target" "$backup"
+  restore_nginx() {
+    cp "$backup" "$target"
+    nginx -t && systemctl reload nginx
+  }
+  if ! python3 incoming/install-nginx-routes.py "$target" incoming/nginx.conf "$candidate" ||
+     ! install -m 0644 "$candidate" "$target" ||
+     ! nginx -t ||
+     ! systemctl reload nginx; then
+    echo 'Nginx route installation failed; restoring the previous server block.' >&2
+    if ! restore_nginx; then echo 'Nginx rollback also failed' >&2; fi
+    rm -f "$backup" "$candidate" "$headers" "$body"
+    return 1
+  fi
+  share_status=$(curl --silent --output /dev/null --write-out '%{http_code}' https://api.valerochkagym.tech/r/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA || true)
+  root_status=$(curl --silent --output /dev/null --write-out '%{http_code}' https://api.valerochkagym.tech/ || true)
+  if ! curl --fail --silent --dump-header "$headers" --output "$body" https://api.valerochkagym.tech/.well-known/assetlinks.json ||
+     ! grep -Eiq '^content-type:[[:space:]]*application/json' "$headers" ||
+     ! grep -q 'com.valerochka1337.valerochkagym' "$body" ||
+     [[ "$share_status" != 404 || "$root_status" != 200 ]]; then
+    echo 'Nginx App Links smoke check failed; restoring the previous server block.' >&2
+    if ! restore_nginx; then echo 'Nginx rollback also failed' >&2; fi
+    rm -f "$backup" "$candidate" "$headers" "$body"
+    return 1
+  fi
+  install -m 0644 "$target" nginx.conf
+  rm -f "$backup" "$candidate" "$headers" "$body"
+}
 set_image "$new_image"
-if ! "${compose[@]}" up -d --wait --wait-timeout 180 || ! curl --fail --silent --retry 5 --retry-delay 3 https://api.valerochkagym.tech/health; then
+if ! "${compose[@]}" up -d --wait --wait-timeout 180 ||
+   ! curl --fail --silent --retry 5 --retry-delay 3 https://api.valerochkagym.tech/health ||
+   ! install_nginx_routes; then
   echo 'Deployment failed; restoring the previous application image and environment (database migrations are not reversed).' >&2
   mv "$env_backup" .env
   if [[ -n "$old_image" ]]; then "${compose[@]}" up -d --wait --wait-timeout 180; fi

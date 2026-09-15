@@ -95,5 +95,6 @@ class AiEncryptionConfigTest(unittest.TestCase):
         self.assertIn('python3 scripts/ai-encryption-config.py export > "$ai_key_payload"', workflow)
         self.assertIn('"$ai_key_payload" valerochka@', workflow)
         self.assertIn('"$ai_key_payload" ~/.ssh/gym-deploy', workflow)
-        self.assertIn('/incoming/ai-encryption.json\' || true', workflow)
+        self.assertIn('/incoming/ai-encryption.json', workflow)
+        self.assertIn("' || true", workflow)
         self.assertNotIn('set -x', workflow)

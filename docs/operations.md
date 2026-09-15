@@ -27,6 +27,11 @@ Readiness проверяет БД. Наружные `/actuator/*` закрыты
 После успешного readiness — `sudo bash scripts/activate-proxy.sh`. Существующий `.env`
 bootstrap не перезаписывает. Он не устанавливает Docker, Nginx или сертификаты за владельца.
 
+Обычный CD переносит `infra/nginx.conf` и перед публикацией проверяет управляемые маршруты
+`/.well-known/assetlinks.json` и `/r/<token>`. На общем с веб-клиентом домене deploy заменяет
+только отмеченный блок этих маршрутов перед SPA fallback, проверяет `nginx -t`, перезагружает
+Nginx и выполняет smoke-check. При любой ошибке прежний server block восстанавливается.
+
 ## Почта
 
 При первоначальном развёртывании bootstrap задаёт `MAIL_ENABLED=false`: регистрация,
