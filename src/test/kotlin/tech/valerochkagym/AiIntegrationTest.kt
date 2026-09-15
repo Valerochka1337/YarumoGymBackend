@@ -61,7 +61,7 @@ class AiIntegrationTest {
 
     override fun generate(input: AiProviderInput): JsonNode {
       calls++
-      return plannerFixture(input, handler(input))
+      return handler(input)
     }
   }
 

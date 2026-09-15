@@ -65,7 +65,7 @@ class StrengthPlannerIntegrationTest {
     override fun generate(input: AiProviderInput): JsonNode {
       calls++
       return try {
-        plannerFixture(input, handler(input))
+        handler(input)
       } catch (error: Exception) {
         throw AssertionError("Synthetic provider fixture failed", error)
       }

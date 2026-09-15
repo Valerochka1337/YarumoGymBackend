@@ -4,6 +4,7 @@ import java.time.LocalDate
 import org.springframework.stereotype.Component
 import tools.jackson.databind.JsonNode
 import tools.jackson.databind.ObjectMapper
+import tools.jackson.databind.node.ObjectNode
 
 @Component
 class AiDraftValidator(private val json: ObjectMapper) {
@@ -51,8 +52,12 @@ class AiDraftValidator(private val json: ObjectMapper) {
   fun validatePlanner(raw: JsonNode): JsonNode {
     val schema =
       javaClass.getResourceAsStream("/ai/calendar-planner-output-v3.json")!!.use(json::readTree)
-    if (!matches(raw, schema, schema)) throw aiError("ai_invalid_response")
-    return raw
+    // Ignore only obsolete explanation metadata, including malformed or contradictory codes.
+    // The remaining plan and envelope still have to match the strict provider schema.
+    val plan = raw.deepCopy()
+    (plan["result"] as? ObjectNode)?.remove("rationale")
+    if (!matches(plan, schema, schema)) throw aiError("ai_invalid_response")
+    return plan
   }
 
   private fun matches(n: JsonNode, s: JsonNode, root: JsonNode = s): Boolean {

@@ -54,57 +54,91 @@ class PlannerExplanationTest {
       )
     )
 
-  private fun output(
-    selection: String = "GOAL_BALANCE",
-    repeat: String = "NONE",
-    shortfall: String = "VOLUME_LIMIT",
-  ) =
+  private val plan =
     json.readTree(
-      """{"result":{"rationale":{"selection":"$selection","repeat":"$repeat","shortfall":"$shortfall"}}}"""
+      """{"result":{"name":"Plan","exercises":[{"exerciseId":"$id","restSeconds":90,"plannedSets":[{"reps":10,"durationSec":null}]}]}}"""
     )
 
   @Test
-  fun `empty history and limited options produce computed focus and explicit shortfall`() {
-    val result = PlannerExplanationFactory.create(draft, request, captured, candidates, 1, output())
+  fun `empty history produces factual focus duration and no invented intent`() {
+    val result = PlannerExplanationFactory.create(draft, request, captured, candidates, 1)
     assertEquals(listOf("QUADS"), result.focusMuscles)
     assertTrue(result.repeatedExerciseIds.isEmpty())
     assertNull(result.lastFinishedAtMillis)
-    assertEquals(450, result.estimatedSeconds.toInt())
-    assertEquals("VOLUME_LIMIT", result.shortfallReason)
+    assertEquals(450L, result.estimatedSeconds)
+    assertEquals(2880L, result.minimumSeconds)
+    assertEquals("UNSPECIFIED", result.selectionReason)
+    assertEquals("NONE", result.repeatReason)
+    assertEquals("UNSPECIFIED", result.shortfallReason)
   }
 
   @Test
-  fun `contradictory repeat priority constraint and shortfall claims are rejected`() {
-    listOf(
-        output(repeat = "CONTINUITY"),
-        output(selection = "PRIORITY"),
-        output(selection = "CONSTRAINTS"),
-        output(shortfall = "CONSTRAINTS"),
-        output(shortfall = "NONE"),
-        output(selection = "invented"),
+  fun `meeting minimum produces no shortfall without a model reason`() {
+    val result =
+      PlannerExplanationFactory.create(
+        draft.copy(exercises = listOf(draft.exercises.single().copy(restSeconds = 40))),
+        request.copy(availableDurationMinutes = 10),
+        captured,
+        candidates,
+        1,
       )
-      .forEach {
-        assertThrows<ApiException> {
-          PlannerExplanationFactory.create(draft, request, captured, candidates, 1, it)
-        }
+    assertEquals(300L, result.estimatedSeconds)
+    assertEquals(300L, result.minimumSeconds)
+    assertEquals("NONE", result.shortfallReason)
+    assertEquals("UNSPECIFIED", result.selectionReason)
+  }
+
+  @Test
+  fun `provider schema requests only the plan and accepts an answer without rationale`() {
+    val schema = json.readTree(javaClass.getResourceAsStream("/ai/calendar-planner-output-v3.json"))
+    val result = schema["${'$'}defs"]["ProviderOutput"]["properties"]["result"]
+    assertEquals(
+      setOf("name", "exercises"),
+      result["required"].toList().map { it.asString() }.toSet(),
+    )
+    assertFalse(result["properties"].has("rationale"))
+    assertFalse(CalendarPlannerContext.instruction.contains("rationale", ignoreCase = true))
+    assertEquals(plan, AiDraftValidator(json).validatePlanner(plan))
+  }
+
+  @Test
+  fun `obsolete explanation metadata never rejects or changes a valid plan`() {
+    val validator = AiDraftValidator(json)
+    listOf(
+        "null",
+        "42",
+        "[]",
+        "\"arbitrary prose\"",
+        "{}",
+        """{"selection":"PRIORITY","repeat":"CONTINUITY","shortfall":"NONE"}""",
+        """{"selection":"invented","repeat":"LIMITED_OPTIONS","shortfall":"CONSTRAINTS","references":["invented"]}""",
+      )
+      .forEach { rationale ->
+        val raw = json.readTree(plan.toString())
+        (raw["result"] as tools.jackson.databind.node.ObjectNode).set(
+          "rationale",
+          json.readTree(rationale),
+        )
+        assertEquals(plan, validator.validatePlanner(raw))
+        assertTrue(raw["result"].has("rationale"))
       }
   }
 
   @Test
-  fun `provider schema rejects missing rationale arbitrary claims and invented references`() {
+  fun `ignoring obsolete rationale preserves strict validation of the plan`() {
     val validator = AiDraftValidator(json)
-    val base =
-      """{"name":"Plan","exercises":[{"exerciseId":"$id","restSeconds":90,"plannedSets":[{"reps":10,"durationSec":null}]}]"""
-    assertThrows<ApiException> { validator.validatePlanner(json.readTree("{\"result\":$base}}")) }
-    val valid =
-      json.readTree(
-        "{\"result\":$base,\"rationale\":{\"selection\":\"GOAL_BALANCE\",\"repeat\":\"NONE\",\"shortfall\":\"VOLUME_LIMIT\"}}}"
+    listOf(
+        plan.toString().replace("\"name\":\"Plan\"", "\"name\":\"Plan\",\"unexpected\":true"),
+        plan.toString().replace("\"reps\":10", "\"reps\":10,\"weightKg\":50"),
+        plan.toString().replace(id, "not-a-uuid"),
+        plan.toString().replace("\"restSeconds\":90", "\"restSeconds\":901"),
+        plan.toString().replace("\"reps\":10", "\"reps\":0"),
+        plan.toString().replace("\"exercises\":[", "\"missingExercises\":["),
       )
-    assertEquals(valid, validator.validatePlanner(valid))
-    assertThrows<ApiException> {
-      validator.validatePlanner(
-        json.readTree(valid.toString().replace("GOAL_BALANCE", "Recovered after 48 hours"))
-      )
-    }
+      .forEach { invalid ->
+        val raw = json.readTree(invalid)
+        (raw["result"] as tools.jackson.databind.node.ObjectNode).put("rationale", "ignored")
+        assertThrows<ApiException> { validator.validatePlanner(raw) }
+      }
   }
 }

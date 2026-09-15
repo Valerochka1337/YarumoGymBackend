@@ -198,9 +198,10 @@ class CalendarAiService(
         )
       if (Thread.currentThread().isInterrupted || !Instant.now(clock).isBefore(attempt.deadlineAt))
         throw aiError("ai_timeout")
+      output = validator.validatePlanner(output)
       var draft =
         validateAndProject(
-          validator.validatePlanner(output),
+          output,
           request,
           candidates,
           projectionFacts,
@@ -228,7 +229,7 @@ class CalendarAiService(
             " seconds. Target " +
             request.availableDurationMinutes * 60 +
             " seconds. Reconsider composition once, without padding sets, repetitions or rest just to fill time. " +
-            "If meaningful volume cannot meet the target, return the shorter plan with a shortfall reason. Previous output: " +
+            "If meaningful volume cannot meet the target, return only the shorter plan. Previous output: " +
             output.toString()
         output =
           provider.generate(
@@ -253,14 +254,7 @@ class CalendarAiService(
       if (Thread.currentThread().isInterrupted || !Instant.now(clock).isBefore(attempt.deadlineAt))
         throw aiError("ai_timeout")
       val explanation =
-        PlannerExplanationFactory.create(
-          draft,
-          request,
-          captured,
-          candidates,
-          eligible.size,
-          output,
-        )
+        PlannerExplanationFactory.create(draft, request, captured, candidates, eligible.size)
       val final =
         tx.execute {
           hooks.beforeFinalLock()

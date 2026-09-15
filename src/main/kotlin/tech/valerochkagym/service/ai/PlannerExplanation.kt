@@ -8,7 +8,6 @@ import tech.valerochkagym.controller.model.ApprovalDraft
 import tech.valerochkagym.controller.model.CalendarDraftRequest
 import tech.valerochkagym.service.model.Identity
 import tech.valerochkagym.service.trainingproposal.TrainingProposalService
-import tools.jackson.databind.JsonNode
 import tools.jackson.databind.ObjectMapper
 
 data class PlannerExplanation(
@@ -34,7 +33,6 @@ internal object PlannerExplanationFactory {
     captured: CalendarCapturedContext,
     candidates: List<Map<String, Any>>,
     eligibleCount: Int,
-    output: JsonNode,
   ): PlannerExplanation {
     val selected = draft.exercises.map { it.exerciseId }.toSet()
     val latest = captured.workouts.maxByOrNull { it.finishedAtMillis }
@@ -56,42 +54,10 @@ internal object PlannerExplanationFactory {
           points[key] = (points[key] ?: 0) + (muscle["contribution"] as Int) * sets
         }
       }
-    val rationale = output["result"]["rationale"]
-    fun reason(key: String, allowed: Set<String>): String {
-      val value = rationale?.get(key)?.asString() ?: throw aiError("ai_invalid_response")
-      if (value !in allowed) throw aiError("ai_invalid_response")
-      return value
-    }
-    val selection =
-      reason("selection", setOf("CONTINUITY", "PRIORITY", "GOAL_BALANCE", "CONSTRAINTS"))
-    val repeat = reason("repeat", setOf("CONTINUITY", "PRIORITY", "LIMITED_OPTIONS", "NONE"))
-    val shortfall = reason("shortfall", setOf("VOLUME_LIMIT", "CONSTRAINTS", "NONE"))
-    if (
-      rationale != null &&
-        ((repeats.isEmpty() != (repeat == "NONE")) ||
-          (selection == "PRIORITY" && request.priorityMuscles.isEmpty()) ||
-          (repeat == "LIMITED_OPTIONS" && eligibleCount > selected.size))
-    )
-      throw aiError("ai_invalid_response")
-    val selectedMuscles = points.filterValues { it > 0 }.keys
-    if (
-      (selection == "PRIORITY" || repeat == "PRIORITY") &&
-        request.priorityMuscles.none { it in selectedMuscles }
-    )
-      throw aiError("ai_invalid_response")
-    val hasConditions =
-      request.gymIds.isNotEmpty() ||
-        request.excludedExerciseIds.isNotEmpty() ||
-        request.excludedEquipmentIds.isNotEmpty() ||
-        request.currentState != null ||
-        request.preferences != null ||
-        !captured.profile?.manualConstraints.isNullOrBlank()
-    if ((selection == "CONSTRAINTS" || shortfall == "CONSTRAINTS") && !hasConditions)
-      throw aiError("ai_invalid_response")
     val duration = PlannerDuration.seconds(draft.exercises)
     val minimum = PlannerDuration.minimumSeconds(request.availableDurationMinutes)
-    if (rationale != null && ((duration < minimum) == (shortfall == "NONE")))
-      throw aiError("ai_invalid_response")
+    // Android 1.3.62 accepts these legacy fields. Intent cannot be inferred from a plan:
+    // NONE denotes the absence of a repeat/shortfall; UNSPECIFIED makes no causal claim.
     return PlannerExplanation(
       "",
       1,
@@ -103,9 +69,9 @@ internal object PlannerExplanationFactory {
       repeats,
       latest?.finishedAtMillis,
       eligibleCount,
-      selection,
-      if (repeats.isEmpty()) "NONE" else repeat,
-      if (duration >= minimum) "NONE" else shortfall,
+      "UNSPECIFIED",
+      if (repeats.isEmpty()) "NONE" else "UNSPECIFIED",
+      if (duration >= minimum) "NONE" else "UNSPECIFIED",
     )
   }
 }
