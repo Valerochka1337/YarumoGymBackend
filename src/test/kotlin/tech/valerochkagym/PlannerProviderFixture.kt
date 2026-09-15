@@ -18,8 +18,13 @@ internal fun plannerFixture(input: AiProviderInput, output: JsonNode): JsonNode 
   val result = output["result"] as ObjectNode
   val exercises = result["exercises"]?.toList().orEmpty()
   val selected = exercises.map { it["exerciseId"]?.asString() }.toSet()
-  val latest = context["history"]["recentWorkouts"].firstOrNull()
-  val repeats = latest?.get("observations")?.any { it["exerciseId"].asString() in selected } == true
+  val repeats =
+    if (context.has("strengthFacts"))
+      context["strengthFacts"]["lastWorkoutExerciseIds"].any { it.asString() in selected }
+    else
+      context["history"]["recentWorkouts"].firstOrNull()?.get("observations")?.any {
+        it["exerciseId"].asString() in selected
+      } == true
   val seconds =
     exercises.sumOf { e ->
       val sets = e["plannedSets"]?.toList().orEmpty()

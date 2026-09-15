@@ -629,7 +629,7 @@ class BackendIntegrationTest {
         ),
       )
       assertEquals(
-        "21",
+        "22",
         command(
           "psql",
           "-U",
@@ -2173,6 +2173,233 @@ class BackendIntegrationTest {
     )
   }
 
+  @Test
+  fun `strength planner fixture pins profile effort and clear identities`() {
+    val bytes =
+      javaClass
+        .getResourceAsStream("/strength-planner-personalization-sync-contract.json")!!
+        .readBytes()
+    assertEquals(
+      "06b689084f63ff717951dfd3b82ff599120efe640dc1014e61d84d8a76eff15c",
+      java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") {
+        "%02x".format(it)
+      },
+    )
+    val fixture = json.readTree(bytes)
+    val owner = fixture["ownerId"].asString()
+    val profile = fixture["profile"]
+    val effort = fixture["effort"]
+    assertEquals("strength-planner-personalization", fixture["capability"].asString())
+    assertEquals(
+      UUID.nameUUIDFromBytes(
+          "ValerochkaGym.strength-planner-profile.v1:$owner".toByteArray(Charsets.UTF_8)
+        )
+        .toString(),
+      profile["id"].asString(),
+    )
+    assertEquals(profile["id"].asString(), profile["payload"]["syncId"].asString())
+    val workoutId = effort["payload"]["workoutId"].asString()
+    assertEquals(
+      UUID.nameUUIDFromBytes(
+          "ValerochkaGym.workout-effort.v1:$owner:$workoutId".toByteArray(Charsets.UTF_8)
+        )
+        .toString(),
+      effort["id"].asString(),
+    )
+    assertEquals(effort["id"].asString(), effort["payload"]["syncId"].asString())
+    assertEquals(effort["payload"]["workoutId"], fixture["clearEffort"]["workoutId"])
+    assertTrue(fixture["clearEffort"]["effort"].isNull)
+  }
+
+  @Test
+  fun `strength planner records require capability validate identity and cascade an old client workout delete`() {
+    val owner = account()
+    val token = owner["accessToken"].asString()
+    val ownerId = owner["userId"].asString()
+    val exerciseId = UUID.randomUUID().toString()
+    val workoutId = UUID.randomUUID().toString()
+    val profileId =
+      UUID.nameUUIDFromBytes(
+          "ValerochkaGym.strength-planner-profile.v1:$ownerId".toByteArray(Charsets.UTF_8)
+        )
+        .toString()
+    val effortId =
+      UUID.nameUUIDFromBytes(
+          "ValerochkaGym.workout-effort.v1:$ownerId:$workoutId".toByteArray(Charsets.UTF_8)
+        )
+        .toString()
+    val workout =
+      mapOf(
+        "name" to "Завершённая",
+        "note" to "",
+        "routineId" to null,
+        "startedAt" to 1L,
+        "finishedAt" to 2L,
+        "exercises" to emptyList<Any>(),
+        "gymIds" to emptyList<String>(),
+      )
+    assertEquals(
+      200,
+      push(
+          token,
+          listOf(change(exerciseId), change(workoutId, payload = workout, kind = "workout")),
+        )
+        .status,
+    )
+    val profile =
+      mapOf(
+        "schemaVersion" to 1,
+        "syncId" to profileId,
+        "updatedAt" to 3L,
+        "keyExercises" to listOf(mapOf("exerciseId" to exerciseId, "priority" to "HIGH")),
+      )
+    val profileRequest =
+      mapOf(
+        "operationId" to UUID.randomUUID(),
+        "changes" to listOf(change(profileId, payload = profile, kind = "strength_planner_profile")),
+      )
+    assertEquals(426, call("POST", "/sync", profileRequest, token).status)
+    assertEquals(
+      200,
+      call(
+          "POST",
+          "/sync",
+          profileRequest,
+          token,
+          capabilities = "strength-planner-personalization",
+        )
+        .status,
+    )
+    val effort =
+      mapOf(
+        "schemaVersion" to 1,
+        "syncId" to effortId,
+        "workoutId" to workoutId,
+        "updatedAt" to 4L,
+        "effort" to "HARD",
+      )
+    assertEquals(
+      200,
+      call(
+          "POST",
+          "/sync",
+          mapOf(
+            "operationId" to UUID.randomUUID(),
+            "changes" to listOf(change(effortId, payload = effort, kind = "workout_effort")),
+          ),
+          token,
+          capabilities = "strength-planner-personalization",
+        )
+        .status,
+    )
+    assertEquals(
+      400,
+      call(
+          "POST",
+          "/sync",
+          mapOf(
+            "operationId" to UUID.randomUUID(),
+            "changes" to listOf(change(effortId, 3, null, "workout_effort")),
+          ),
+          token,
+          capabilities = "strength-planner-personalization",
+        )
+        .status,
+    )
+    assertFalse(
+      call("GET", "/sync", token = token).body!!["records"].any {
+        it["kind"].asString() == "workout_effort"
+      }
+    )
+    val deleteOperation = UUID.randomUUID().toString()
+    val deleted = push(token, listOf(change(workoutId, 1, null, "workout")), deleteOperation)
+    assertEquals(200, deleted.status)
+    assertEquals(
+      deleted.body,
+      push(token, listOf(change(workoutId, 1, null, "workout")), deleteOperation).body,
+    )
+    assertEquals(
+      true,
+      db.queryForObject(
+        "SELECT deleted FROM records WHERE user_id=? AND kind='workout_effort' AND id=?",
+        Boolean::class.java,
+        UUID.fromString(ownerId),
+        UUID.fromString(effortId),
+      ),
+    )
+    assertEquals(
+      false,
+      call("GET", "/sync", token = token, capabilities = "strength-planner-personalization")
+        .body!!["records"]
+        .any { it["kind"].asString() == "workout_effort" && !it["deleted"].asBoolean() },
+    )
+  }
+
+  @Test
+  fun `strength profile rejects newly archived keys but retains and removes stale keys`() {
+    val standardId = UUID.randomUUID().toString()
+    db.update(
+      "INSERT INTO standard_records(kind,id,revision,archived,payload) VALUES ('exercise',?,1,false,?::jsonb)",
+      UUID.fromString(standardId),
+      json.writeValueAsString(exercise()),
+    )
+    fun profile(ownerId: String, updatedAt: Long, keys: List<Map<String, String>>) =
+      mapOf(
+        "schemaVersion" to 1,
+        "syncId" to
+          UUID.nameUUIDFromBytes(
+              "ValerochkaGym.strength-planner-profile.v1:$ownerId".toByteArray(Charsets.UTF_8)
+            )
+            .toString(),
+        "updatedAt" to updatedAt,
+        "keyExercises" to keys,
+      )
+    fun save(token: String, ownerId: String, revision: Long, payload: Map<String, Any>) =
+      call(
+        "POST",
+        "/sync",
+        mapOf(
+          "operationId" to UUID.randomUUID(),
+          "changes" to
+            listOf(
+              change(payload["syncId"] as String, revision, payload, "strength_planner_profile")
+            ),
+        ),
+        token,
+        capabilities = "strength-planner-personalization",
+      )
+    val owner = account()
+    val token = owner["accessToken"].asString()
+    val ownerId = owner["userId"].asString()
+    val original =
+      profile(ownerId, 1, listOf(mapOf("exerciseId" to standardId, "priority" to "HIGH")))
+    assertEquals(200, save(token, ownerId, 0, original).status)
+    db.update(
+      "UPDATE standard_records SET archived=true WHERE kind='exercise' AND id=?",
+      UUID.fromString(standardId),
+    )
+    val retained = original + mapOf("updatedAt" to 2L)
+    assertEquals(200, save(token, ownerId, 1, retained).status)
+    assertEquals(
+      200,
+      push(token, listOf(change(payload = mapOf("measuredAt" to 3L), kind = "measurement"))).status,
+    )
+    val cleared = original + mapOf("updatedAt" to 3L, "keyExercises" to emptyList<Any>())
+    assertEquals(200, save(token, ownerId, 2, cleared).status)
+    val newOwner = account()
+    val newOwnerId = newOwner["userId"].asString()
+    assertEquals(
+      400,
+      save(
+          newOwner["accessToken"].asString(),
+          newOwnerId,
+          0,
+          profile(newOwnerId, 1, listOf(mapOf("exerciseId" to standardId, "priority" to "HIGH"))),
+        )
+        .status,
+    )
+  }
+
   @BeforeEach
   fun clean() {
     // Match AuthService.cleanup lock order: its initial scheduled run can overlap fixture reset.
@@ -2407,7 +2634,7 @@ class BackendIntegrationTest {
 
   @Test
   fun `Liquibase has applied auth sync and admin changesets`() {
-    assertEquals(21, db.queryForObject("SELECT count(*) FROM databasechangelog", Int::class.java))
+    assertEquals(22, db.queryForObject("SELECT count(*) FROM databasechangelog", Int::class.java))
   }
 
   @Test

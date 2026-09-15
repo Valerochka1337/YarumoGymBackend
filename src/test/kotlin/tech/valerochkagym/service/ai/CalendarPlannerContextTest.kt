@@ -306,4 +306,72 @@ class CalendarPlannerContextTest {
         ". Schema unchanged. Token counts not measured.\n",
     )
   }
+
+  @Test
+  fun `strength context matches pinned compact fixture without raw workout identifiers`() {
+    val bytes =
+      Files.readAllBytes(Path.of("src/test/resources/strength-planner-context-contract.json"))
+    val hash =
+      java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") {
+        "%02x".format(it)
+      }
+    assertEquals("f4e3e6713c40a9df161b5b58714b031edb57e93951358e5cbf002f93f6568da1", hash)
+    val first = fact(1, 100, now - 2 * 86_400_000L)
+    val facts =
+      listOf(
+        first,
+        first.copy(setIndex = 1),
+        first.copy(setIndex = 2, legacyFields = listOf("reps")),
+        fact(1, 101, now - 10 * 86_400_000L, 60.0).copy(results = mapOf("reps" to 5.0)),
+      )
+    val captured =
+      capture(listOf(source(1)), facts)
+        .copy(
+          notes =
+            listOf(
+              mapOf(
+                "kind" to "WORKOUT_NOTE",
+                "canonicalId" to "private-workout-id",
+                "text" to "explicit opt-in note",
+              )
+            )
+        )
+    val selected =
+      CalendarCandidateSelector.eligible(
+        captured.candidates,
+        emptyList(),
+        request(),
+        facts,
+        "STRENGTH",
+      )
+    val compact =
+      StrengthPlannerFacts.compact(
+        facts,
+        setOf(id(1)),
+        emptySet(),
+        now,
+        mapOf(id(1) to mapOf("QUADS" to 100)),
+        listOf(StrengthPlannerFacts.Effort(id(100), "HARD")),
+      )
+    val selection =
+      StrengthPlannerFacts.Selection(
+        listOf(StrengthPlannerFacts.RankResult(id(1), 1, "HIGH")),
+        id(1),
+        "STRENGTH_RECENT_FALLBACK",
+      )
+    val context =
+      json.readTree(
+        CalendarPlannerContext.serialize(json, captured, request(), selected, 1, selection, compact)
+      )
+    assertEquals(json.readTree(bytes)["expectedFacts"], context["strengthFacts"])
+    assertEquals(id(1), context["selection"]["focusExerciseId"].asString())
+    assertFalse(context["strengthFacts"].toString().contains(id(100)))
+    assertFalse(context.toString().contains("private-workout-id"))
+    assertEquals("explicit opt-in note", context["notes"][0]["text"].asString())
+    assertFalse(context.toString().contains("STRENGTH_RECENT_FALLBACK"))
+    val legacy =
+      json.readTree(CalendarPlannerContext.serialize(json, captured, request(), selected, 1))
+    assertFalse(legacy.has("strengthFacts"))
+    assertFalse(legacy["selection"].has("focusExerciseId"))
+  }
 }

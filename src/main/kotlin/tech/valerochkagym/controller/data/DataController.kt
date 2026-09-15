@@ -21,7 +21,13 @@ class DataController(private val sync: SyncService) {
   private fun accept(raw: String?, response: HttpServletResponse): Set<String> {
     val requested = raw?.split(",")?.map { it.trim() }?.toSet().orEmpty()
     val accepted =
-      setOf("calendar-plans", "annotated-workout-writes", "exercise-hint", "profile")
+      setOf(
+          "calendar-plans",
+          "annotated-workout-writes",
+          "exercise-hint",
+          "profile",
+          "strength-planner-personalization",
+        )
         .intersect(requested)
     response.setHeader("X-Gym-Capabilities", accepted.joinToString(","))
     return accepted
@@ -36,7 +42,7 @@ class DataController(private val sync: SyncService) {
         Header(
           name = "X-Gym-Capabilities",
           description =
-            "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile; otherwise empty",
+            "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile, strength-planner-personalization; otherwise empty",
           schema = Schema(type = "string"),
         )
       ],
@@ -58,7 +64,7 @@ class DataController(private val sync: SyncService) {
         Header(
           name = "X-Gym-Capabilities",
           description =
-            "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile; otherwise empty",
+            "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile, strength-planner-personalization; otherwise empty",
           schema = Schema(type = "string"),
         )
       ],
@@ -81,7 +87,7 @@ class DataController(private val sync: SyncService) {
         Header(
           name = "X-Gym-Capabilities",
           description =
-            "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile; otherwise empty",
+            "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile, strength-planner-personalization; otherwise empty",
           schema = Schema(type = "string"),
         )
       ],
@@ -106,7 +112,7 @@ class DataController(private val sync: SyncService) {
         Header(
           name = "X-Gym-Capabilities",
           description =
-            "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile; otherwise empty",
+            "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile, strength-planner-personalization; otherwise empty",
           schema = Schema(type = "string"),
         )
       ],
@@ -140,7 +146,7 @@ class DataController(private val sync: SyncService) {
         Header(
           name = "X-Gym-Capabilities",
           description =
-            "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile; otherwise empty",
+            "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile, strength-planner-personalization; otherwise empty",
           schema = Schema(type = "string"),
         )
       ],

@@ -33,6 +33,8 @@ data class Change(
             "calendar_exception",
             "exercise_hint",
             "profile",
+            "strength_planner_profile",
+            "workout_effort",
           ) && raw != id.toString()
       )
         bad("UUID объекта должен быть каноническим")

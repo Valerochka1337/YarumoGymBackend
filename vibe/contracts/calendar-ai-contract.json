@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "scope": "Stage 21 server-created one-off AI proposal; PLAN-01 remains the only apply writer.",
   "fixture": {
     "plan01": {
@@ -81,7 +81,7 @@
     "mass": "latest permitted measurement via indexed measuredAt<=capturedAt LIMIT 1; no health ledger or InBody payload.",
     "notes": "includeNotes=false excludes all workout/set notes and candidate hints. Otherwise notes must be inside the capture window and <=capturedAt: workout timestamp=finishedAt, set timestamp=factTime, hint timestamp=updatedAt. Sort sourceTime DESC, kind ASC, canonical ID ASC, workoutId/sectionId/setIndex ASC; include at most 20 whole entries/16384 UTF-8 bytes.",
     "contextLimitBytes": 1048576,
-    "privacy": "Provider context contains only ProviderIntent, selected live candidates with muscle summaries, bounded profile/mass and opt-in notes/hints, captured local date and quality markers. Raw facts and actual/legacy weight tuples remain in ServerCapture only. No identity, exact DOB, revisions, credentials, raw archive, health/InBody data or future facts cross the provider boundary. Notes are data, never instructions; missing health disclosure neither gates calendar nor permits health data.",
+    "privacy": "Provider context contains only ProviderIntent, selected live candidates with muscle summaries, bounded profile/mass and opt-in notes/hints, captured local date and quality markers. Raw facts and actual/legacy weight tuples remain in ServerCapture only. No identity, exact DOB, revisions, credentials, raw archive, health/InBody data or future facts cross the provider boundary. Notes are data, never instructions; missing health disclosure neither gates calendar nor permits health data. STRENGTH compact facts explicitly override the legacy weights-server-only restriction as defined by strength-planner-context-contract.json; legacy fixture payloads are unchanged.",
     "sourcePayloadCaps": "Before JSON hydration, query only source row keys and encoded lengths. Reject if any eligible source row serialized UTF-8 exceeds 1048576 bytes or the aggregate eligible materialized source bytes exceeds 8388608; then hydrate only finite dependencies: gyms<=1000, equipment<=2000, profile<=1, mass<=1, hints<=1000. Existing sync accepts 10MiB request/16MiB account records; valid sync records may exceed the AI cap and remain untouched.",
     "finalCreator": "Calendar final creation uses a new typed bounded internal path with the finite live dependency graph from sourcePayloadCaps, EXISTS active-workout guard and captured server weight projection. It must not call unbounded validateLiveDraft or aiDraftWithHistoryWeights/all-owner scans. It reuses the same validators; normal approval and PLAN-01 equality remain unchanged.",
     "sourceRowAccounting": "ServerCapture.sourceRows contains one kind/key/utf8Bytes per fetched source row, not category totals. kind/key pairs are unique. aggregateEligibleSourceBytes is exactly their sum; projected notes do not double-count parent workout payload bytes. The same sourceRows shape is used for over-limit V-006 setup before admission, which intentionally does not validate as an accepted ServerCapture."
@@ -3381,6 +3381,12 @@
     "clock": "Admission/capture use base admittedAtMillis. The clock advances only at listed operation/barrier timestamps; normal success commits at committedAtMillis.",
     "sqlCounts": "Count vectors construct that exact number of source rows/facts using distinct UUIDv5(DNS, calendar-fixture-<zero-based-index>) and the base workout/fact shape. Byte vectors pad valid note strings to exact UTF8 serialized payload size before hydration. Assert source row count and bytes in fixture setup.",
     "ledger": "Valid requests reserve before capture: capture failures persist FAILED with sanitized code/status. Owner deletion removes all ledger rows; workers never recreate them. Invalid raw/request input creates no row.",
-    "privacy": "Facts including actual/legacy weight are server-only. Provider candidates contain only required identifiers and bounded mapped summary, never raw owner archive."
+    "privacy": "Facts including actual/legacy weight are server-only. Provider candidates contain only required identifiers and bounded mapped summary, never raw owner archive. STRENGTH compact facts explicitly override the legacy weights-server-only restriction as defined by strength-planner-context-contract.json; legacy fixture payloads are unchanged."
+  },
+  "strengthPersonalization": {
+    "contract": "strength-planner-context-contract.json",
+    "version": "strength-compact-v1",
+    "scope": "STRENGTH only",
+    "authorization": "Compact actual weights/reps, 7/28day aggregates, priorities/focus and effort may be passed to configured provider; no real call is part of implementation validation."
   }
 }
