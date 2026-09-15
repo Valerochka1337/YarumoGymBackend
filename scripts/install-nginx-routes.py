@@ -30,8 +30,8 @@ def marked_block(source: str) -> str:
     block = textwrap.dedent(source[start:line_end]).rstrip()
     if "location = /.well-known/assetlinks.json" not in block:
         raise ValueError("managed block is missing assetlinks.json")
-    if not re.search(r'location\s+~\s+"\^/r/\[A-Za-z0-9_-\]\{43\}\$"', block):
-        raise ValueError("managed block is missing the exact routine-share route")
+    if "location ^~ /r/" not in block:
+        raise ValueError("managed block is missing the routine-share prefix route")
     return block
 
 
@@ -55,7 +55,9 @@ def merge(current: str, source: str) -> str:
 
     if "location = /.well-known/assetlinks.json" in current:
         raise ValueError("installed nginx config has an unmanaged assetlinks route")
-    if re.search(r'location\s+~[^\n]*\^/r/', current):
+    if re.search(r"location\s+(?:\^~\s+)?/r/", current) or re.search(
+        r"location\s+~[^\n]*\^/r/", current
+    ):
         raise ValueError("installed nginx config has an unmanaged routine-share route")
 
     server = current.find(SERVER_NAME)
