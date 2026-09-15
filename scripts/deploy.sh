@@ -39,7 +39,7 @@ set_image() {
   mv .env.next .env
 }
 install_nginx_routes() {
-  local target backup candidate headers body asset_status share_status root_status
+  local target backup candidate headers share_headers body asset_status share_status root_status
   local host=api.valerochkagym.tech
   local origin="https://$host"
   local -a smoke_curl=(
@@ -62,6 +62,7 @@ install_nginx_routes() {
   backup=$(mktemp nginx.rollback.XXXXXX)
   candidate=$(mktemp nginx.candidate.XXXXXX)
   headers=$(mktemp nginx.headers.XXXXXX)
+  share_headers=$(mktemp nginx.share-headers.XXXXXX)
   body=$(mktemp nginx.body.XXXXXX)
   cp "$target" "$backup"
   restore_nginx() {
@@ -74,26 +75,27 @@ install_nginx_routes() {
      ! systemctl reload nginx; then
     echo 'Nginx route installation failed; restoring the previous server block.' >&2
     if ! restore_nginx; then echo 'Nginx rollback also failed' >&2; fi
-    rm -f "$backup" "$candidate" "$headers" "$body"
+    rm -f "$backup" "$candidate" "$headers" "$share_headers" "$body"
     return 1
   fi
   # Verify the Nginx instance we just reloaded. Public DNS can be cached or routed through
   # another edge, which must not make an otherwise valid on-host deployment roll back.
   asset_status=$("${smoke_curl[@]}" --dump-header "$headers" --output "$body" --write-out '%{http_code}' "$origin/.well-known/assetlinks.json" || true)
-  share_status=$("${smoke_curl[@]}" --output /dev/null --write-out '%{http_code}' "$origin/r/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" || true)
+  share_status=$("${smoke_curl[@]}" --dump-header "$share_headers" --output /dev/null --write-out '%{http_code}' "$origin/r/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" || true)
   root_status=$("${smoke_curl[@]}" --output /dev/null --write-out '%{http_code}' "$origin/" || true)
   printf 'Nginx smoke: assetlinks=%s share=%s root=%s\n' "$asset_status" "$share_status" "$root_status"
-  if [[ "$asset_status" != 200 || "$share_status" != 404 || "$root_status" != 200 ]] ||
+  if [[ "$asset_status" != 200 || "$root_status" != 200 ]] ||
      ! grep -Eiq '^content-type:[[:space:]]*application/json' "$headers" ||
      ! grep -q 'com.valerochka1337.valerochkagym' "$body" ||
-     ! grep -q 'delegate_permission/common.handle_all_urls' "$body"; then
+     ! grep -q 'delegate_permission/common.handle_all_urls' "$body" ||
+     ! grep -Eiq '^x-yarumo-route:[[:space:]]*routine-share' "$share_headers"; then
     echo 'Nginx App Links smoke check failed; restoring the previous server block.' >&2
     if ! restore_nginx; then echo 'Nginx rollback also failed' >&2; fi
-    rm -f "$backup" "$candidate" "$headers" "$body"
+    rm -f "$backup" "$candidate" "$headers" "$share_headers" "$body"
     return 1
   fi
   install -m 0644 "$target" nginx.conf
-  rm -f "$backup" "$candidate" "$headers" "$body"
+  rm -f "$backup" "$candidate" "$headers" "$share_headers" "$body"
 }
 set_image "$new_image"
 if ! "${compose[@]}" up -d --wait --wait-timeout 180 ||
