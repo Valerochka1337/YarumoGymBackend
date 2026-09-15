@@ -11,7 +11,7 @@ import tools.jackson.databind.ObjectMapper
 internal object CalendarPlannerContext {
   const val MAX_BYTES = 262144
   val instruction: String by lazy {
-    CalendarPlannerContext::class.java.getResource("/ai/calendar-planner-v2.txt")!!.readText()
+    CalendarPlannerContext::class.java.getResource("/ai/calendar-planner-v3.txt")!!.readText()
   }
 
   fun serialize(
@@ -144,12 +144,24 @@ internal object CalendarPlannerContext {
     val latest = recent.firstOrNull()
     val payload =
       mapOf(
-        "contextVersion" to "calendar-v2",
+        "contextVersion" to "calendar-v3",
         "intent" to
           mapOf(
             "timeZoneId" to request.timeZoneId,
             "plannedLocalDateTime" to local(request.startsAtMillis),
             "availableDurationMinutes" to request.availableDurationMinutes,
+            "desiredDurationMinutes" to request.availableDurationMinutes,
+            "durationSpec" to
+              mapOf(
+                "version" to "planner-duration-v1",
+                "strengthSetSeconds" to 45,
+                "defaultRestSeconds" to 90,
+                "transitionSeconds" to 90,
+                "minimumSeconds" to
+                  PlannerDuration.minimumSeconds(request.availableDurationMinutes),
+                "maximumSeconds" to request.availableDurationMinutes * 60,
+                "warmup" to "ONLY_LISTED_SETS_COUNTED_ONCE_NO_IMPLICIT_ALLOWANCE",
+              ),
             "priorityMuscles" to request.priorityMuscles,
             "currentState" to request.currentState,
             "preferences" to request.preferences,
@@ -173,6 +185,14 @@ internal object CalendarPlannerContext {
             "localDaysSinceLastFinished" to
               latest?.let {
                 ChronoUnit.DAYS.between(day(it.finishedAtMillis), day(captured.capturedAtMillis))
+              },
+            "lastLoadSummaryNotAdditionalVolume" to
+              latest?.let {
+                mapOf(
+                  "workoutId" to ref(it.id),
+                  "finishedLocalTime" to local(it.finishedAtMillis),
+                  "totals" to totals(byWorkout[it.id].orEmpty()),
+                )
               },
             "olderLookup" to "LATEST_THREE_FINISHED_PARENTS_BEFORE_WINDOW_ONLY",
             "recentWorkouts" to

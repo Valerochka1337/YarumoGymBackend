@@ -74,7 +74,7 @@ class CalendarAiCaptureIntegrationTest {
 
     override fun generate(input: AiProviderInput): JsonNode {
       calls++
-      return handler(input)
+      return plannerFixture(input, handler(input))
     }
   }
 
@@ -139,6 +139,7 @@ class CalendarAiCaptureIntegrationTest {
   lateinit var proposals: tech.valerochkagym.service.trainingproposal.TrainingProposalService
   @Autowired lateinit var testClock: MutableCalendarClock
   @Autowired lateinit var actions: AiActionService
+  @Autowired lateinit var explanations: tech.valerochkagym.service.ai.PlannerExplanationStore
   @Autowired lateinit var contexts: AiContextReader
   @Autowired lateinit var provider: FakeProvider
   @Autowired lateinit var hooks: BarrierHooks
@@ -1525,6 +1526,112 @@ class CalendarAiCaptureIntegrationTest {
       workout,
     )
     assertTrue(capture(owner).facts.isEmpty())
+  }
+
+  @Test
+  fun `synthetic latest load survives capture filtering prompt projection and explanation without double volume`() {
+    val owner = owner()
+    val first = exercise(owner)
+    val second = exercise(owner)
+    val last = UUID.randomUUID()
+    workout(owner, last, capturedAt - 3_600_000, capturedAt - 1_000, sets(first, 3, actual = 42.0))
+    val raw = json.readTree(rawRequest()) as ObjectNode
+    raw.put("availableDurationMinutes", 60)
+    provider.handler = { input ->
+      val context = json.readTree(input.context)
+      val history = context["history"]
+      assertEquals(
+        3,
+        history["lastLoadSummaryNotAdditionalVolume"]["totals"]["completedSets"].asInt(),
+      )
+      assertEquals(
+        3,
+        history["recentWorkouts"].sumOf {
+          it["observations"].sumOf { o -> o["completedSets"].asInt() }
+        },
+      )
+      assertEquals(
+        0,
+        history["remainingWindowWeeks"].sumOf { it["totals"]["completedSets"].asInt() },
+      )
+      assertEquals(
+        history["lastFinishedLocalTime"],
+        history["lastLoadSummaryNotAdditionalVolume"]["finishedLocalTime"],
+      )
+      assertEquals(60, context["intent"]["desiredDurationMinutes"].asInt())
+      json.readTree(
+        """{"result":{"name":"Synthetic session","exercises":[
+        {"exerciseId":"$first","restSeconds":90,"plannedSets":[{"reps":12,"durationSec":null},{"reps":10,"durationSec":null},{"reps":8,"durationSec":null},{"reps":6,"durationSec":null}]},
+        {"exerciseId":"$second","restSeconds":90,"plannedSets":[{"reps":12,"durationSec":null},{"reps":10,"durationSec":null},{"reps":8,"durationSec":null},{"reps":6,"durationSec":null}]}],
+        "rationale":{"selection":"GOAL_BALANCE","repeat":"CONTINUITY","shortfall":"VOLUME_LIMIT"}}}"""
+      )
+    }
+    val response = actions.calendar(owner, json.writeValueAsBytes(raw))
+    val explanation = explanations.read(owner, response.proposal.proposalId)
+    assertEquals(990L, explanation.estimatedSeconds)
+    assertEquals(2880L, explanation.minimumSeconds)
+    assertEquals(listOf(first.toString()), explanation.repeatedExerciseIds)
+    assertEquals(capturedAt - 1000, explanation.lastFinishedAtMillis)
+    assertEquals("VOLUME_LIMIT", explanation.shortfallReason)
+    assertEquals(
+      42.0,
+      response.proposal.snapshot.draft.exercises.first().plannedSets.first().weightKg,
+    )
+    assertEquals(1, provider.calls)
+    assertEquals(response, actions.calendar(owner, json.writeValueAsBytes(raw)))
+    assertEquals(1, db.queryForObject("SELECT count(*) FROM planner_explanations", Int::class.java))
+    assertEquals(
+      404,
+      assertThrows<ApiException> { explanations.read(owner(), response.proposal.proposalId) }.status,
+    )
+    assertFalse(json.valueToTree<JsonNode>(response.proposal).has("explanation"))
+  }
+
+  @Test
+  fun `broad pool gets only one duration correction and explanation preserves unresolved shortfall`() {
+    val owner = owner()
+    val exercises = (1..6).map { exercise(owner) }
+    provider.handler = { providerResponse(exercises.first()) }
+    val response = actions.calendar(owner, rawRequest())
+    assertEquals(2, provider.calls)
+    assertEquals(
+      "VOLUME_LIMIT",
+      explanations.read(owner, response.proposal.proposalId).shortfallReason,
+    )
+    assertEquals(1, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
+  }
+
+  @Test
+  fun `one correction can meet desired time with unchanged history capture`() {
+    val owner = owner()
+    val exercises = (1..6).map { exercise(owner) }
+    provider.handler = { input ->
+      if (provider.calls == 1) providerResponse(exercises.first())
+      else {
+        assertTrue(input.context.contains("CORRECTION:"))
+        json.valueToTree(
+          mapOf(
+            "result" to
+              mapOf(
+                "name" to "Full session",
+                "exercises" to
+                  exercises.map { id ->
+                    mapOf(
+                      "exerciseId" to id.toString(),
+                      "restSeconds" to 60,
+                      "plannedSets" to List(4) { mapOf("reps" to 10, "durationSec" to null) },
+                    )
+                  },
+              )
+          )
+        )
+      }
+    }
+    val response = actions.calendar(owner, rawRequest())
+    val explanation = explanations.read(owner, response.proposal.proposalId)
+    assertEquals(2, provider.calls)
+    assertEquals(2610, explanation.estimatedSeconds.toInt())
+    assertEquals("NONE", explanation.shortfallReason)
   }
 
   private fun rawRequest(

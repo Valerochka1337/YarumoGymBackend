@@ -10,6 +10,7 @@ data class AiProviderInput(
   val schema: JsonNode,
   val imageBase64: String? = null,
   val schemaName: String? = null,
+  val timeoutMillis: Long? = null,
 )
 
 interface AiProvider {

@@ -48,6 +48,13 @@ class AiDraftValidator(private val json: ObjectMapper) {
     return raw
   }
 
+  fun validatePlanner(raw: JsonNode): JsonNode {
+    val schema =
+      javaClass.getResourceAsStream("/ai/calendar-planner-output-v3.json")!!.use(json::readTree)
+    if (!matches(raw, schema, schema)) throw aiError("ai_invalid_response")
+    return raw
+  }
+
   private fun matches(n: JsonNode, s: JsonNode, root: JsonNode = s): Boolean {
     s["${'$'}ref"]?.let {
       return matches(n, resolve(it, root), root)
