@@ -401,6 +401,9 @@ function renderAiSettings(data) {
     fields[name]=el('input',{id:'ai-'+name,type:name==='baseUrl'?'url':'text',value,maxlength:name==='baseUrl'?2048:name==='coachModels'?4019:200,autocomplete:'off',spellcheck:'false'});
     form.append(el('label',{},label,fields[name]));
   }
+  fields.coachPrompt=el('textarea',{id:'ai-coachPrompt',rows:18,maxlength:16000,required:true,spellcheck:'false'});
+  fields.coachPrompt.value=data.coachPrompt || '';
+  form.append(el('label',{},'Системный промпт Live Coach',fields.coachPrompt),el('p',{class:'muted'},'Изменения промпта начнут действовать в течение 5 минут.'));
   const key=el('input',{id:'ai-apiKey',type:'password',maxlength:16384,autocomplete:'new-password',spellcheck:'false',disabled:!data.encryptionAvailable});
   const clear=el('input',{type:'checkbox',id:'ai-clearApiKey'});
   form.append(el('label',{},'Новый API-ключ',key),el('p',{class:'muted'},data.hasApiKey?'Ключ сохранён. Оставьте поле пустым, чтобы сохранить его.':'API-ключ ещё не задан.'),el('label',{class:'check'},clear,'Удалить сохранённый API-ключ'));
@@ -413,7 +416,7 @@ function renderAiSettings(data) {
     const version=requestVersion;
     try {
       const body={revision:data.revision,enabled:enabled.checked,clearApiKey:clear.checked};
-      for(const [name,input] of Object.entries(fields)) body[name]=name==='coachModels'?input.value.split(',').map(x=>x.trim()).filter(Boolean):input.value.trim();
+      for(const [name,input] of Object.entries(fields)) body[name]=name==='coachModels'?input.value.split(',').map(x=>x.trim()).filter(Boolean):name==='coachPrompt'?input.value:input.value.trim();
       if(key.value) body.apiKey=key.value;
       const result=await api('/ai-settings','PUT',body);
       key.value='';

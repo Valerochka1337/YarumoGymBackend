@@ -145,6 +145,21 @@ class HttpOpenAiChatCompletionsProviderTest {
   }
 
   @Test
+  fun `per call remaining budget bounds a correction request`() {
+    handler = {
+      Thread.sleep(400)
+      respond(it, envelope())
+    }
+    assertEquals(
+      "ai_timeout",
+      assertThrows(ApiException::class.java) {
+          provider(2000).generate(input().copy(timeoutMillis = 100))
+        }
+        .code,
+    )
+  }
+
+  @Test
   fun `slow headers and streaming body obey end to end deadline`() {
     handler = {
       Thread.sleep(400)

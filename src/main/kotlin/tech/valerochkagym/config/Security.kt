@@ -2,6 +2,7 @@ package tech.valerochkagym.config
 
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
+import org.springframework.http.HttpMethod
 import org.springframework.security.config.annotation.web.builders.HttpSecurity
 import org.springframework.security.config.http.SessionCreationPolicy
 import org.springframework.security.web.SecurityFilterChain
@@ -30,7 +31,17 @@ class Security {
       .httpBasic { it.disable() }
       .authorizeHttpRequests {
         it
-          .requestMatchers("/v1/catalog", "/v1/auth/**", "/health", "/actuator/health/**")
+          .requestMatchers("/v1/auth/**")
+          .permitAll()
+          .requestMatchers(
+            HttpMethod.GET,
+            "/v1/catalog",
+            "/v1/routine-shares/preview/**",
+            "/r/**",
+            "/.well-known/assetlinks.json",
+            "/health",
+            "/actuator/health/**",
+          )
           .permitAll()
           .anyRequest()
           .authenticated()

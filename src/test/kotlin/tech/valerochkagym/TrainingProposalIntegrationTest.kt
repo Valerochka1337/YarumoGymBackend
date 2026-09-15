@@ -16,11 +16,7 @@ import org.junit.jupiter.api.*
 import org.junit.jupiter.api.Assertions.*
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
-import org.springframework.boot.test.context.TestConfiguration
 import org.springframework.boot.test.web.server.LocalServerPort
-import org.springframework.context.annotation.Bean
-import org.springframework.context.annotation.Primary
-import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.test.context.DynamicPropertyRegistry
 import org.springframework.test.context.DynamicPropertySource
@@ -28,20 +24,17 @@ import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.postgresql.PostgreSQLContainer
 import tech.valerochkagym.controller.model.*
-import tech.valerochkagym.repository.trainingproposal.TrainingProposalAuthorSnapshots
 import tech.valerochkagym.service.ai.InternalAiProposalRequest
 import tech.valerochkagym.service.ai.TrainingProposalAiCreator
 import tech.valerochkagym.service.auth.AuthService
 import tech.valerochkagym.service.model.Identity
-import tech.valerochkagym.service.trainingproposal.DefaultDenyCoachRelationAuthority
-import tech.valerochkagym.service.trainingproposal.TrainingProposalAuthority
 import tech.valerochkagym.utils.Crypto
 import tools.jackson.databind.ObjectMapper
 
 @Testcontainers
 @SpringBootTest(
   webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-  classes = [Application::class, TrainingProposalIntegrationTest.Fakes::class],
+  classes = [Application::class],
 )
 class TrainingProposalIntegrationTest {
   companion object {
@@ -62,33 +55,11 @@ class TrainingProposalIntegrationTest {
     }
   }
 
-  class FakeAuthority : TrainingProposalAuthority {
-    var mode = "deny"
-
-    override fun requireCoachCapability(coachId: UUID, recipientId: UUID) {
-      when (mode) {
-        "allow" -> Unit
-        "throw" -> error("authority unavailable")
-        else -> throw tech.valerochkagym.controller.advice.ApiException(403, "forbidden", "denied")
-      }
-    }
-  }
-
-  @TestConfiguration
-  class Fakes {
-    @Bean @Primary fun proposalAuthority() = FakeAuthority()
-  }
-
   @Autowired lateinit var db: JdbcTemplate
   @Autowired lateinit var json: ObjectMapper
   @Autowired lateinit var crypto: Crypto
-  @Autowired
-  lateinit var proposalService: tech.valerochkagym.service.trainingproposal.TrainingProposalService
   @Autowired lateinit var ai: TrainingProposalAiCreator
   @Autowired lateinit var auth: AuthService
-  @Autowired lateinit var proposalAuthors: TrainingProposalAuthorSnapshots
-  @Autowired lateinit var fakeAuthority: FakeAuthority
-  @Autowired lateinit var defaultAuthority: DefaultDenyCoachRelationAuthority
   @LocalServerPort var port = 0
   private val client = HttpClient.newHttpClient()
 
@@ -107,14 +78,6 @@ class TrainingProposalIntegrationTest {
       "TRUNCATE sessions,refresh_tokens,email_challenges,google_nonces,rate_limits,users,standard_records CASCADE"
     )
     db.update("UPDATE catalog_state SET revision=0,active=false")
-    fakeAuthority.mode = "deny"
-  }
-
-  @Test
-  fun `fixture remains byte identical to accepted contract`() {
-    val bytes =
-      javaClass.classLoader.getResourceAsStream("training-proposals-contract.json")!!.readBytes()
-    assertEquals("65254ebf9aaa4062ebf8ef71df99c76876685ce10ec0bd2fa8645fced56ea998", sha256(bytes))
   }
 
   @Test
@@ -523,9 +486,6 @@ class TrainingProposalIntegrationTest {
         )
         .statusCode(),
     )
-    proposalAuthors.bindAuthenticatedCoach(
-      Identity(owner.id, owner.session, "${owner.id}@example.com")
-    )
     val code = "12345678"
     db.update(
       "INSERT INTO email_challenges(email,purpose,code_hash,expires_at,attempts) VALUES (?,'delete',?,TIMESTAMPTZ '2100-01-01',0)",
@@ -561,14 +521,6 @@ class TrainingProposalIntegrationTest {
       0,
       db.queryForObject("SELECT count(*) FROM users WHERE id=?", Int::class.java, owner.id),
     )
-    assertEquals(
-      0,
-      db.queryForObject(
-        "SELECT count(*) FROM training_proposal_authors WHERE historical_account_id=? AND live_account_id IS NOT NULL",
-        Int::class.java,
-        owner.id,
-      ),
-    )
     assertNotEquals(own.proposalId, otherProposal.proposalId)
   }
 
@@ -576,9 +528,6 @@ class TrainingProposalIntegrationTest {
   fun `invalid deletion code leaves recipient proposal journal intact`() {
     val owner = owner()
     proposal(owner)
-    proposalAuthors.bindAuthenticatedCoach(
-      Identity(owner.id, owner.session, "${owner.id}@example.com")
-    )
     db.update("DELETE FROM sync_heads WHERE user_id=?", owner.id)
     assertThrows(tech.valerochkagym.controller.advice.ApiException::class.java) {
       auth.delete(Identity(owner.id, owner.session, "${owner.id}@example.com"), "invalid")
@@ -594,14 +543,6 @@ class TrainingProposalIntegrationTest {
     assertEquals(
       1,
       db.queryForObject("SELECT count(*) FROM users WHERE id=?", Int::class.java, owner.id),
-    )
-    assertEquals(
-      owner.id,
-      db.queryForObject(
-        "SELECT live_account_id FROM training_proposal_authors WHERE historical_account_id=?",
-        UUID::class.java,
-        owner.id,
-      ),
     )
     assertEquals(
       0,
@@ -702,210 +643,6 @@ class TrainingProposalIntegrationTest {
         other.id,
       ),
     )
-  }
-
-  @Test
-  fun `coach author binding is idempotent for its matching live account`() {
-    val coach = owner()
-    val identity = Identity(coach.id, coach.session, "${coach.id}@example.com")
-    assertEquals(coach.id, proposalAuthors.bindAuthenticatedCoach(identity))
-    assertEquals(coach.id, proposalAuthors.bindAuthenticatedCoach(identity))
-    assertEquals(
-      coach.id,
-      db.queryForObject(
-        "SELECT live_account_id FROM training_proposal_authors WHERE historical_account_id=?",
-        UUID::class.java,
-        coach.id,
-      ),
-    )
-  }
-
-  @Test
-  fun `detached coach author snapshot is never reattached`() {
-    val coach = owner()
-    val identity = Identity(coach.id, coach.session, "${coach.id}@example.com")
-    proposalAuthors.bindAuthenticatedCoach(identity)
-    proposalAuthors.detachLiveAccount(coach.id)
-    assertThrows(tech.valerochkagym.controller.advice.ApiException::class.java) {
-      proposalAuthors.bindAuthenticatedCoach(identity)
-    }
-    assertEquals(
-      0,
-      db.queryForObject(
-        "SELECT count(*) FROM training_proposal_authors WHERE historical_account_id=? AND live_account_id IS NOT NULL",
-        Int::class.java,
-        coach.id,
-      ),
-    )
-  }
-
-  @Test
-  fun `coach proposal requires an immutable author snapshot`() {
-    val recipient = owner()
-    val coach = owner()
-    val relation = rawRelation(coach, recipient)
-    val now = java.sql.Timestamp.from(Instant.now())
-    fun insert(author: UUID?) =
-      db.update(
-        "INSERT INTO training_proposals(id,recipient_id,author_id,origin_relation_id,source,status,current_version,created_at,updated_at,expires_at) VALUES (?,?,?,?,'COACH','PENDING',1,?,?,?)",
-        UUID.randomUUID(),
-        recipient.id,
-        author,
-        relation,
-        now,
-        now,
-        java.sql.Timestamp.from(now.toInstant().plusSeconds(3600)),
-      )
-    assertThrows(DataIntegrityViolationException::class.java) { insert(null) }
-    assertThrows(DataIntegrityViolationException::class.java) { insert(UUID.randomUUID()) }
-    proposalAuthors.bindAuthenticatedCoach(
-      Identity(coach.id, coach.session, "${coach.id}@example.com")
-    )
-    assertEquals(1, insert(coach.id))
-  }
-
-  @Test
-  fun `edited coach approval requires authority and preserves its immutable author binding`() {
-    val coach = owner()
-    val recipient = owner()
-    val relation = rawRelation(coach, recipient)
-    fakeAuthority.mode = "allow"
-    val proposal =
-      proposalService.mutateCoach(
-        Identity(coach.id, coach.session, "${coach.id}@example.com"),
-        relation,
-        null,
-        json.writeValueAsBytes(
-          mapOf(
-            "operationId" to UUID.randomUUID(),
-            "expectedOwnerRevision" to 0,
-            "expectedCatalogRevision" to 0,
-            "draft" to draft(recipient),
-          )
-        ),
-        "CREATE_COACH_PROPOSAL",
-      ) as ProposalResponse
-    val original =
-      db.queryForMap(
-        "SELECT p.author_id,p.origin_relation_id,v.draft::text FROM training_proposals p JOIN training_proposal_versions v ON v.proposal_id=p.id AND v.version=1 WHERE p.id=?",
-        proposal.proposalId,
-      )
-    val raw = body(UUID.randomUUID(), 1, draft(recipient).copy(name = "Правка получателя"))
-    fakeAuthority.mode = "deny"
-    assertEquals(
-      403,
-      call("POST", "/v1/training-proposals/${proposal.proposalId}/approve", recipient, raw, true)
-        .statusCode(),
-    )
-    assertEquals(
-      0,
-      db.queryForObject(
-        "SELECT count(*) FROM training_proposal_receipts WHERE proposal_id=?",
-        Int::class.java,
-        proposal.proposalId,
-      ),
-    )
-    fakeAuthority.mode = "allow"
-    val response =
-      call("POST", "/v1/training-proposals/${proposal.proposalId}/approve", recipient, raw, true)
-    assertEquals(200, response.statusCode(), response.body())
-    assertEquals(
-      original,
-      db.queryForMap(
-        "SELECT p.author_id,p.origin_relation_id,v.draft::text FROM training_proposals p JOIN training_proposal_versions v ON v.proposal_id=p.id AND v.version=1 WHERE p.id=?",
-        proposal.proposalId,
-      ),
-    )
-    assertEquals(coach.id, original["author_id"])
-    assertEquals(relation, original["origin_relation_id"])
-  }
-
-  @Test
-  fun `confirmed coach deletion detaches audit identity and preserves another recipients accepted result`() {
-    val coach = owner()
-    val recipient = owner()
-    fakeAuthority.mode = "allow"
-    val relation = rawRelation(coach, recipient)
-    val accepted =
-      proposalService.mutateCoach(
-        Identity(coach.id, coach.session, "${coach.id}@example.com"),
-        relation,
-        null,
-        json.writeValueAsBytes(
-          mapOf(
-            "operationId" to UUID.randomUUID(),
-            "expectedOwnerRevision" to 0,
-            "expectedCatalogRevision" to 0,
-            "draft" to draft(recipient),
-          )
-        ),
-        "CREATE_COACH_PROPOSAL",
-      ) as tech.valerochkagym.controller.model.ProposalResponse
-    assertEquals(
-      200,
-      call(
-          "POST",
-          "/v1/training-proposals/${accepted.proposalId}/approve",
-          recipient,
-          body(UUID.randomUUID(), 1, draft(recipient)),
-          true,
-        )
-        .statusCode(),
-    )
-    val coachIdentity = Identity(coach.id, coach.session, "${coach.id}@example.com")
-    proposalAuthors.bindAuthenticatedCoach(coachIdentity)
-    assertThrows(DataIntegrityViolationException::class.java) {
-      db.update(
-        "UPDATE training_proposals SET origin_relation_id=NULL WHERE id=?",
-        accepted.proposalId,
-      )
-    }
-    val code = "87654321"
-    db.update(
-      "INSERT INTO email_challenges(email,purpose,code_hash,expires_at,attempts) VALUES (?,'delete',?,TIMESTAMPTZ '2100-01-01',0)",
-      "${coach.id}@example.com",
-      crypto.hash("${coach.id}@example.com:delete:$code"),
-    )
-    auth.delete(coachIdentity, code)
-    assertEquals(
-      0,
-      db.queryForObject("SELECT count(*) FROM users WHERE id=?", Int::class.java, coach.id),
-    )
-    assertEquals(
-      1,
-      db.queryForObject(
-        "SELECT count(*) FROM training_proposal_authors WHERE historical_account_id=? AND live_account_id IS NULL",
-        Int::class.java,
-        coach.id,
-      ),
-    )
-    assertEquals(
-      coach.id,
-      db.queryForObject(
-        "SELECT author_id FROM training_proposals WHERE id=?",
-        UUID::class.java,
-        accepted.proposalId,
-      ),
-    )
-    assertEquals(
-      1,
-      db.queryForObject(
-        "SELECT count(*) FROM training_proposal_receipts WHERE proposal_id=?",
-        Int::class.java,
-        accepted.proposalId,
-      ),
-    )
-    assertEquals(
-      2,
-      db.queryForObject(
-        "SELECT count(*) FROM records WHERE user_id=? AND kind IN ('routine','calendar_plan')",
-        Int::class.java,
-        recipient.id,
-      ),
-    )
-    assertThrows(tech.valerochkagym.controller.advice.ApiException::class.java) {
-      proposalAuthors.bindAuthenticatedCoach(coachIdentity)
-    }
   }
 
   @Test
@@ -1278,69 +1015,6 @@ class TrainingProposalIntegrationTest {
       db.execute("DROP TRIGGER fail_proposal_plan ON records")
       db.execute("DROP FUNCTION fail_proposal_plan()")
     }
-  }
-
-  @Test
-  fun `coach authority default and failing seam deny revoke without configuration writes`() {
-    val coach = owner()
-    assertThrows(tech.valerochkagym.controller.advice.ApiException::class.java) {
-      defaultAuthority.requireCoachCapability(coach.id, UUID.randomUUID())
-    }
-    val recipient = owner()
-    proposalAuthors.bindAuthenticatedCoach(
-      Identity(coach.id, coach.session, "${coach.id}@example.com")
-    )
-    val relation = rawRelation(coach, recipient)
-    val id = UUID.randomUUID()
-    val now = Instant.now()
-    val timestamp = java.sql.Timestamp.from(now)
-    db.update(
-      "INSERT INTO training_proposals(id,recipient_id,author_id,origin_relation_id,source,status,current_version,created_at,updated_at,expires_at) VALUES (?,?,?,?,'COACH','PENDING',1,?,?,?)",
-      id,
-      recipient.id,
-      coach.id,
-      relation,
-      timestamp,
-      timestamp,
-      java.sql.Timestamp.from(now.plusSeconds(3600)),
-    )
-    db.update(
-      "INSERT INTO training_proposal_versions(proposal_id,version,origin_relation_id,draft,owner_revision,catalog_revision,created_at) VALUES (?,1,?,?::jsonb,0,0,?)",
-      id,
-      relation,
-      json.writeValueAsString(draft(recipient)),
-      timestamp,
-    )
-    assertEquals(
-      403,
-      call("POST", "/v1/training-proposals/$id/revoke", coach, "{\"version\":1}").statusCode(),
-    )
-    fakeAuthority.mode = "throw"
-    assertEquals(
-      403,
-      call("POST", "/v1/training-proposals/$id/revoke", coach, "{\"version\":1}").statusCode(),
-    )
-    assertEquals(
-      0,
-      db.queryForObject(
-        "SELECT count(*) FROM records WHERE user_id=? AND kind IN ('routine','calendar_plan')",
-        Int::class.java,
-        recipient.id,
-      ),
-    )
-  }
-
-  private fun rawRelation(coach: Owner, recipient: Owner): UUID {
-    val id = UUID.randomUUID()
-    db.update(
-      "INSERT INTO coach_relations(id,coach_id,recipient_id,live_coach_id,live_recipient_id,state,calendar,completed_workouts,created_at) VALUES (?,?,?,?,?,'ACTIVE',true,true,now())",
-      id,
-      coach.id,
-      recipient.id,
-      coach.id,
-      recipient.id,
-    )
-    return id
   }
 
   private fun owner(): Owner {

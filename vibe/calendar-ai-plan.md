@@ -9,7 +9,7 @@ The route is additive `POST /v1/ai/calendar-drafts`. It captures bounded owner d
 | ID | Criterion |
 |---|---|
 | B-AC-001 | Exact Ready revisions, future zone/slot, live selected-gym intersection and nonempty bounded candidates are required before provider admission. |
-| B-AC-002 | `relations.guards(owner) → catalog → owner head → session` is used at reserve/capture/final; provider I/O has no DB lock; stale/deleted/session races create no proposal. |
+| B-AC-002 | `catalog → owner head → authenticated session` is used at reserve/capture/final; provider I/O has no DB lock; stale/deleted/session races create no proposal. |
 | B-AC-003 | Context is owner-only, backend-built and bounded; it excludes raw health/InBody, credentials, prompts, provider data and future facts. |
 | B-AC-004 | Goal groups order the **context only** before priority/coverage/UUID. They do not require a proposal prefix/seed or promise physiology. |
 | B-AC-005 | Strength weight is latest eligible same-exercise `actualWeightKg` including explicit null, else legacy `weightKg`; other exercise/target/original data never contributes. |
@@ -27,7 +27,7 @@ raw request → validate + SHA-256 → reserve owner/requestId ledger
  → replay normalized terminal receipt/outcome; a new requestId is required to retry
 ```
 
-Migration `013-calendar-ai-attempts.sql` follows `012-coach-relations.sql`. It owns `(owner_id, request_id)`, exact raw digest, lease and sanitized terminal outcome/typed receipt identity only. It stores no raw request, prompt or provider input/output/error. States are `PROCESSING`, `COMMITTING`, `SUCCEEDED`, `FAILED`, `CANCELLED`, `INTERRUPTED`; 45 seconds runs from admission and the 60-second lease converts abandoned work to `INTERRUPTED`, never a same-ID restart. Same ID/different digest is `409 ai_request_conflict`; processing/committing is `409 ai_in_progress`; success replays without provider/new proposal; terminal failure replays sanitized outcome. Actor deletion cleans its attempt rows in the actual proposal-creator deletion order.
+Migration `013-calendar-ai-attempts.sql` follows the training-proposals schema. It owns `(owner_id, request_id)`, exact raw digest, lease and sanitized terminal outcome/typed receipt identity only. It stores no raw request, prompt or provider input/output/error. States are `PROCESSING`, `COMMITTING`, `SUCCEEDED`, `FAILED`, `CANCELLED`, `INTERRUPTED`; 45 seconds runs from admission and the 60-second lease converts abandoned work to `INTERRUPTED`, never a same-ID restart. Same ID/different digest is `409 ai_request_conflict`; processing/committing is `409 ai_in_progress`; success replays without provider/new proposal; terminal failure replays sanitized outcome. Actor deletion cleans its attempt rows in the actual proposal-creator deletion order.
 
 DeferredResult and worker share a cancellation/commit ticket. A timeout/disconnect before final ownership atomically creates `CANCELLED` and no proposal. Under the declared lock order, final transaction claims `COMMITTING` immediately before insert while deadline remains live. The winner writes proposal plus `SUCCEEDED` receipt in that transaction; later callback cannot undo a committed winner. Failed DB commit leaves no proposal/success and terminalizes failure.
 

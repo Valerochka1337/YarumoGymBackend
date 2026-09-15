@@ -139,6 +139,7 @@ class CalendarAiCaptureIntegrationTest {
   lateinit var proposals: tech.valerochkagym.service.trainingproposal.TrainingProposalService
   @Autowired lateinit var testClock: MutableCalendarClock
   @Autowired lateinit var actions: AiActionService
+  @Autowired lateinit var explanations: tech.valerochkagym.service.ai.PlannerExplanationStore
   @Autowired lateinit var contexts: AiContextReader
   @Autowired lateinit var provider: FakeProvider
   @Autowired lateinit var hooks: BarrierHooks
@@ -275,6 +276,96 @@ class CalendarAiCaptureIntegrationTest {
       sets(tupleTarget, 1, completedAt = factTime, actual = 20.0),
     )
     assertEquals(20.0, projectedWeight(tupleOwner, tupleTarget))
+  }
+
+  @Test
+  fun `built in gym is captured and background job publishes its proposal`() {
+    val owner = owner()
+    val exercise = exercise(owner, equipment = listOf("rack"), known = true)
+    val gym = UUID.randomUUID()
+    db.update("UPDATE catalog_state SET active=true")
+    db.update(
+      "INSERT INTO standard_records(kind,id,revision,archived,payload) VALUES ('gym',?,9,false,?::jsonb)",
+      gym,
+      json.writeValueAsString(
+        mapOf(
+          "name" to "Built in gym",
+          "updatedAt" to capturedAt,
+          "exerciseIds" to emptyList<String>(),
+          "inventoryConfigured" to true,
+          "equipmentIds" to listOf("rack"),
+        )
+      ),
+    )
+    val context = providerContext(owner, gymIds = listOf(gym.toString()))
+    assertEquals(
+      listOf(exercise.toString()),
+      context["candidates"].toList().map { it["exerciseId"].asString() },
+    )
+    provider.handler = { providerResponse(exercise) }
+    val accepted = jobs.submit(owner, rawRequest(gymIds = listOf(gym.toString())))
+    jobs.runNext()
+    val result = jobs.status(owner, UUID.fromString(accepted.requestId))
+    assertEquals("READY", result.state, result.errorCode)
+    assertEquals(listOf(gym.toString()), result.result!!.proposal.snapshot.draft.gymIds)
+  }
+
+  @Test
+  fun `personal gym overrides built in gym with the same identity`() {
+    val owner = owner()
+    val personalExercise = exercise(owner, equipment = listOf("rack"), known = true)
+    exercise(owner, equipment = listOf("bench"), known = true)
+    val gym = UUID.randomUUID()
+    db.update("UPDATE catalog_state SET active=true")
+    db.update(
+      "INSERT INTO standard_records(kind,id,revision,archived,payload) VALUES ('gym',?,9,false,?::jsonb)",
+      gym,
+      json.writeValueAsString(
+        mapOf("inventoryConfigured" to true, "equipmentIds" to listOf("bench"))
+      ),
+    )
+    record(
+      owner,
+      "gym",
+      gym,
+      mapOf("inventoryConfigured" to true, "equipmentIds" to listOf("rack")),
+    )
+    val context = providerContext(owner, gymIds = listOf(gym.toString()))
+    assertEquals(
+      listOf(personalExercise.toString()),
+      context["candidates"].toList().map { it["exerciseId"].asString() },
+    )
+  }
+
+  @Test
+  fun `archived and disabled catalog gyms remain unavailable`() {
+    val owner = owner()
+    exercise(owner)
+    val gym = UUID.randomUUID()
+    db.update("UPDATE catalog_state SET active=true")
+    db.update(
+      "INSERT INTO standard_records(kind,id,revision,archived,payload) VALUES ('gym',?,9,true,?::jsonb)",
+      gym,
+      json.writeValueAsString(
+        mapOf("inventoryConfigured" to true, "equipmentIds" to emptyList<String>())
+      ),
+    )
+    assertEquals(
+      "ai_context_stale",
+      assertThrows<ApiException> {
+          actions.calendar(owner, rawRequest(gymIds = listOf(gym.toString())))
+        }
+        .code,
+    )
+    db.update("UPDATE standard_records SET archived=false WHERE kind='gym' AND id=?", gym)
+    db.update("UPDATE catalog_state SET active=false")
+    assertEquals(
+      "ai_context_stale",
+      assertThrows<ApiException> {
+          actions.calendar(owner, rawRequest(gymIds = listOf(gym.toString())))
+        }
+        .code,
+    )
   }
 
   @Test
@@ -449,7 +540,7 @@ class CalendarAiCaptureIntegrationTest {
       simple.map { it["exerciseId"].asString() },
     )
     assertEquals(150, simple.first()["priority"].asInt())
-    assertEquals(150, simple.first()["coverage"].asInt())
+    assertFalse(simple.first().has("coverage"))
 
     reset()
     val boundedOwner = owner()
@@ -458,7 +549,7 @@ class CalendarAiCaptureIntegrationTest {
     val context =
       providerContext(boundedOwner, priority = allMuscles().map { it["muscle"] as String })
     assertEquals(2500, context["candidates"][0]["priority"].asInt())
-    assertEquals(20_480_000, context["candidates"][0]["coverage"].asInt())
+    assertEquals(8192, context["history"]["recentWorkouts"][0]["completedSetsInWindow"].asInt())
 
     repeat(500) { offset ->
       workout(
@@ -489,6 +580,17 @@ class CalendarAiCaptureIntegrationTest {
     assertTrue(plan.contains("records_calendar_ai_history"), plan)
     assertTrue(plan.contains("Limit"), plan)
     assertFalse(plan.contains("jsonb_array_elements"), plan)
+    val olderPlan =
+      db
+        .query(
+          "EXPLAIN (COSTS OFF) SELECT id,octet_length(payload::text) FROM records WHERE user_id=? AND kind='workout' AND NOT deleted AND jsonb_typeof(payload->'finishedAt')='number' AND ((payload->>'finishedAt')::numeric)<? ORDER BY ((payload->>'finishedAt')::numeric) DESC,id ASC LIMIT 3",
+          { rs, _ -> rs.getString(1) },
+          boundedOwner.userId,
+          capturedAt - 28L * 86_400_000,
+        )
+        .joinToString("\n")
+    assertTrue(olderPlan.contains("records_calendar_ai_history"), olderPlan)
+    assertTrue(olderPlan.contains("Limit"), olderPlan)
   }
 
   @Test
@@ -1334,6 +1436,204 @@ class CalendarAiCaptureIntegrationTest {
       0,
       db.queryForObject("SELECT count(*) FROM records WHERE kind='calendar_plan'", Int::class.java),
     )
+  }
+
+  @Test
+  fun `older finished parents are bounded and never restore monthly load or assigned weight`() {
+    val owner = owner()
+    val target = exercise(owner)
+    repeat(5) { index ->
+      val time = capturedAt - (40L + index) * 86_400_000
+      workout(
+        owner,
+        UUID.randomUUID(),
+        time - 1000,
+        time,
+        sets(target, 2, actual = 90.0),
+        note = "old-private-note",
+      )
+    }
+    val otherOwner = owner()
+    workout(
+      otherOwner,
+      UUID.randomUUID(),
+      capturedAt - 30L * 86_400_000 - 1000,
+      capturedAt - 30L * 86_400_000,
+      sets(target, 1, actual = 999.0),
+    )
+    val context = capture(owner, includeNotes = true)
+    assertTrue(context.facts.isEmpty())
+    assertEquals(3, context.workouts.size)
+    assertEquals(6, context.olderFacts.size)
+    assertTrue(context.notes.isEmpty())
+    assertNull(projectedWeight(owner, target))
+    val history = providerContext(owner)["history"]
+    assertEquals(40, history["localDaysSinceLastFinished"].asInt())
+    assertEquals(0, history["remainingWindowWeeks"].sumOf { it["totals"]["completedSets"].asInt() })
+    assertEquals(6, history["recentWorkouts"].sumOf { it["completedSetsOutsideWindow"].asInt() })
+  }
+
+  @Test
+  fun `actual result presence and corrected deleted unfinished history remain truthful`() {
+    val owner = owner()
+    val target = exercise(owner, type = "CARDIO")
+    val workout = UUID.randomUUID()
+    val set =
+      mapOf(
+        "isCompleted" to true,
+        "actualReps" to null,
+        "reps" to 8,
+        "actualDurationSec" to 120,
+        "durationSec" to 90,
+        "actualSpeedKmh" to 7.5,
+        "actualInclinePct" to 2.0,
+        "setType" to "CARDIO",
+      )
+    workout(
+      owner,
+      workout,
+      capturedAt - 1000,
+      capturedAt - 1,
+      listOf(
+        mapOf(
+          "exerciseId" to target.toString(),
+          "sectionId" to UUID.randomUUID().toString(),
+          "sets" to listOf(set, set + ("isCompleted" to false)),
+        )
+      ),
+    )
+    val fact = capture(owner).facts.single()
+    assertNull(fact.results["reps"])
+    assertFalse("reps" in fact.legacyFields)
+    assertEquals(120.0, fact.results["durationSec"])
+    assertEquals(7.5, fact.results["speedKmh"])
+    assertEquals("WORKOUT_START_FALLBACK", fact.timeSource)
+    db.update(
+      "UPDATE records SET payload=jsonb_set(payload,'{exercises,0,sets,0,actualDurationSec}','180') WHERE user_id=? AND id=?",
+      owner.userId,
+      workout,
+    )
+    assertEquals(180.0, capture(owner).facts.single().results["durationSec"])
+    db.update(
+      "UPDATE records SET payload=jsonb_set(payload,'{finishedAt}','null') WHERE user_id=? AND id=?",
+      owner.userId,
+      workout,
+    )
+    assertTrue(capture(owner).facts.isEmpty())
+    db.update(
+      "UPDATE records SET deleted=true,payload=null WHERE user_id=? AND id=?",
+      owner.userId,
+      workout,
+    )
+    assertTrue(capture(owner).facts.isEmpty())
+  }
+
+  @Test
+  fun `contradictory obsolete rationale does not reject plan or override factual explanation`() {
+    val owner = owner()
+    val first = exercise(owner)
+    val second = exercise(owner)
+    val last = UUID.randomUUID()
+    workout(owner, last, capturedAt - 3_600_000, capturedAt - 1_000, sets(first, 3, actual = 42.0))
+    val raw = json.readTree(rawRequest()) as ObjectNode
+    raw.put("availableDurationMinutes", 60)
+    provider.handler = { input ->
+      val context = json.readTree(input.context)
+      val history = context["history"]
+      assertEquals(
+        3,
+        history["lastLoadSummaryNotAdditionalVolume"]["totals"]["completedSets"].asInt(),
+      )
+      assertEquals(
+        3,
+        history["recentWorkouts"].sumOf {
+          it["observations"].sumOf { o -> o["completedSets"].asInt() }
+        },
+      )
+      assertEquals(
+        0,
+        history["remainingWindowWeeks"].sumOf { it["totals"]["completedSets"].asInt() },
+      )
+      assertEquals(
+        history["lastFinishedLocalTime"],
+        history["lastLoadSummaryNotAdditionalVolume"]["finishedLocalTime"],
+      )
+      assertEquals(60, context["intent"]["desiredDurationMinutes"].asInt())
+      json.readTree(
+        """{"result":{"name":"Synthetic session","exercises":[
+        {"exerciseId":"$first","restSeconds":90,"plannedSets":[{"reps":12,"durationSec":null},{"reps":10,"durationSec":null},{"reps":8,"durationSec":null},{"reps":6,"durationSec":null}]},
+        {"exerciseId":"$second","restSeconds":90,"plannedSets":[{"reps":12,"durationSec":null},{"reps":10,"durationSec":null},{"reps":8,"durationSec":null},{"reps":6,"durationSec":null}]}],
+        "rationale":{"selection":"invented","repeat":"NONE","shortfall":"NONE"}}}"""
+      )
+    }
+    val response = actions.calendar(owner, json.writeValueAsBytes(raw))
+    val explanation = explanations.read(owner, response.proposal.proposalId)
+    assertEquals(990L, explanation.estimatedSeconds)
+    assertEquals(2880L, explanation.minimumSeconds)
+    assertEquals(listOf(first.toString()), explanation.repeatedExerciseIds)
+    assertEquals(capturedAt - 1000, explanation.lastFinishedAtMillis)
+    assertEquals("UNSPECIFIED", explanation.selectionReason)
+    assertEquals("UNSPECIFIED", explanation.repeatReason)
+    assertEquals("UNSPECIFIED", explanation.shortfallReason)
+    assertEquals(
+      42.0,
+      response.proposal.snapshot.draft.exercises.first().plannedSets.first().weightKg,
+    )
+    assertEquals(1, provider.calls)
+    assertEquals(response, actions.calendar(owner, json.writeValueAsBytes(raw)))
+    assertEquals(1, db.queryForObject("SELECT count(*) FROM planner_explanations", Int::class.java))
+    assertEquals(
+      404,
+      assertThrows<ApiException> { explanations.read(owner(), response.proposal.proposalId) }.status,
+    )
+    assertFalse(json.valueToTree<JsonNode>(response.proposal).has("explanation"))
+  }
+
+  @Test
+  fun `AI answers without rationale succeed through one correction and preserve factual shortfall`() {
+    val owner = owner()
+    val exercises = (1..6).map { exercise(owner) }
+    provider.handler = { providerResponse(exercises.first()) }
+    val response = actions.calendar(owner, rawRequest())
+    assertEquals(2, provider.calls)
+    assertEquals(
+      "UNSPECIFIED",
+      explanations.read(owner, response.proposal.proposalId).shortfallReason,
+    )
+    assertEquals(1, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
+  }
+
+  @Test
+  fun `one correction can meet desired time with unchanged history capture`() {
+    val owner = owner()
+    val exercises = (1..6).map { exercise(owner) }
+    provider.handler = { input ->
+      if (provider.calls == 1) providerResponse(exercises.first())
+      else {
+        assertTrue(input.context.contains("CORRECTION:"))
+        json.valueToTree(
+          mapOf(
+            "result" to
+              mapOf(
+                "name" to "Full session",
+                "exercises" to
+                  exercises.map { id ->
+                    mapOf(
+                      "exerciseId" to id.toString(),
+                      "restSeconds" to 60,
+                      "plannedSets" to List(4) { mapOf("reps" to 10, "durationSec" to null) },
+                    )
+                  },
+              )
+          )
+        )
+      }
+    }
+    val response = actions.calendar(owner, rawRequest())
+    val explanation = explanations.read(owner, response.proposal.proposalId)
+    assertEquals(2, provider.calls)
+    assertEquals(2610, explanation.estimatedSeconds.toInt())
+    assertEquals("NONE", explanation.shortfallReason)
   }
 
   private fun rawRequest(

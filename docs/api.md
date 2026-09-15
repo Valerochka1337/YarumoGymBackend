@@ -1,8 +1,30 @@
 # Протокол API
 
 Полный список endpoints и моделей: [OpenAPI](openapi.json).
-Кроме `/v1/auth/*`, запросы требуют `Authorization: Bearer <accessToken>`.
+Кроме `/v1/auth/*` и публичного предпросмотра программ, запросы требуют `Authorization: Bearer <accessToken>`.
 Владелец определяется только сессией. Ошибки: `{code,message}`.
+
+## Неизменяемые ссылки на программы
+
+Автор создаёт снимок личной синхронизированной программы через
+`POST /v1/routine-shares` с `{operationId,routineId,expectedRevision,catalogRevision}`.
+`expectedRevision` — revision всей account head, а не revision записи программы. Ответ содержит
+`{shareId,url,routineId,createdAt}`. Одна программа имеет до 50 активных ссылок; их возвращает
+`GET /v1/routine-shares?routineId={uuid}&limit=1..50`, а
+`POST /v1/routine-shares/{shareId}/revoke` с `{operationId}` отзывает ссылку идемпотентно.
+
+Публичный `GET /v1/routine-shares/preview/{token}` возвращает только
+`{title,estimatedDurationSeconds,exercises}`. У упражнения есть `{exerciseKey,name,type,sets,restSeconds}`;
+подход содержит только nullable `weightKg,reps,durationSec,speedKmh,inclinePct`. Ответ не раскрывает
+автора, исходную программу, зал, заметки, историю или профиль. `GET /r/{token}` выдаёт тот же allowlisted
+снимок как HTML со ссылкой на актуальный Android APK. Оба публичных ответа имеют `Cache-Control: no-store`,
+`Referrer-Policy: no-referrer` и `X-Robots-Tag: noindex, nofollow`.
+
+Получатель вызывает `POST /v1/routine-shares/preview/{token}/import` с `{operationId}`. Сервер создаёт
+независимую личную программу и возвращает `{routineId,revision,importedAt,alreadyImported}`. Повтор
+возвращает исходный receipt; после отзыва даже повтор импорта получает `404 share_unavailable`, а уже
+сохранённая копия остаётся у получателя. Стандартные упражнения сохраняют canonical UUID. Личное
+упражнение снимка получает отдельный UUID получателя и никогда не объединяется по имени.
 
 ## Запись и повтор запросов
 
@@ -82,7 +104,7 @@ nullable. equipmentRequirementState — KNOWN или UNKNOWN; KNOWN с пуст�
 Клиент передаёт `X-Gym-Capabilities: calendar-plans` для `GET/POST /v1/sync`,
 `GET /v1/sync/changes` и обоих вариантов `GET /v1/records/*`. Заголовок допускает
 список через запятую; сервер возвращает в `X-Gym-Capabilities` только пересечение
-с поддержанными возможностями. Поддерживаются `calendar-plans`, `annotated-workout-writes`, `exercise-hint`, `profile`; ответ содержит только запрошенное пересечение.
+с поддержанными возможностями. Поддерживаются `calendar-plans`, `annotated-workout-writes`, `exercise-hint`, `profile`, `strength-planner-personalization`; ответ содержит только запрошенное пересечение.
 Неизвестные capability игнорируются. Клиент считает отсутствующий/пустой ответ
 отсутствием поддержки и сохраняет неподдерживаемые локальные данные и outbox.
 
@@ -248,6 +270,56 @@ syncId, ownerId и измерений. Unknown не заполняется до�
 Контракт: `src/test/resources/basic-profile-sync-contract.json`, SHA-256
 `1bec288ad8d841efaf645af13ac5ea1cbe2b53c841846589c8101cfe3f524ed6`.
 
+## Персонализация силового планирования — capability `strength-planner-personalization`
+
+Два owner-bound sync records открываются только после согласования capability. Их точный
+wire fixture — `src/test/resources/strength-planner-personalization-sync-contract.json`.
+
+- `strength_planner_profile` — единственный неудаляемый record владельца. Его `id` и
+  `payload.syncId` равны `UUID.nameUUIDFromBytes(UTF8("ValerochkaGym.strength-planner-profile.v1:" + ownerUuid))`.
+  Payload: `{schemaVersion:1,syncId,updatedAt,keyExercises}`. Список содержит 0…5 уникальных
+  живых `STRENGTH` exercise IDs, сначала `HIGH`, затем `NORMAL`, и UUID в каждом приоритете.
+  Пустой список очищает выбор. Устаревшая ссылка после архивации остаётся читаемой и может быть
+  удалена, но новая ссылка обязана вести на live силовое упражнение.
+- `workout_effort` — `{schemaVersion:1,syncId,workoutId,updatedAt,effort}`; effort равен
+  `null`, `EASY`, `MODERATE` или `HARD`. ID вычисляется из
+  `ValerochkaGym.workout-effort.v1:<ownerUuid>:<workoutUuid>`. Живой record допускается только
+  для завершённой живой тренировки. При удалении workout сервер добавляет tombstone effort в ту
+  же revision, включая удаление старым клиентом без capability; точный replay остаётся идемпотентным.
+
+Без capability оба kind скрываются до snapshot/changes pagination, list и single-record lookup;
+POST с ними отклоняется `426 capability_required` до ledger. Rollout server-first: клиент хранит
+локальные payload и pending bytes до согласования, не синтезирует удаление при downgrade.
+
+### Контекст планировщика для цели STRENGTH
+
+Сервер применяет прежние ограничения доступности/архива/оборудования, затем детерминированно
+ранжирует до 24 силовых кандидатов с учётом ключей HIGH/NORMAL, давности, базовых упражнений
+и недавних повторов. Первое упражнение становится обязательным `selection.focusExerciseId`:
+ответ без него отклоняется целиком. Недостаток альтернатив допускает ограниченный повтор;
+причина этого решения остаётся серверной.
+
+`calendar-strength-v1` передаёт `strengthFacts` версии `strength-compact-v1`: до 29 последних
+совместимых пар вес/повторы для выбранных и доступных ключевых упражнений, объём и частоту
+за скользящие 7/28 дней, группы мышц по каталогу и добровольную оценку усилия. Последний
+совместимый результат ищется и за пределами обычных трёх старых тренировок. ACTUAL означает
+сохранённое фактическое поле; явный null не заменяется плановым значением. Числа из LEGACY
+не передаются модели; прежний серверный перенос старого веса сохраняется. Объём kg×reps
+суммируется только при фактическом весе и фактических повторах. Окна пересекаются, складывать
+их нельзя. `lastWorkoutExerciseIds` содержит только выбранные exercise IDs последней
+завершённой тренировки. Оценки усилия упорядочены от новой тренировки к старой; null — очистка.
+
+Для STRENGTH прежняя детализация истории, ссылки на наблюдения и масса тела не входят в
+контекст. Сырые тренировки, идентификаторы владельца/тренировок/подходов и health ledger не
+добавляются. Из усилия не выводятся восстановление, травма или готовность. Модель по-прежнему
+не назначает вес; сервер переносит его из истории. Остальные цели сохраняют прежний путь.
+Контракт и точный пример: `src/test/resources/strength-planner-context-contract.json`.
+Изменения записей инвалидируют план через существующую проверку owner/catalog revision.
+
+Отдельное исправление factual rationale (`6be6994`) не включено в эту ветку: при подготовке
+публикации нужно согласовать общие участки `CalendarAiService` и тестового provider fixture.
+Эта доработка не вводит новых требований rationale или полей схемы ответа.
+
 ## Ручные медицинские записи: health-ledger-v1
 
 Выделенные `/v1/health-ledger/*` и `/v1/health-ai-disclosure` требуют Bearer и
@@ -288,44 +360,6 @@ Health storage limits: `gym.health.max-bytes=209715200` и
 Проверка всей операции атомарна до выделения событий; exact replay бесплатен.
 Превышение — 409 `health_account_limit`. Это storage quota, не AI usage limit.
 
-### Coach relations (stage 23)
-
-`/v1/coach-relations` is a dedicated consent API. It never uses `/sync`, `/records`, coach journal,
-health, or AI disclosure as a cross-account read surface. The frozen JSON contract is
-`vibe/contracts/coach-relations-contract.json` (byte-identical test resource).
-
-- `POST /invitations` takes `{operationId}` and returns a one-time visible seven-day token.
-  Exact create replay returns `409 invite_token_not_replayable`; no stored plaintext token exists.
-- `POST /invitations/accept` takes `{operationId,token,calendar,completedWorkouts}`. Both consent
-  booleans are mandatory. Same recipient and grants can replay; another recipient cannot consume it.
-- `GET /clients`, `GET /coaches`: bounded directory, actor/mode/revision-bound cursor.
-- `POST /{relationId}/revoke`: bilateral terminal revoke. It never changes accepted recipient records.
-- `GET /{relationId}/calendar`, `GET /{relationId}/completed-workouts`: separate grants, at most 50
-  items and 1 MiB. Only allowlisted fields are projected. Completed sets expose actual metrics;
-  explicit actual null remains null, absent actual field falls back to its legacy completed metric.
-  Unfinished sets, notes, target/original metrics and health are excluded. Valid empty/large historical
-  arrays retain their existing limits. A single item over the response byte budget returns 413.
-- `POST /{relationId}/training-proposals`, `PUT /{relationId}/training-proposals/{proposalId}`,
-  `POST /{relationId}/training-proposals/{proposalId}/revoke`: server derives COACH author and immutable
-  origin relation. Old relations and legacy proposals without origin never authorize pending approval.
-  The legacy PLAN-01 revoke endpoint remains denied because it has no operation ID.
-  PLAN-01 accepts recipient-edited previews after live validation. The author version remains immutable; approval retains the exact accepted request bytes for replay and audit.
-
-All relation mutators validate strict UTF-8 JSON with a 512 KiB budget and bind operation UUID globally
-per actor to action, route, resource tuple and raw SHA-256. Create/accept ledgers omit raw secret bodies;
-other ledgers retain exact request bytes. Projection cursors expire after 15 minutes, and revision
-changes return `409 relation_snapshot_changed`.
-
-Coach-relations cryptography derives separate invite-token and cursor keys from `gym.token-pepper`.
-`gym.coach-relations.key-version` defaults to 1. During pepper rotation set a new version and retain
-prior keys through `gym.coach-relations.retained-key-versions` (comma-separated version integers),
-`gym.coach-relations.keys.<version>.pepper` and
-`gym.coach-relations.keys.<version>.retire-at-millis`. The retirement timestamp must be at least eight
-days after the last issuance under that version. Only current-version keys issue new tokens; retained
-keys only verify. After retirement invitations resolve as absent and cursors return `cursor_key_retired`.
-Keep pepper material in deployment secret configuration, never in source control.
-
-
 ## Live Coach
 
 Authenticated `GET /v1/ai/coach-models`, `POST /v1/ai/coach-turn` and `POST /v1/ai/coach-turn/stream` provide a bounded stateless tool-calling exchange. Request/response contract, limits and model settings: [Live Coach contract](../vibe/live-coach-plan.md). Workout operations execute only in the Android application after local validation and confirmation. These routes do not require a synced active workout or read health/profile records.
@@ -363,3 +397,11 @@ A lease fence and proposal/result transaction prohibit late publication and dupl
 proposals. The original synchronous calendar endpoint remains available for old clients.
 Clients should use bounded polling/WorkManager backoff; accepting a job does not promise
 immediate execution. Past requested dates become `EXPIRED`, never silently rescheduled.
+
+## Промпт Live Coach
+
+`GET /v1/ai/coach-prompt` (Bearer) возвращает `{ "prompt": "..." }`.
+Текст хранится в `ai_settings.coach_prompt`; сервер кэширует его на 5 минут на каждом экземпляре.
+Редактирование: `coachPrompt` в существующем `PUT /admin/api/ai-settings` с проверкой `revision`.
+Пустой текст, NUL и более 16000 символов отклоняются; переносы строк сохраняются.
+Сначала развернуть сервер с миграцией, затем Android. Старые клиенты продолжают использовать встроенный текст.

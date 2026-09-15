@@ -44,3 +44,18 @@ databaseChangeLog:
   - include:
       file: 015-calendar-draft-jobs.sql
       relativeToChangelogFile: true
+  - include:
+      file: 016-coach-prompt.sql
+      relativeToChangelogFile: true
+  - include:
+      file: 017-planner-explanations.sql
+      relativeToChangelogFile: true
+  - include:
+      file: 018-remove-coach-relations.sql
+      relativeToChangelogFile: true
+  - include:
+      file: 019-routine-shares.sql
+      relativeToChangelogFile: true
+  - include:
+      file: 020-strength-planner-personalization.sql
+      relativeToChangelogFile: true

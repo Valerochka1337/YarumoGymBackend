@@ -13,9 +13,13 @@ import tech.valerochkagym.service.model.Identity
 @RequestMapping("/v1/ai")
 class LiveCoachController(
   private val service: CoachTurnService,
+  private val prompts: CoachPromptService,
   private val limits: RateLimiter,
   private val auth: tech.valerochkagym.service.auth.AuthService,
 ) {
+  @GetMapping("/coach-prompt")
+  fun prompt(@AuthenticationPrincipal identity: Identity) = prompts.get()
+
   @GetMapping("/coach-models")
   fun models(@AuthenticationPrincipal identity: Identity) = service.catalog()
 

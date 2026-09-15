@@ -11,7 +11,7 @@
     "otherTerminal": "explicit rejected/revoked/stale/expired error, never success",
     "resultRevisionIsSyncCursor": false,
     "sameOperationChangedBytes": "409 proposal_operation_conflict",
-    "transaction": "catalog→recipient head→active relation when COACH→proposal→auth/revocation; all mutation paths share order, recheck session/relation/context after locks",
+    "transaction": "catalog→recipient head→proposal→auth/revocation; mutations recheck session and context after locks",
     "writes": [
       "one new PERSONAL routine with server UUID; note empty, positions derived, timestamp server-owned",
       "one calendar_plan with server UUID referencing routine",
@@ -74,9 +74,9 @@
   },
   "androidApply": "full authoritative BackendSync normal transaction applies server UUID records+baseline+projection key+actual response cursor; preserve preexisting outbox; never manual second insert/dirty clone/second configuration POST; owner+active guard before/after/in transaction",
   "author": {
-    "accountId": "null for typed internal AI; UUID for COACH",
+    "accountId": "null for the typed internal AI creator",
     "clientCanSelectAiActor": false,
-    "kind": ["AI", "COACH"],
+    "kind": ["AI"],
     "recipientId": "authenticated recipient UUID"
   },
   "context": "server-captured owner and catalog revisions; stale relevant context rejects before approval; exact accepted retry bypasses changed context only after recipient authentication and session-revision recheck",
@@ -177,21 +177,20 @@
       {"name": "approve", "method": "POST", "path": "/{proposalId}/approve", "pathParameterSchema": "#/$defs/Uuid", "requestSchema": "#/$defs/ApprovalRequest", "successStatus": 200, "responseSchema": "#/$defs/AcceptedResult", "requiredCapability": "calendar-plans"},
       {"name": "acceptedResult", "method": "GET", "path": "/{proposalId}/accepted-result", "pathParameterSchema": "#/$defs/Uuid", "requestSchema": null, "successStatus": 200, "responseSchema": "#/$defs/AcceptedResult", "authorization": "recipient only"},
       {"name": "reject", "method": "POST", "path": "/{proposalId}/reject", "pathParameterSchema": "#/$defs/Uuid", "requestSchema": "#/$defs/RejectRequest", "successStatus": 200, "responseSchema": "#/$defs/DecisionResponse"},
-      {"name": "revoke", "method": "POST", "path": "/{proposalId}/revoke", "pathParameterSchema": "#/$defs/Uuid", "requestSchema": "#/$defs/RevokeRequest", "successStatus": 200, "responseSchema": "#/$defs/DecisionResponse", "authorization": "author COACH only while relation active; AI revoke internal only"}
     ],
-    "creation": "AI uses internal service principal; stage-23 coach entry invokes shared service after relation authorization; no public client source/actor selector in PLAN-01",
+    "creation": "AI uses the typed internal service entry point; no public client source or actor selector exists",
     "listCursor": "opaque stable creation-sequence pagination watermark; response is items,nextCursor"
   },
   "errorMatrix": [
     {"status": 400, "code": "invalid_request", "when": "malformed JSON, duplicate/unknown/missing field, invalid UUID/type/bound/cross-field value"},
     {"status": 401, "code": "unauthorized", "when": "missing, expired or revoked authentication"},
-    {"status": 403, "code": "forbidden", "when": "wrong participant/role, client AI spoof, absent or failing coach authority"},
+    {"status": 403, "code": "forbidden", "when": "client attempts to select an internal AI actor"},
     {"status": 404, "code": "proposal_not_found", "when": "proposal is absent or intentionally hidden from caller"},
     {"status": 409, "code": "proposal_operation_conflict", "when": "same recipient operationId is rebound to different proposal/version/raw request bytes"},
     {"status": 409, "code": "proposal_version_conflict", "when": "requested version is not current; UI outcome needs_refresh"},
     {"status": 409, "code": "proposal_rejected", "when": "operation targets REJECTED proposal"},
     {"status": 409, "code": "proposal_revoked", "when": "operation targets REVOKED proposal"},
-    {"status": 409, "code": "proposal_stale", "when": "locked owner/catalogue/relation/context prerequisite changed; UI outcome needs_refresh"},
+    {"status": 409, "code": "proposal_stale", "when": "locked owner/catalogue/context prerequisite changed; UI outcome needs_refresh"},
     {"status": 409, "code": "proposal_expired", "when": "seven-day expiry elapsed; UI outcome needs_refresh"},
     {"status": 409, "code": "proposal_not_approved", "when": "accepted-result requested while proposal has no accepted result"},
     {"status": 409, "code": "active_workout", "when": "owner active-workout guard blocks approval"},
@@ -343,27 +342,11 @@
           }
         }
       },
-      "RevokeRequest": {
+      "Author": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["version"],
-        "properties": {"version": {"$ref": "#/$defs/PositiveVersion"}}
-      },
-      "Author": {
-        "oneOf": [
-          {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["kind", "accountId"],
-            "properties": {"kind": {"const": "AI"}, "accountId": {"type": "null"}}
-          },
-          {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["kind", "accountId"],
-            "properties": {"kind": {"const": "COACH"}, "accountId": {"$ref": "#/$defs/Uuid"}}
-          }
-        ]
+        "required": ["kind", "accountId"],
+        "properties": {"kind": {"const": "AI"}, "accountId": {"type": "null"}}
       },
       "ProposalSnapshot": {
         "type": "object",
@@ -385,7 +368,7 @@
           "proposalId": {"$ref": "#/$defs/Uuid"},
           "author": {"$ref": "#/$defs/Author"},
           "recipientId": {"$ref": "#/$defs/Uuid"},
-          "source": {"enum": ["AI", "COACH"]},
+          "source": {"enum": ["AI"]},
           "status": {"enum": ["PENDING", "APPROVED", "REJECTED", "REVOKED", "STALE"]},
           "currentVersion": {"$ref": "#/$defs/PositiveVersion"},
           "createdAt": {"$ref": "#/$defs/EpochMillis"},
@@ -467,10 +450,9 @@
     "same-op-exact-retry-after-response-loss",
     "same-op-changed-byte-or-proposal-conflict",
     "different-op-after-approved-same-IDs",
-    "approve-vs-reject-revoke-relation-revoke",
+    "approve-vs-reject",
     "catalog-or-head-change-before-lock",
     "client-spoof-AI-denied",
-    "missing-or-throwing-authority-denied",
     "new-device-full-sync-no-duplicate-outbox",
     "active-start-before-Room-apply",
     "A-B-A-journal-owner-isolation",
@@ -481,8 +463,8 @@
     "unknown-missing-duplicate-field-rejected",
     "each-planned-set-type-boundary-and-cross-type-field-rejected"
   ],
-  "privacy": "recipient retains own read; coach reads/mutations require active accepted relation, absence/error deny; health/profile/notes never shared implicitly",
+  "privacy": "a user retains access only to their own proposals; health, profile and notes are never shared implicitly",
   "states": ["PENDING", "APPROVED", "REJECTED", "REVOKED", "STALE"],
   "version": "positive integer immutable snapshots; newer version invalidates prior preview",
-  "weightOrigin": "only AI inferred weights are forced null without same-exercise history; explicit coach/recipient weights valid under typed bounds"
+  "weightOrigin": "only AI inferred weights are forced null without same-exercise history; explicit user-entered weights valid under typed bounds"
 }

@@ -38,6 +38,22 @@ class SyncService(
   private val crypto: Crypto,
   private val jdbc: org.springframework.jdbc.core.JdbcTemplate,
 ) {
+  companion object {
+    const val strengthPlannerCapability = "strength-planner-personalization"
+    private const val strengthPlannerProfileKind = "strength_planner_profile"
+    private const val workoutEffortKind = "workout_effort"
+  }
+
+  private fun strengthPlannerProfileId(owner: UUID): UUID =
+    UUID.nameUUIDFromBytes(
+      "ValerochkaGym.strength-planner-profile.v1:$owner".toByteArray(Charsets.UTF_8)
+    )
+
+  private fun workoutEffortId(owner: UUID, workout: UUID): UUID =
+    UUID.nameUUIDFromBytes(
+      "ValerochkaGym.workout-effort.v1:$owner:$workout".toByteArray(Charsets.UTF_8)
+    )
+
   private fun head(user: UUID, exclusive: Boolean): Long {
     postgres.ensureHead(user)
     return (if (exclusive) heads.writeLock(user) else heads.readLock(user)).revision
@@ -91,6 +107,15 @@ class SyncService(
       throw ApiException(426, "capability_required", "Требуется возможность calendar-plans")
     if ("exercise-hint" !in capabilities && incoming.changes.any { it.kind == "exercise_hint" })
       throw ApiException(426, "capability_required", "Требуется возможность exercise-hint")
+    if (
+      strengthPlannerCapability !in capabilities &&
+        incoming.changes.any { it.kind in setOf(strengthPlannerProfileKind, workoutEffortKind) }
+    )
+      throw ApiException(
+        426,
+        "capability_required",
+        "Требуется возможность $strengthPlannerCapability",
+      )
     val request =
       incoming.copy(
         changes =
@@ -140,8 +165,27 @@ class SyncService(
           "catalog_stale",
           "Обновите каталог перед сохранением зависимых данных",
         )
+      val changes = request.changes.toMutableList()
+      request.changes
+        .filter { it.kind == "workout" && it.deleted }
+        .forEach { parent ->
+          val childId = workoutEffortId(user, parent.id)
+          val child = existing[RecordKey(workoutEffortKind, childId)]
+          if (
+            child?.deleted == false &&
+              changes.none { it.kind == workoutEffortKind && it.id == childId }
+          )
+            changes +=
+              tech.valerochkagym.controller.model.Change(
+                workoutEffortKind,
+                childId,
+                child.revision,
+                true,
+                null,
+              )
+        }
       val revision = previous + 1
-      request.changes.forEach { change ->
+      changes.forEach { change ->
         val key = RecordKey(change.kind, change.id)
         if (change.kind !in RecordValidator.kinds || change.baseRevision < 0)
           bad("Некорректный тип или версия объекта")
@@ -151,6 +195,32 @@ class SyncService(
             "standard_read_only",
             "Создайте личную копию стандартного объекта",
           )
+        if (change.kind == strengthPlannerProfileKind) {
+          if (change.deleted) bad("Профиль силы нельзя удалить")
+          if (
+            change.id != strengthPlannerProfileId(user) ||
+              change.payload?.get("syncId")?.asString() != change.id.toString()
+          )
+            bad("Профиль силы не соответствует владельцу")
+        }
+        if (change.kind == workoutEffortKind) {
+          if (
+            change.deleted &&
+              changes.none {
+                it.kind == "workout" && it.deleted && workoutEffortId(user, it.id) == change.id
+              }
+          )
+            bad("Удаление оценки требует удаления тренировки в том же запросе")
+          if (!change.deleted && change.payload?.get("syncId")?.asString() != change.id.toString())
+            bad("Оценка не соответствует владельцу")
+          if (!change.deleted) {
+            val workoutId =
+              runCatching { UUID.fromString(change.payload!!["workoutId"].asString()) }.getOrNull()
+                ?: bad("Оценка не соответствует тренировке")
+            if (change.id != workoutEffortId(user, workoutId))
+              bad("Оценка не соответствует тренировке")
+          }
+        }
         val old = existing[key]
         if (
           change.kind == "workout" &&
@@ -221,7 +291,7 @@ class SyncService(
         }
       validator.references(
         existing + common,
-        request.changes.map { RecordKey(it.kind, it.id) }.toSet(),
+        changes.map { RecordKey(it.kind, it.id) }.toSet(),
         before,
       )
       validator.archivedReferences(
@@ -229,7 +299,7 @@ class SyncService(
         before,
         commonRows.filter { it.archived }.map { RecordKey(it.kind, it.id) }.toSet(),
       )
-      request.changes.forEach { change ->
+      changes.forEach { change ->
         recordRows.save(
           RecordEntity(
             user,
@@ -241,7 +311,7 @@ class SyncService(
           )
         )
       }
-      request.changes
+      changes
         .filter { it.kind == "workout" && it.deleted }
         .forEach {
           jdbc.update(
@@ -302,7 +372,9 @@ class SyncService(
   private fun visible(kind: String, capabilities: Set<String>) =
     ("calendar-plans" in capabilities || kind !in RecordValidator.calendarKinds) &&
       ("exercise-hint" in capabilities || kind != "exercise_hint") &&
-      ("profile" in capabilities || kind != "profile")
+      ("profile" in capabilities || kind != "profile") &&
+      (strengthPlannerCapability in capabilities ||
+        kind !in setOf(strengthPlannerProfileKind, workoutEffortKind))
 
   private fun hasSetNotes(payload: tools.jackson.databind.JsonNode?): Boolean =
     payload?.get("exercises")?.any { section ->

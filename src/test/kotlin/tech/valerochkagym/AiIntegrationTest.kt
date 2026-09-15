@@ -624,6 +624,10 @@ class AiIntegrationTest {
             )
           },
       )
+    assertEquals(401, call("/v1/ai/coach-prompt").statusCode())
+    val prompt = call("/v1/ai/coach-prompt", a)
+    assertEquals(200, prompt.statusCode())
+    assertTrue(json.readTree(prompt.body())["prompt"].asString().contains("Live Coach"))
     assertEquals(401, call("/v1/ai/coach-models").statusCode())
     assertEquals(401, call("/v1/ai/coach-turn", body = request).statusCode())
     val catalog = call("/v1/ai/coach-models", a)
@@ -974,7 +978,7 @@ class AiIntegrationTest {
         java.nio.file.Path.of("src/test/resources/calendar-ai-contract.json")
       )
     assertEquals(
-      "42714ea6086c8d7349543cfdb3d11cfac86d04fe67b15ec743ff388f4e31b18e",
+      "b66b834f596b24e85569c23c841cb0c82ee256ef5f6ee595e12d2dc51209d3ee",
       java.security.MessageDigest.getInstance("SHA-256").digest(calendar).joinToString("") {
         "%02x".format(it)
       },

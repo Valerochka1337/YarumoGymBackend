@@ -169,14 +169,17 @@ test('standard template editor saves ordered exercises rest sets and shared gyms
 
 
 test('AI settings keep the stored key write-only and save with CSRF and revision',async t=>{
-  const data={revision:3,enabled:true,baseUrl:'https://provider.test',textModel:'text',visionModel:'vision',coachModel:'coach',coachModels:['coach'],hasApiKey:true,encryptionAvailable:true};
+  const data={coachPrompt:'Исходный промпт',revision:3,enabled:true,baseUrl:'https://provider.test',textModel:'text',visionModel:'vision',coachModel:'coach',coachModels:['coach'],hasApiKey:true,encryptionAvailable:true};
   const ui=await setup({
     'GET /admin/api/ai-settings':()=>({data}),
-    'PUT /admin/api/ai-settings':body=>({data:{...data,revision:4,textModel:body.textModel}}),
+    'PUT /admin/api/ai-settings':body=>({data:{...data,revision:4,textModel:body.textModel,coachPrompt:body.coachPrompt}}),
   });
   t.after(()=>ui.dom.window.close());
   ui.w.document.querySelector('[data-view=ai]').click();
   await until(()=>ui.w.document.querySelector('#ai-settings-form'));
+  const prompt=ui.w.document.getElementById('ai-coachPrompt');
+  assert.equal(prompt.value,'Исходный промпт');
+  prompt.value='  Новый промпт\nВторая строка  ';
   const key=ui.w.document.getElementById('ai-apiKey');
   assert.equal(key.type,'password');assert.equal(key.value,'');
   ui.w.document.getElementById('ai-textModel').value='updated';
@@ -184,6 +187,7 @@ test('AI settings keep the stored key write-only and save with CSRF and revision
   await until(()=>ui.requests.some(r=>r.method==='PUT'));
   const request=ui.requests.find(r=>r.method==='PUT');
   assert.equal(request.headers['X-CSRF-Token'],'test-csrf');
+  assert.equal(request.body.coachPrompt,'  Новый промпт\nВторая строка  ');
   assert.equal(request.body.revision,3);assert.equal(request.body.textModel,'updated');
   assert.equal(Object.hasOwn(request.body,'apiKey'),false);
   assert.equal(ui.w.localStorage.length,0);

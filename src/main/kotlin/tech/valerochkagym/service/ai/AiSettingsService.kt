@@ -82,6 +82,7 @@ class AiSettingsEdit(
   val coachModels: List<String>,
   val apiKey: String? = null,
   val clearApiKey: Boolean = false,
+  val coachPrompt: String? = null,
 )
 
 data class AiSettingsView(
@@ -94,6 +95,7 @@ data class AiSettingsView(
   val coachModels: List<String>,
   val hasApiKey: Boolean,
   val encryptionAvailable: Boolean,
+  val coachPrompt: String,
 )
 
 @Service
@@ -111,6 +113,7 @@ class AiSettingsService(private val jdbc: JdbcTemplate, private val encryption: 
       (r["coach_models"] as String).split(',').filter(String::isNotBlank),
       r["encrypted_api_key"] != null,
       encryption.available,
+      r["coach_prompt"] as String,
     )
 
   fun get() = view(row())
@@ -118,6 +121,13 @@ class AiSettingsService(private val jdbc: JdbcTemplate, private val encryption: 
   @Transactional
   fun save(body: AiSettingsEdit, actor: UUID?): AiSettingsView {
     val r = row()
+    if (
+      body.coachPrompt != null &&
+        (body.coachPrompt.isBlank() ||
+          body.coachPrompt.length > 16000 ||
+          '\u0000' in body.coachPrompt)
+    )
+      bad("Промпт тренера должен содержать от 1 до 16000 символов")
     val key = body.apiKey?.takeIf { it.isNotEmpty() }
     if (key != null && body.clearApiKey) bad("Нельзя одновременно заменить и удалить ключ")
     fun valid(value: String, max: Int) =
@@ -160,7 +170,7 @@ class AiSettingsService(private val jdbc: JdbcTemplate, private val encryption: 
     val changed =
       jdbc.update(
         """UPDATE ai_settings SET revision = revision + 1, enabled = ?, base_url = ?, encrypted_api_key = ?,
-      text_model = ?, vision_model = ?, coach_model = ?, coach_models = ?, updated_at = now(), updated_by = ? WHERE id = 1 AND revision = ?""",
+      text_model = ?, vision_model = ?, coach_model = ?, coach_models = ?, coach_prompt = ?, updated_at = now(), updated_by = ? WHERE id = 1 AND revision = ?""",
         body.enabled,
         body.baseUrl,
         encrypted,
@@ -168,6 +178,7 @@ class AiSettingsService(private val jdbc: JdbcTemplate, private val encryption: 
         body.visionModel,
         body.coachModel,
         body.coachModels.distinct().joinToString(","),
+        body.coachPrompt ?: r["coach_prompt"] as String,
         actor,
         body.revision,
       )

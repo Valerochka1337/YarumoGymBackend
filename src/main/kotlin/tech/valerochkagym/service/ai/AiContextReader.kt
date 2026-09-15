@@ -6,10 +6,7 @@ import java.time.ZoneId
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.stereotype.Service
 import org.springframework.transaction.support.TransactionTemplate
-import tech.valerochkagym.controller.advice.unauthorized
 import tech.valerochkagym.controller.model.AiContextRevision
-import tech.valerochkagym.repository.auth.SessionRepository
-import tech.valerochkagym.repository.auth.UserRepository
 import tech.valerochkagym.repository.catalog.CatalogStateRepository
 import tech.valerochkagym.repository.catalog.StandardRepository
 import tech.valerochkagym.repository.data.HeadRepository
@@ -34,6 +31,11 @@ data class CalendarCapturedContext(
   val notes: List<Map<String, Any>>,
   val sourceRows: List<CalendarSourceRow>,
   val dataQuality: List<String>,
+  val workouts: List<CalendarWorkout> = emptyList(),
+  val olderFacts: List<CalendarFact> = emptyList(),
+  val capturedAtMillis: Long = 0,
+  val windowStartMillis: Long = 0,
+  val strengthPriorities: Map<String, String> = emptyMap(),
 )
 
 data class CalendarCandidateSource(val id: String, val payload: tools.jackson.databind.JsonNode)
@@ -47,9 +49,22 @@ data class CalendarFact(
   val actualWeightPresent: Boolean,
   val actualWeightKg: Double?,
   val legacyWeightKg: Double?,
+  val results: Map<String, Double?> = emptyMap(),
+  val legacyFields: List<String> = emptyList(),
+  val setType: String? = null,
+  val timeSource: String = "COMPLETED_AT",
+  val workoutFinishedAtMillis: Long = factTimeMillis,
 )
 
+data class CalendarWorkout(val id: String, val startedAtMillis: Long, val finishedAtMillis: Long)
+
 data class CalendarSourceRow(val kind: String, val key: String, val utf8Bytes: Int)
+
+/** Owner-scoped facts used only to build the bounded STRENGTH planner projection. */
+internal data class StrengthPlannerCapture(
+  val latestFacts: List<CalendarFact>,
+  val efforts: List<StrengthPlannerFacts.Effort>,
+)
 
 @Service
 class AiContextReader(
@@ -58,23 +73,20 @@ class AiContextReader(
   private val heads: HeadRepository,
   private val records: RecordRepository,
   private val standard: StandardRepository,
-  private val users: UserRepository,
-  private val sessions: SessionRepository,
   private val json: ObjectMapper,
   private val clock: Clock,
-  private val relations: tech.valerochkagym.repository.coachrelation.CoachRelationRepositories,
+  private val sessionGuard: tech.valerochkagym.service.auth.IdentitySessionGuard,
   private val jdbc: JdbcTemplate,
 ) {
   fun verifyCalendarAdmission(identity: Identity, revision: Long, catalogRevision: Long) {
     tx.executeWithoutResult {
-      relations.guards(identity.userId)
       val common = catalog.readLock()
       if (!heads.existsById(identity.userId)) {
-        if (!users.existsById(identity.userId)) unauthorized()
+        sessionGuard.lock(identity)
         throw aiError("ai_context_stale")
       }
       val head = heads.readLock(identity.userId)
-      relations.session(identity)
+      sessionGuard.lock(identity)
       if (head.revision != revision || common.revision != catalogRevision)
         throw aiError("ai_context_stale")
     }
@@ -90,14 +102,13 @@ class AiContextReader(
     requestedGymIds: List<String>,
   ): CalendarCapturedContext =
     tx.execute {
-      relations.guards(identity.userId)
       val common = catalog.readLock()
       if (!heads.existsById(identity.userId)) {
-        if (!users.existsById(identity.userId)) unauthorized()
+        sessionGuard.lock(identity)
         throw aiError("ai_context_stale")
       }
       val head = heads.readLock(identity.userId)
-      relations.session(identity)
+      sessionGuard.lock(identity)
       val now = Instant.now(clock)
       val sourceRows = mutableListOf<CalendarSourceRow>()
       fun account(kind: String, id: java.util.UUID, bytes: Int) {
@@ -174,19 +185,35 @@ class AiContextReader(
           .values
           .toList()
       if (candidates.size > 1000) throw aiError("ai_context_too_large")
-      val gyms =
+      // Resolve requested gyms using the same personal-over-standard precedence as exercises
+      // and proposal approval. Built-in gyms are not copied into the owner's records.
+      fun gymRows(sql: String, vararg args: Any): List<CalendarCandidateSource> =
+        jdbc.query(
+          sql,
+          { rs, _ ->
+            val id = rs.getObject(1, java.util.UUID::class.java)
+            account("gym", id, rs.getInt(3))
+            CalendarCandidateSource(id.toString(), json.readTree(rs.getString(2)))
+          },
+          *args,
+        )
+      val personalGyms =
         if (requestedGymIds.isEmpty()) emptyList()
         else
-          jdbc.query(
+          gymRows(
             "SELECT id,payload::text,octet_length(payload::text) FROM records WHERE user_id=? AND kind='gym' AND NOT deleted AND id IN (${requestedGymIds.joinToString(",") { "?" }}) ORDER BY id LIMIT 1001",
-            { rs, _ ->
-              val id = rs.getObject(1, java.util.UUID::class.java)
-              val bytes = rs.getInt(3)
-              account("gym", id, bytes)
-              CalendarCandidateSource(id.toString(), json.readTree(rs.getString(2)))
-            },
             *(arrayOf(identity.userId) + requestedGymIds.map(java.util.UUID::fromString)),
           )
+      val personalGymIds = personalGyms.mapTo(mutableSetOf()) { it.id }
+      val missingGymIds = requestedGymIds.filterNot { it in personalGymIds }
+      val standardGyms =
+        if (!common.active || missingGymIds.isEmpty()) emptyList()
+        else
+          gymRows(
+            "SELECT id,payload::text,octet_length(payload::text) FROM standard_records WHERE kind='gym' AND NOT archived AND id IN (${missingGymIds.joinToString(",") { "?" }}) ORDER BY id LIMIT 1001",
+            *missingGymIds.map(java.util.UUID::fromString).toTypedArray(),
+          )
+      val gyms = (personalGyms + standardGyms).sortedBy { it.id }
       if (requestedGymIds.isNotEmpty() && gyms.map { it.id }.toSet() != requestedGymIds.toSet())
         throw aiError("ai_context_stale")
       val profileRows =
@@ -201,15 +228,58 @@ class AiContextReader(
       }
       if (profileRows.any { it.toByteArray(Charsets.UTF_8).size > 1_048_576 })
         throw aiError("ai_context_too_large")
+      val profile =
+        profileRows.singleOrNull()?.let { AiProfileContext.fromSaved(json.readTree(it), clock) }
+      val strengthProfileRows =
+        if (profile?.trainingGoal != "STRENGTH") emptyList()
+        else
+          jdbc.query(
+            "SELECT id,payload::text,octet_length(payload::text) FROM records WHERE user_id=? AND kind='strength_planner_profile' AND NOT deleted ORDER BY id LIMIT 2",
+            { rs, _ ->
+              Triple(
+                rs.getObject(1, java.util.UUID::class.java),
+                json.readTree(rs.getString(2)),
+                rs.getInt(3),
+              )
+            },
+            identity.userId,
+          )
+      if (strengthProfileRows.size > 1) throw aiError("ai_context_too_large")
+      val strengthPriorities =
+        strengthProfileRows
+          .singleOrNull()
+          ?.let { (id, payload, bytes) ->
+            account("strength_planner_profile", id, bytes)
+            payload["keyExercises"]
+              ?.toList()
+              .orEmpty()
+              .mapNotNull { row ->
+                val exerciseId = row["exerciseId"]?.asString()
+                val priority = row["priority"]?.asString()
+                if (
+                  exerciseId != null &&
+                    priority in setOf("HIGH", "NORMAL") &&
+                    runCatching { java.util.UUID.fromString(exerciseId).toString() == exerciseId }
+                      .getOrDefault(false)
+                )
+                  exerciseId to requireNotNull(priority)
+                else null
+              }
+              .toMap()
+          }
+          .orEmpty()
       val capturedAt = now.toEpochMilli()
       val windowStart =
-        now
-          .atZone(ZoneId.of(zoneId))
-          .toLocalDate()
-          .minusDays(27)
-          .atStartOfDay(ZoneId.of(zoneId))
-          .toInstant()
-          .toEpochMilli()
+        if (profile?.trainingGoal == "STRENGTH")
+          capturedAt - java.time.Duration.ofDays(28).toMillis()
+        else
+          now
+            .atZone(ZoneId.of(zoneId))
+            .toLocalDate()
+            .minusDays(27)
+            .atStartOfDay(ZoneId.of(zoneId))
+            .toInstant()
+            .toEpochMilli()
       data class WorkoutKey(val id: java.util.UUID, val bytes: Int)
       val workoutKeys =
         jdbc.query(
@@ -220,30 +290,45 @@ class AiContextReader(
           capturedAt,
         )
       if (workoutKeys.size > 64) throw aiError("ai_context_too_large")
-      workoutKeys.forEach { account("workout", it.id, it.bytes) }
+      // Only three older parents, using the same indexed owner/time predicate. No all-history scan.
+      val olderKeys =
+        jdbc.query(
+          "SELECT id,octet_length(payload::text) FROM records WHERE user_id=? AND kind='workout' AND NOT deleted AND jsonb_typeof(payload->'finishedAt')='number' AND ((payload->>'finishedAt')::numeric)<? ORDER BY ((payload->>'finishedAt')::numeric) DESC,id ASC LIMIT 3",
+          { rs, _ -> WorkoutKey(rs.getObject(1, java.util.UUID::class.java), rs.getInt(2)) },
+          identity.userId,
+          windowStart,
+        )
+      val historyKeys = workoutKeys + olderKeys
+      historyKeys.forEach { account("workout", it.id, it.bytes) }
       val workoutRows =
-        if (workoutKeys.isEmpty()) emptyList()
+        if (historyKeys.isEmpty()) emptyList()
         else
           jdbc.query(
-            "SELECT id,payload::text FROM records WHERE user_id=? AND kind='workout' AND NOT deleted AND jsonb_typeof(payload->'finishedAt')='number' AND ((payload->>'finishedAt')::numeric)>=? AND ((payload->>'finishedAt')::numeric)<=? ORDER BY ((payload->>'finishedAt')::numeric) DESC,id ASC LIMIT 65",
+            "SELECT id,payload::text FROM records WHERE user_id=? AND kind='workout' AND NOT deleted AND id IN (${historyKeys.joinToString(",") { "?" }}) ORDER BY ((payload->>'finishedAt')::numeric) DESC,id ASC",
             { rs, _ ->
               rs.getObject(1, java.util.UUID::class.java) to json.readTree(rs.getString(2))
             },
-            identity.userId,
-            windowStart,
-            capturedAt,
+            *(arrayOf(identity.userId) + historyKeys.map { it.id }),
           )
       val quality = mutableListOf<String>()
       val facts = mutableListOf<CalendarFact>()
+      val olderFacts = mutableListOf<CalendarFact>()
+      val workouts = mutableListOf<CalendarWorkout>()
       val notes = mutableListOf<Map<String, Any>>()
       workoutRows.forEach { (workoutId, payload) ->
         val started = payload["startedAt"]?.takeUnless { it.isNull }?.asLong()
         val finished = payload["finishedAt"]?.takeUnless { it.isNull }?.asLong()
-        val validParent = started != null && finished != null && finished <= capturedAt
+        val validParent =
+          started != null &&
+            finished != null &&
+            started >= 0 &&
+            started <= finished &&
+            finished <= capturedAt
         if (!validParent) {
           quality += "INVALID_TEMPORAL_FACT_EXCLUDED"
           return@forEach
         }
+        workouts += CalendarWorkout(workoutId.toString(), started, finished)
         if (includeNotes)
           payload["note"]
             ?.takeUnless { it.isNull }
@@ -264,17 +349,26 @@ class AiContextReader(
           section["sets"]?.toList().orEmpty().forEachIndexed { index, set ->
             if (set["isCompleted"]?.asBoolean() != true) return@forEachIndexed
             val factTime = set["completedAt"]?.takeUnless { it.isNull }?.asLong() ?: started
-            if (
-              factTime < started ||
-                factTime > finished ||
-                factTime < windowStart ||
-                factTime > capturedAt
-            ) {
+            if (factTime < started || factTime > finished || factTime > capturedAt) {
               quality += "INVALID_TEMPORAL_FACT_EXCLUDED"
               return@forEachIndexed
             }
-            if (facts.size == 8192) throw aiError("ai_context_too_large")
-            facts +=
+            val destination = if (factTime >= windowStart) facts else olderFacts
+            if (destination.size == 8192) throw aiError("ai_context_too_large")
+            val legacyFields = mutableListOf<String>()
+            val results =
+              listOf("weightKg", "reps", "durationSec", "speedKmh", "inclinePct").associateWith {
+                key ->
+                val actualKey = "actual" + key.replaceFirstChar { it.uppercase() }
+                val value =
+                  if (set.has(actualKey)) set[actualKey]
+                  else {
+                    legacyFields += key
+                    set[key]
+                  }
+                value?.takeIf { it.isNumber }?.asDouble()?.takeIf { it.isFinite() }
+              }
+            destination +=
               CalendarFact(
                 exerciseId,
                 factTime,
@@ -284,8 +378,14 @@ class AiContextReader(
                 set.has("actualWeightKg"),
                 set["actualWeightKg"]?.takeUnless { it.isNull }?.asDouble(),
                 set["weightKg"]?.takeUnless { it.isNull }?.asDouble(),
+                results,
+                legacyFields,
+                set["setType"]?.takeUnless { it.isNull }?.asString(),
+                if (set["completedAt"]?.isNumber == true) "COMPLETED_AT"
+                else "WORKOUT_START_FALLBACK",
+                finished,
               )
-            if (includeNotes)
+            if (includeNotes && factTime >= windowStart)
               set["note"]
                 ?.takeUnless { it.isNull }
                 ?.asString()
@@ -375,13 +475,154 @@ class AiContextReader(
         AiContextRevision(revision, catalogRevision),
         candidates,
         gyms,
-        profileRows.singleOrNull()?.let { AiProfileContext.fromSaved(json.readTree(it), clock) },
+        profile,
         facts,
         mass,
         boundedNotes,
         sourceRows,
         quality.distinct(),
+        workouts,
+        olderFacts,
+        capturedAt,
+        windowStart,
+        strengthPriorities,
       )
+    }!!
+
+  /**
+   * The normal calendar capture deliberately stops before exhaustive history. STRENGTH needs one
+   * latest compatible saved tuple for each selected/key exercise, including an old parent beyond
+   * that window. This query returns at most one set per requested stable exercise ID.
+   */
+  internal fun captureStrengthPlannerFacts(
+    identity: Identity,
+    revision: Long,
+    catalogRevision: Long,
+    exerciseIds: Set<String>,
+    capturedAtMillis: Long,
+    completedWorkoutIds: Set<String>,
+  ): StrengthPlannerCapture =
+    tx.execute {
+      val common = catalog.readLock()
+      if (!heads.existsById(identity.userId)) {
+        sessionGuard.lock(identity)
+        throw aiError("ai_context_stale")
+      }
+      val head = heads.readLock(identity.userId)
+      sessionGuard.lock(identity)
+      if (head.revision != revision || common.revision != catalogRevision)
+        throw aiError("ai_context_stale")
+      require(exerciseIds.size <= 29) { "Strength capture permits at most 29 exercise IDs" }
+      val ids =
+        exerciseIds.sorted().map {
+          runCatching { java.util.UUID.fromString(it).toString() == it }
+            .getOrDefault(false)
+            .also { valid -> if (!valid) throw aiError("ai_context_stale") }
+          it
+        }
+      val latest =
+        if (ids.isEmpty()) emptyList()
+        else {
+          val values = ids.joinToString(",") { "(?::text)" }
+          jdbc.query(
+            """
+            WITH selected(exercise_id) AS (VALUES $values)
+            SELECT selected.exercise_id, latest.* FROM selected
+            CROSS JOIN LATERAL (
+              SELECT workout.id AS workout_id,
+                (workout.payload->>'startedAt')::bigint AS started_at,
+                (workout.payload->>'finishedAt')::bigint AS finished_at,
+                section.value->>'sectionId' AS section_id,
+                numbered_set.ordinality - 1 AS set_index,
+                jsonb_build_object(
+                  'actualWeightPresent', jsonb_exists(numbered_set.value, 'actualWeightKg'),
+                  'actualRepsPresent', jsonb_exists(numbered_set.value, 'actualReps'),
+                  'actualWeightKg', numbered_set.value->'actualWeightKg',
+                  'actualReps', numbered_set.value->'actualReps',
+                  'weightKg', numbered_set.value->'weightKg',
+                  'reps', numbered_set.value->'reps',
+                  'completedAt', numbered_set.value->'completedAt',
+                  'setType', numbered_set.value->'setType'
+                )::text AS fact_payload
+              FROM records workout
+              CROSS JOIN LATERAL jsonb_array_elements(COALESCE(workout.payload->'exercises', '[]'::jsonb)) section(value)
+              CROSS JOIN LATERAL jsonb_array_elements(COALESCE(section.value->'sets', '[]'::jsonb)) WITH ORDINALITY numbered_set(value, ordinality)
+              WHERE workout.user_id=? AND workout.kind='workout' AND NOT workout.deleted
+                AND jsonb_typeof(workout.payload->'startedAt')='number'
+                AND jsonb_typeof(workout.payload->'finishedAt')='number'
+                AND ((workout.payload->>'startedAt')::numeric) >= 0
+                AND ((workout.payload->>'startedAt')::numeric) <= ((workout.payload->>'finishedAt')::numeric)
+                AND ((workout.payload->>'finishedAt')::numeric) <= ?
+                AND section.value->>'exerciseId'=selected.exercise_id
+                AND numbered_set.value->>'isCompleted'='true'
+                AND COALESCE(numbered_set.value->>'setType', 'WORK')='WORK'
+                AND (jsonb_exists(numbered_set.value, 'actualReps') OR jsonb_exists(numbered_set.value, 'reps'))
+                AND COALESCE(jsonb_typeof(numbered_set.value->'actualDurationSec'),'null') != 'number'
+                AND COALESCE(jsonb_typeof(numbered_set.value->'durationSec'),'null') != 'number'
+                AND COALESCE((numbered_set.value->>'completedAt')::numeric,(workout.payload->>'startedAt')::numeric)
+                  BETWEEN (workout.payload->>'startedAt')::numeric AND (workout.payload->>'finishedAt')::numeric
+              ORDER BY CASE WHEN jsonb_exists(numbered_set.value, 'actualWeightKg') AND jsonb_exists(numbered_set.value, 'actualReps') THEN 0 ELSE 1 END,
+                ((workout.payload->>'finishedAt')::numeric) DESC, workout.id ASC,
+                section.value->>'sectionId' ASC, numbered_set.ordinality ASC
+              LIMIT 1
+            ) latest ORDER BY selected.exercise_id
+            """
+              .trimIndent(),
+            { rs, _ ->
+              val rawFact = rs.getString("fact_payload")
+              if (rawFact.toByteArray(Charsets.UTF_8).size > 4096)
+                throw aiError("ai_context_too_large")
+              val set = json.readTree(rawFact)
+              val started = rs.getLong("started_at")
+              val finished = rs.getLong("finished_at")
+              val completed = set["completedAt"]?.takeUnless { it.isNull }?.asLong() ?: started
+              val actualWeight = set["actualWeightPresent"].asBoolean()
+              val actualReps = set["actualRepsPresent"].asBoolean()
+              fun number(key: String) =
+                set[key]?.takeIf { it.isNumber }?.asDouble()?.takeIf { it.isFinite() }
+              CalendarFact(
+                rs.getString("exercise_id"),
+                completed,
+                rs.getObject("workout_id", java.util.UUID::class.java).toString(),
+                rs.getString("section_id") ?: "",
+                rs.getInt("set_index"),
+                actualWeight,
+                number("actualWeightKg"),
+                number("weightKg"),
+                mapOf(
+                  "weightKg" to number(if (actualWeight) "actualWeightKg" else "weightKg"),
+                  "reps" to number(if (actualReps) "actualReps" else "reps"),
+                ),
+                listOfNotNull(
+                  if (actualWeight) null else "weightKg",
+                  if (actualReps) null else "reps",
+                ),
+                set["setType"]?.takeUnless { it.isNull }?.asString(),
+                if (set["completedAt"]?.isNumber == true) "COMPLETED_AT"
+                else "WORKOUT_START_FALLBACK",
+                finished,
+              )
+            },
+            *(ids + listOf<Any>(identity.userId, capturedAtMillis)).toTypedArray(),
+          )
+        }
+      require(completedWorkoutIds.size <= 67) { "Strength effort capture requires bounded parents" }
+      val effortWorkoutIds = (completedWorkoutIds + latest.map { it.workoutId }).sorted()
+      val efforts =
+        if (effortWorkoutIds.isEmpty()) emptyList()
+        else
+          jdbc.query(
+            "SELECT payload::text FROM records WHERE user_id=? AND kind='workout_effort' AND NOT deleted AND payload->>'workoutId' IN (${effortWorkoutIds.joinToString(",") { "?" }}) ORDER BY payload->>'workoutId'",
+            { rs, _ ->
+              val payload = json.readTree(rs.getString(1))
+              StrengthPlannerFacts.Effort(
+                payload["workoutId"].asString(),
+                payload["effort"]?.takeUnless { it.isNull }?.asString(),
+              )
+            },
+            *(listOf<Any>(identity.userId) + effortWorkoutIds).toTypedArray(),
+          )
+      StrengthPlannerCapture(latest, efforts)
     }!!
 
   fun capture(
@@ -391,21 +632,11 @@ class AiContextReader(
     includeExercises: Boolean,
   ): AiCapturedContext =
     tx.execute {
-      relations.guards(identity.userId)
       val common = catalog.readLock()
       // A client with no acknowledged owner head is not sync-ready. Do not create one here.
       if (!heads.existsById(identity.userId)) throw aiError("ai_context_stale")
       val head = heads.readLock(identity.userId)
-      val session = sessions.findById(identity.sessionId).orElse(null) ?: unauthorized()
-      val now = Instant.now()
-      if (
-        session.userId != identity.userId ||
-          session.revokedAt != null ||
-          !session.accessExpiresAt.isAfter(now) ||
-          !session.refreshExpiresAt.isAfter(now) ||
-          !users.existsById(identity.userId)
-      )
-        unauthorized()
+      sessionGuard.lock(identity)
       if (head.revision != revision || common.revision != catalogRevision)
         throw aiError("ai_context_stale")
       val personal =

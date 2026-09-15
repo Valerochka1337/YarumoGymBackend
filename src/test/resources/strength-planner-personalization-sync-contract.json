@@ -1,0 +1,41 @@
+{
+  "capability": "strength-planner-personalization",
+  "ownerId": "10000000-0000-4000-8000-000000000001",
+  "profile": {
+    "kind": "strength_planner_profile",
+    "id": "c3439134-6252-3a3d-b458-94b983f5e298",
+    "payload": {
+      "schemaVersion": 1,
+      "syncId": "c3439134-6252-3a3d-b458-94b983f5e298",
+      "updatedAt": 1800000000000,
+      "keyExercises": [
+        {
+          "exerciseId": "30000000-0000-4000-8000-000000000003",
+          "priority": "HIGH"
+        },
+        {
+          "exerciseId": "40000000-0000-4000-8000-000000000004",
+          "priority": "NORMAL"
+        }
+      ]
+    }
+  },
+  "effort": {
+    "kind": "workout_effort",
+    "id": "8e64f40e-a0ec-3839-9aee-e21f14c8ea8c",
+    "payload": {
+      "schemaVersion": 1,
+      "syncId": "8e64f40e-a0ec-3839-9aee-e21f14c8ea8c",
+      "workoutId": "20000000-0000-4000-8000-000000000002",
+      "updatedAt": 1800000000000,
+      "effort": "HARD"
+    }
+  },
+  "clearEffort": {
+    "schemaVersion": 1,
+    "syncId": "8e64f40e-a0ec-3839-9aee-e21f14c8ea8c",
+    "workoutId": "20000000-0000-4000-8000-000000000002",
+    "updatedAt": 1800000000001,
+    "effort": null
+  }
+}

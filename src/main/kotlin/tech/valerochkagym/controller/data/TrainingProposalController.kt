@@ -24,6 +24,7 @@ class TrainingProposalController(
   private val service: TrainingProposalService,
   private val validator: TrainingProposalValidator,
   private val json: ObjectMapper,
+  private val explanations: tech.valerochkagym.service.ai.PlannerExplanationStore,
 ) {
   @GetMapping
   fun list(
@@ -35,6 +36,12 @@ class TrainingProposalController(
   @GetMapping("/{proposalId}")
   fun detail(@AuthenticationPrincipal identity: Identity, @PathVariable proposalId: UUID) =
     service.detail(identity, proposalId)
+
+  @GetMapping("/{proposalId}/planner-explanation")
+  fun plannerExplanation(
+    @AuthenticationPrincipal identity: Identity,
+    @PathVariable proposalId: UUID,
+  ) = explanations.read(identity, proposalId)
 
   @GetMapping("/{proposalId}/accepted-result")
   fun acceptedResult(@AuthenticationPrincipal identity: Identity, @PathVariable proposalId: UUID) =
@@ -59,13 +66,6 @@ class TrainingProposalController(
     @PathVariable proposalId: UUID,
     request: HttpServletRequest,
   ) = service.reject(identity, proposalId, validator.reject(tree(raw(request))))
-
-  @PostMapping("/{proposalId}/revoke")
-  fun revoke(
-    @AuthenticationPrincipal identity: Identity,
-    @PathVariable proposalId: UUID,
-    request: HttpServletRequest,
-  ) = service.revoke(identity, proposalId, validator.revoke(tree(raw(request))))
 
   private fun capability(request: HttpServletRequest, response: HttpServletResponse) {
     val accepted =
