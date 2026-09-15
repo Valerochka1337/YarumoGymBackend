@@ -64,6 +64,7 @@ class InstallNginxRoutesTest(unittest.TestCase):
         self.assertIn("scripts/install-nginx-routes.py", workflow)
         self.assertIn("incoming/nginx.conf", workflow)
         self.assertIn("install_nginx_routes", deploy)
+        self.assertIn("--noproxy '*'", deploy)
         self.assertIn('--resolve "$host:443:127.0.0.1"', deploy)
         self.assertIn("Nginx smoke: assetlinks=%s share=%s root=%s", deploy)
 
