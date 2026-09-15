@@ -72,7 +72,7 @@ server {
     location / {{ return 301 https://$host$request_uri; }}
 }}
 server {{
-    listen [::]:443 ssl;
+    listen 443 ssl;
     server_name api.valerochkagym.tech;
     location ^~ / {{ try_files $uri $uri/ /index.html; }}
 }}
@@ -84,6 +84,25 @@ server {{
         self.assertEqual(1, merged.count(MODULE.BEGIN))
         self.assertNotIn(MODULE.BEGIN, merged[slice(*http)])
         self.assertIn(MODULE.BEGIN, merged[slice(*https)])
+
+    def test_ipv4_https_server_is_selected_instead_of_ipv6_only_server(self):
+        current = """server {
+    listen [::]:443 ssl;
+    server_name api.valerochkagym.tech;
+    location / { return 418; }
+}
+server {
+    listen 127.0.0.1:443 ssl;
+    server_name api.valerochkagym.tech;
+    location ^~ / { try_files $uri $uri/ /index.html; }
+}
+"""
+
+        merged = MODULE.merge(current, self.source)
+        ipv6, ipv4 = MODULE.server_blocks(merged)
+
+        self.assertNotIn(MODULE.BEGIN, merged[slice(*ipv6)])
+        self.assertIn(MODULE.BEGIN, merged[slice(*ipv4)])
 
     def test_unmanaged_public_route_is_rejected(self):
         current = self.current.replace(
@@ -115,6 +134,11 @@ server {{
         self.assertIn('--resolve "$host:443:127.0.0.1"', deploy)
         self.assertIn("Nginx smoke: assetlinks=%s share=%s root=%s", deploy)
         self.assertIn("^x-yarumo-route:[[:space:]]*routine-share", deploy)
+        self.assertIn('nginx -T > "$effective_config"', deploy)
+        self.assertIn("Expected one active IPv4 HTTPS config", deploy)
+        self.assertNotIn(
+            "readlink -f /etc/nginx/sites-enabled/api.valerochkagym.tech", deploy
+        )
 
 
 if __name__ == "__main__":
