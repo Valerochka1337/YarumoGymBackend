@@ -200,13 +200,7 @@ class CalendarAiService(
         throw aiError("ai_timeout")
       output = validator.validatePlanner(output)
       var draft =
-        validateAndProject(
-          output,
-          request,
-          candidates,
-          projectionFacts,
-          selection?.focusExerciseId,
-        )
+        validateAndProject(output, request, candidates, projectionFacts, selection?.focusExerciseId)
       // At most one correction, only for a broad unconstrained pool and enough remaining lease.
       if (
         PlannerDuration.seconds(draft.exercises) <
