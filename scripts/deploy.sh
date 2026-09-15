@@ -40,8 +40,10 @@ set_image() {
 }
 install_nginx_routes() {
   local target backup candidate headers share_headers body asset_status share_status root_status
+  local effective_config targets_file config canonical probe
   local host=api.valerochkagym.tech
   local origin="https://$host"
+  local -a nginx_targets=()
   local -a smoke_curl=(
     curl --silent --show-error
     --noproxy '*'
@@ -54,11 +56,38 @@ install_nginx_routes() {
     echo 'Nginx deployment files are missing' >&2
     return 1
   }
-  target=$(readlink -f /etc/nginx/sites-enabled/api.valerochkagym.tech)
-  [[ -f "$target" ]] || {
-    echo 'Installed api.valerochkagym.tech server block was not found' >&2
+  effective_config=$(mktemp nginx.effective.XXXXXX)
+  targets_file=$(mktemp nginx.targets.XXXXXX)
+  if ! nginx -T > "$effective_config"; then
+    rm -f "$effective_config" "$targets_file"
     return 1
-  }
+  fi
+  while IFS= read -r config; do
+    canonical=$(readlink -f "$config" 2>/dev/null || true)
+    [[ -n "$canonical" && -f "$canonical" ]] || continue
+    probe=$(mktemp nginx.probe.XXXXXX)
+    if python3 incoming/install-nginx-routes.py \
+      "$canonical" incoming/nginx.conf "$probe" 2>/dev/null; then
+      printf '%s\n' "$canonical" >> "$targets_file"
+    fi
+    rm -f "$probe"
+  done < <(sed -n 's/^# configuration file \(.*\):$/\1/p' "$effective_config")
+  mapfile -t nginx_targets < <(sort -u "$targets_file")
+  if [[ ${#nginx_targets[@]} != 1 ]]; then
+    echo "Expected one active IPv4 HTTPS config for $host; found ${#nginx_targets[@]}." >&2
+    echo 'Loaded config files mentioning the API host:' >&2
+    while IFS= read -r config; do
+      canonical=$(readlink -f "$config" 2>/dev/null || true)
+      if [[ -f "$canonical" ]] && grep -q "$host" "$canonical"; then
+        printf '  %s -> %s\n' "$config" "$canonical" >&2
+      fi
+    done < <(sed -n 's/^# configuration file \(.*\):$/\1/p' "$effective_config")
+    rm -f "$effective_config" "$targets_file"
+    return 1
+  fi
+  target=${nginx_targets[0]}
+  printf 'Installing App Links routes into active config: %s\n' "$target"
+  rm -f "$effective_config" "$targets_file"
   backup=$(mktemp nginx.rollback.XXXXXX)
   candidate=$(mktemp nginx.candidate.XXXXXX)
   headers=$(mktemp nginx.headers.XXXXXX)
@@ -90,6 +119,8 @@ install_nginx_routes() {
      ! grep -q 'delegate_permission/common.handle_all_urls' "$body" ||
      ! grep -Eiq '^x-yarumo-route:[[:space:]]*routine-share' "$share_headers"; then
     echo 'Nginx App Links smoke check failed; restoring the previous server block.' >&2
+    echo 'Routine-share response headers:' >&2
+    sed -n '1,30p' "$share_headers" >&2
     if ! restore_nginx; then echo 'Nginx rollback also failed' >&2; fi
     rm -f "$backup" "$candidate" "$headers" "$share_headers" "$body"
     return 1

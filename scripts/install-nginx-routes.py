@@ -81,7 +81,11 @@ def https_api_server(current: str) -> tuple[int, int]:
     host = re.compile(
         rf"(?m)^[ \t]*server_name\s+[^;]*\b{re.escape(API_HOST)}\b[^;]*;"
     )
-    https = re.compile(r"(?m)^[ \t]*listen\s+(?:\[[^]]+\]:)?443(?:\s|;)")
+    # The deployment smoke check connects to 127.0.0.1, so an IPv6-only virtual host is
+    # not the server that handles it. Select an IPv4 or wildcard HTTPS listener.
+    https = re.compile(
+        r"(?m)^[ \t]*listen\s+(?:(?:(?:\d{1,3}\.){3}\d{1,3}|\*):)?443(?:\s|;)"
+    )
     matches = [
         (start, end)
         for start, end in server_blocks(current)
