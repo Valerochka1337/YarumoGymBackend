@@ -44,6 +44,7 @@ install_nginx_routes() {
   local origin="https://$host"
   local -a smoke_curl=(
     curl --silent --show-error
+    --noproxy '*'
     --resolve "$host:443:127.0.0.1"
     --connect-timeout 5 --max-time 15
     --retry 3 --retry-delay 1 --retry-connrefused
