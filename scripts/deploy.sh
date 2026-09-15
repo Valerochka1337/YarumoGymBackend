@@ -39,7 +39,15 @@ set_image() {
   mv .env.next .env
 }
 install_nginx_routes() {
-  local target backup candidate headers body share_status root_status
+  local target backup candidate headers body asset_status share_status root_status
+  local host=api.valerochkagym.tech
+  local origin="https://$host"
+  local -a smoke_curl=(
+    curl --silent --show-error
+    --resolve "$host:443:127.0.0.1"
+    --connect-timeout 5 --max-time 15
+    --retry 3 --retry-delay 1 --retry-connrefused
+  )
   if [[ ! -f incoming/nginx.conf && ! -f incoming/install-nginx-routes.py ]]; then return 0; fi
   [[ -f incoming/nginx.conf && -f incoming/install-nginx-routes.py ]] || {
     echo 'Nginx deployment files are missing' >&2
@@ -68,12 +76,16 @@ install_nginx_routes() {
     rm -f "$backup" "$candidate" "$headers" "$body"
     return 1
   fi
-  share_status=$(curl --silent --output /dev/null --write-out '%{http_code}' https://api.valerochkagym.tech/r/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA || true)
-  root_status=$(curl --silent --output /dev/null --write-out '%{http_code}' https://api.valerochkagym.tech/ || true)
-  if ! curl --fail --silent --dump-header "$headers" --output "$body" https://api.valerochkagym.tech/.well-known/assetlinks.json ||
+  # Verify the Nginx instance we just reloaded. Public DNS can be cached or routed through
+  # another edge, which must not make an otherwise valid on-host deployment roll back.
+  asset_status=$("${smoke_curl[@]}" --dump-header "$headers" --output "$body" --write-out '%{http_code}' "$origin/.well-known/assetlinks.json" || true)
+  share_status=$("${smoke_curl[@]}" --output /dev/null --write-out '%{http_code}' "$origin/r/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" || true)
+  root_status=$("${smoke_curl[@]}" --output /dev/null --write-out '%{http_code}' "$origin/" || true)
+  printf 'Nginx smoke: assetlinks=%s share=%s root=%s\n' "$asset_status" "$share_status" "$root_status"
+  if [[ "$asset_status" != 200 || "$share_status" != 404 || "$root_status" != 200 ]] ||
      ! grep -Eiq '^content-type:[[:space:]]*application/json' "$headers" ||
      ! grep -q 'com.valerochka1337.valerochkagym' "$body" ||
-     [[ "$share_status" != 404 || "$root_status" != 200 ]]; then
+     ! grep -q 'delegate_permission/common.handle_all_urls' "$body"; then
     echo 'Nginx App Links smoke check failed; restoring the previous server block.' >&2
     if ! restore_nginx; then echo 'Nginx rollback also failed' >&2; fi
     rm -f "$backup" "$candidate" "$headers" "$body"
