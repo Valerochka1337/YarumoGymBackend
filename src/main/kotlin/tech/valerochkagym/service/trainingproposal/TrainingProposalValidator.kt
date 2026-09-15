@@ -46,17 +46,6 @@ class TrainingProposalValidator(private val json: ObjectMapper) {
     }
   }
 
-  fun revoke(node: JsonNode): RevokeRequest {
-    shape(node, setOf("version"))
-    required(node, "version")
-    positiveVersion(node["version"])
-    return try {
-      json.treeToValue(node, RevokeRequest::class.java)
-    } catch (_: Exception) {
-      bad("Некорректный запрос отзыва")
-    }
-  }
-
   fun draft(node: JsonNode): ApprovalDraft {
     shape(node, setOf("name", "gymIds", "exercises", "startsAtMillis", "timeZoneId"))
     setOf("name", "gymIds", "exercises", "startsAtMillis", "timeZoneId").forEach {

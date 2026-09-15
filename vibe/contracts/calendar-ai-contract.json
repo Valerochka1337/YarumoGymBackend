@@ -5,7 +5,7 @@
   "fixture": {
     "plan01": {
       "path": "src/test/resources/training-proposals-contract.json",
-      "sha256": "65254ebf9aaa4062ebf8ef71df99c76876685ce10ec0bd2fa8645fced56ea998",
+      "sha256": "0649ef94328ef4c23d8465dfbefbbf0a3e9fe0d3eb0bda84a58aeb983e27001a",
       "proposalWriter": "tech.valerochkagym.service.ai.TrainingProposalAiCreator.createOrRevise -> TrainingProposalService.createOrReviseInternalAi"
     }
   },
@@ -39,7 +39,7 @@
     }
   },
   "attemptLedger": {
-    "migration": "013-calendar-ai-attempts.sql appended after 012-coach-relations.sql",
+    "migration": "013-calendar-ai-attempts.sql appended after the training-proposals schema",
     "key": [
       "ownerId",
       "requestId"
@@ -70,10 +70,10 @@
       "FAILED replays 502 ai_invalid_response or its supplied sanitized mapped status; CANCELLED replays 504 ai_timeout; INTERRUPTED replays 409 ai_interrupted.",
       "AttemptReceipt replay never reads current proposal state; it returns the original normalized PENDING response tree even after that proposal becomes terminal."
     ],
-    "commitTicket": "DeferredResult timeout/error/completion and worker share one ticket. Cancellation/deadline before final commit ownership atomically yields CANCELLED and zero proposals. Under outer relations.guards(owner), then catalog, owner head and session locks, final transaction may claim COMMITTING immediately before insert while deadline is live. The winning transaction writes proposal and SUCCEEDED receipt together; a later timeout cannot undo that committed result. Failed DB commit leaves no proposal or success receipt and terminalizes FAILED. No DB lock spans provider I/O."
+    "commitTicket": "DeferredResult timeout/error/completion and worker share one ticket. Cancellation/deadline before final commit ownership atomically yields CANCELLED and zero proposals. Under catalog, owner-head and authenticated-session locks, final transaction may claim COMMITTING immediately before insert while deadline is live. The winning transaction writes proposal and SUCCEEDED receipt together; a later timeout cannot undo that committed result. Failed DB commit leaves no proposal or success receipt and terminalizes FAILED. No DB lock spans provider I/O."
   },
   "capture": {
-    "outerGuardAndLocks": "relations.guards(owner) is outermost at reserve, capture and final; then catalog read lock -> owner sync head -> current user/session. No code acquires the outer guard after an inner lock.",
+    "outerGuardAndLocks": "The catalog lock, owner sync head and authenticated-session guard are acquired at reserve, capture and final. Provider I/O runs without database locks.",
     "selectedGyms": "empty means full allowed catalog; otherwise candidates are the intersection of live owner-selected gyms and currently available catalog exercises.",
     "factsSql": "partial functional numeric finishedAt index for nondeleted owner workouts by (owner, finishedAt, id); MATERIALIZED LIMIT 65 matching parents before any set expansion; reject ai_context_too_large if parent count exceeds 64. Expand only those parents and reject above 8192 fact rows.",
     "facts": "window is [startOfDay(capturedLocalDate-27 days in requested IANA zone), capturedAt]. Accept only completed nondeleted facts where parent finishedAt<=capturedAt and startedAt<=factTime<=finishedAt; factTime is completedAt else startedAt. Exclude invalid/future/out-of-window temporal facts and emit a data-quality marker without changing source records.",

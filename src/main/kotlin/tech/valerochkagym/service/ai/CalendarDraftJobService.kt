@@ -18,7 +18,6 @@ import tech.valerochkagym.controller.advice.bad
 import tech.valerochkagym.controller.advice.unauthorized
 import tech.valerochkagym.controller.model.CalendarDraftRequest
 import tech.valerochkagym.controller.model.CalendarDraftResponse
-import tech.valerochkagym.repository.coachrelation.CoachRelationRepositories
 import tech.valerochkagym.service.model.Identity
 import tools.jackson.core.StreamReadFeature
 import tools.jackson.databind.ObjectMapper
@@ -36,7 +35,7 @@ data class CalendarDraftJobResponse(
 class CalendarDraftJobService(
   private val jdbc: JdbcTemplate,
   private val tx: TransactionTemplate,
-  private val relations: CoachRelationRepositories,
+  private val sessionGuard: tech.valerochkagym.service.auth.IdentitySessionGuard,
   private val contexts: AiContextReader,
   private val calendar: CalendarAiService,
   private val provider: AiProvider,
@@ -151,8 +150,7 @@ class CalendarDraftJobService(
     val digest =
       MessageDigest.getInstance("SHA-256").digest(raw).joinToString("") { "%02x".format(it) }
     return tx.execute {
-      relations.guards(identity.userId)
-      relations.session(identity)
+      sessionGuard.lock(identity)
       val id = UUID.fromString(request.requestId)
       read(identity.userId, id)?.let {
         if (it.digest != digest) throw aiError("ai_request_conflict")
@@ -212,8 +210,7 @@ class CalendarDraftJobService(
 
   fun cancel(identity: Identity, id: UUID) =
     tx.executeWithoutResult {
-      relations.guards(identity.userId)
-      relations.session(identity)
+      sessionGuard.lock(identity)
       jdbc.update(
         "INSERT INTO calendar_draft_job_supersessions(owner_id,request_id) VALUES (?,?) ON CONFLICT DO NOTHING",
         identity.userId,
@@ -228,8 +225,7 @@ class CalendarDraftJobService(
 
   fun status(identity: Identity, id: UUID): CalendarDraftJobResponse =
     tx.execute {
-      relations.guards(identity.userId)
-      relations.session(identity)
+      sessionGuard.lock(identity)
       checked(
         identity,
         read(identity.userId, id) ?: throw ApiException(404, "not_found", "Заявка не найдена"),
@@ -296,7 +292,6 @@ class CalendarDraftJobService(
         .firstOrNull() ?: return
     val claimed =
       tx.execute {
-        relations.guards(candidate.owner)
         val token = UUID.randomUUID()
         val changed =
           jdbc.update(
@@ -370,7 +365,6 @@ class CalendarDraftJobService(
 
   private fun finish(job: Job, state: String, code: String?) =
     tx.executeWithoutResult {
-      relations.guards(job.owner)
       jdbc.update(
         "UPDATE calendar_draft_jobs SET state=?,error_code=? WHERE owner_id=? AND request_id=? AND state='RUNNING' AND lease_token=? AND current_job",
         state,

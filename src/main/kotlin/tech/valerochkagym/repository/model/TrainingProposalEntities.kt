@@ -8,8 +8,7 @@ import org.hibernate.annotations.JdbcTypeCode
 import org.hibernate.type.SqlTypes
 
 enum class TrainingProposalSource {
-  AI,
-  COACH,
+  AI
 }
 
 enum class TrainingProposalStatus {
@@ -25,8 +24,6 @@ enum class TrainingProposalStatus {
 class TrainingProposalEntity(
   @Id var id: UUID = UUID.randomUUID(),
   var recipientId: UUID = UUID(0, 0),
-  var authorId: UUID? = null,
-  @Column(updatable = false) var originRelationId: UUID? = null,
   @Enumerated(EnumType.STRING) var source: TrainingProposalSource = TrainingProposalSource.AI,
   @Enumerated(EnumType.STRING) var status: TrainingProposalStatus = TrainingProposalStatus.PENDING,
   var currentVersion: Int = 1,
@@ -45,7 +42,6 @@ data class TrainingProposalVersionId(var proposalId: UUID = UUID(0, 0), var vers
 class TrainingProposalVersionEntity(
   @Id var proposalId: UUID = UUID(0, 0),
   @Id var version: Int = 1,
-  @Column(updatable = false) var originRelationId: UUID? = null,
   @JdbcTypeCode(SqlTypes.JSON) @Column(columnDefinition = "jsonb") var draft: String = "{}",
   var ownerRevision: Long = 0,
   var catalogRevision: Long = 0,

@@ -36,7 +36,7 @@ class CalendarAiService(
   private val json: ObjectMapper,
   private val validator: AiDraftValidator,
   private val clock: Clock,
-  private val relations: tech.valerochkagym.repository.coachrelation.CoachRelationRepositories,
+  private val sessionGuard: tech.valerochkagym.service.auth.IdentitySessionGuard,
   private val hooks: CalendarAiExecutionHooks,
   private val explanations: PlannerExplanationStore,
 ) {
@@ -162,10 +162,9 @@ class CalendarAiService(
       val final =
         tx.execute {
           hooks.beforeFinalLock()
-          relations.guards(identity.userId)
           val catalogHead = catalog.readLock()
           val ownerHead = heads.writeLockOrNull(identity.userId) ?: unauthorized()
-          relations.session(identity)
+          sessionGuard.lock(identity)
           if (
             catalogHead.revision != request.expectedCatalogRevision ||
               ownerHead.revision != request.expectedRevision
@@ -250,11 +249,10 @@ class CalendarAiService(
   private fun reserve(identity: Identity, request: CalendarDraftRequest, digest: String): Reserved {
     val reserved =
       tx.execute {
-        relations.guards(identity.userId)
         val now = Instant.now(clock)
         val catalogHead = catalog.readLock()
         val ownerHead = heads.writeLockOrNull(identity.userId) ?: unauthorized()
-        relations.session(identity)
+        sessionGuard.lock(identity)
         val id = UUID.fromString(request.requestId)
         val previous = attempts.writeLock(identity.userId, id)
         if (previous != null) {

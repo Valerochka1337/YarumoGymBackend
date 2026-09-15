@@ -67,13 +67,6 @@ class TrainingProposalController(
     request: HttpServletRequest,
   ) = service.reject(identity, proposalId, validator.reject(tree(raw(request))))
 
-  @PostMapping("/{proposalId}/revoke")
-  fun revoke(
-    @AuthenticationPrincipal identity: Identity,
-    @PathVariable proposalId: UUID,
-    request: HttpServletRequest,
-  ) = service.revoke(identity, proposalId, validator.revoke(tree(raw(request))))
-
   private fun capability(request: HttpServletRequest, response: HttpServletResponse) {
     val accepted =
       request
