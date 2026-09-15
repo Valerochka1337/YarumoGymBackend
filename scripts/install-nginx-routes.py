@@ -15,7 +15,7 @@ from pathlib import Path
 
 BEGIN = "# BEGIN MANAGED ROUTINE SHARE ROUTES"
 END = "# END MANAGED ROUTINE SHARE ROUTES"
-SERVER_NAME = "server_name api.valerochkagym.tech;"
+API_HOST = "api.valerochkagym.tech"
 
 
 def marked_block(source: str) -> str:
@@ -35,38 +35,99 @@ def marked_block(source: str) -> str:
     return block
 
 
+def matching_brace(text: str, opening: int) -> int:
+    """Return the matching closing brace, ignoring comments and quoted strings."""
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    in_comment = False
+    for index in range(opening, len(text)):
+        char = text[index]
+        if in_comment:
+            if char == "\n":
+                in_comment = False
+            continue
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char == "#":
+            in_comment = True
+        elif char in {'"', "'"}:
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    raise ValueError("nginx server block has unbalanced braces")
+
+
+def server_blocks(current: str) -> list[tuple[int, int]]:
+    blocks: list[tuple[int, int]] = []
+    for match in re.finditer(r"(?m)^[ \t]*server\s*\{", current):
+        opening = current.find("{", match.start(), match.end())
+        closing = matching_brace(current, opening)
+        blocks.append((match.start(), closing + 1))
+    return blocks
+
+
+def https_api_server(current: str) -> tuple[int, int]:
+    host = re.compile(
+        rf"(?m)^[ \t]*server_name\s+[^;]*\b{re.escape(API_HOST)}\b[^;]*;"
+    )
+    https = re.compile(r"(?m)^[ \t]*listen\s+(?:\[[^]]+\]:)?443(?:\s|;)")
+    matches = [
+        (start, end)
+        for start, end in server_blocks(current)
+        if host.search(current[start:end]) and https.search(current[start:end])
+    ]
+    if not matches:
+        raise ValueError("api.valerochkagym.tech HTTPS server block was not found")
+    if len(matches) > 1:
+        raise ValueError("multiple api.valerochkagym.tech HTTPS server blocks were found")
+    return matches[0]
+
+
+def remove_managed_blocks(current: str) -> str:
+    begin_count = current.count(BEGIN)
+    end_count = current.count(END)
+    if begin_count != end_count:
+        raise ValueError("installed nginx config has an incomplete managed block")
+    pattern = re.compile(
+        rf"(?ms)^[ \t]*{re.escape(BEGIN)}[ \t]*\n"
+        rf".*?^[ \t]*{re.escape(END)}[ \t]*(?:\n|$)"
+    )
+    cleaned, removed = pattern.subn("", current)
+    if removed != begin_count:
+        raise ValueError("installed nginx config has an invalid managed block")
+    return cleaned
+
+
 def merge(current: str, source: str) -> str:
     block = marked_block(source)
-    current_begin = current.find(BEGIN)
-    current_end = current.find(END, current_begin + len(BEGIN))
-    if current_begin >= 0 or current_end >= 0:
-        if current_begin < 0 or current_end < 0:
-            raise ValueError("installed nginx config has an incomplete managed block")
-        current_start = current.rfind("\n", 0, current_begin) + 1
-        indent = current[current_start:current_begin]
-        current_line_end = current.find("\n", current_end + len(END))
-        if current_line_end < 0:
-            current_line_end = len(current)
-        return (
-            current[:current_start]
-            + textwrap.indent(block, indent)
-            + current[current_line_end:]
-        )
+    current = remove_managed_blocks(current)
+    server_start, server_end = https_api_server(current)
+    selected = current[server_start:server_end]
 
-    if "location = /.well-known/assetlinks.json" in current:
+    if "location = /.well-known/assetlinks.json" in selected:
         raise ValueError("installed nginx config has an unmanaged assetlinks route")
-    if re.search(r"location\s+(?:\^~\s+)?/r/", current) or re.search(
-        r"location\s+~[^\n]*\^/r/", current
+    if re.search(r"location\s+(?:\^~\s+)?/r/", selected) or re.search(
+        r"location\s+~[^\n]*\^/r/", selected
     ):
         raise ValueError("installed nginx config has an unmanaged routine-share route")
 
-    server = current.find(SERVER_NAME)
-    if server < 0:
-        raise ValueError("api.valerochkagym.tech server block was not found")
-    fallback = re.search(r"(?m)^(?P<indent>\s*)location\s+/\s*\{", current[server:])
+    fallback = re.search(
+        r"(?m)^(?P<indent>[ \t]*)location\s+(?:\^~\s+)?/\s*\{", selected
+    )
     if fallback is None:
-        raise ValueError("SPA fallback location was not found")
-    insert_at = server + fallback.start()
+        raise ValueError("SPA fallback location was not found in the HTTPS server block")
+    insert_at = server_start + fallback.start()
     indent = fallback.group("indent")
     indented_block = textwrap.indent(block, indent)
     return current[:insert_at] + indented_block + "\n" + current[insert_at:]
