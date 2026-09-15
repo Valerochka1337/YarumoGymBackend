@@ -27,7 +27,8 @@ class InstallNginxRoutesTest(unittest.TestCase):
 
         self.assertLess(merged.index(MODULE.BEGIN), merged.index("location / {"))
         self.assertIn("location = /.well-known/assetlinks.json", merged)
-        self.assertIn('location ~ "^/r/[A-Za-z0-9_-]{43}$"', merged)
+        self.assertIn("location ^~ /r/", merged)
+        self.assertLess(merged.index("location ^~ /r/"), merged.index("location / {"))
         self.assertIn("try_files $uri $uri/ /index.html", merged)
 
     def test_merge_is_idempotent(self):
@@ -44,6 +45,15 @@ class InstallNginxRoutesTest(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "unmanaged assetlinks"):
+            MODULE.merge(current, self.source)
+
+    def test_unmanaged_share_prefix_is_rejected(self):
+        current = self.current.replace(
+            "    location / {",
+            "    location ^~ /r/ { return 200; }\n    location / {",
+        )
+
+        with self.assertRaisesRegex(ValueError, "unmanaged routine-share"):
             MODULE.merge(current, self.source)
 
     def test_cd_transfers_and_cleans_nginx_files(self):
