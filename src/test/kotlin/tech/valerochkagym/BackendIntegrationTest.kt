@@ -798,6 +798,63 @@ class BackendIntegrationTest {
   }
 
   @Test
+  fun `workout RIR accepts nullable bounded integers and survives sync replay`() {
+    val fixture = json.readTree(javaClass.getResourceAsStream("/android-coach-snapshot.json"))
+    for (rir in listOf("null", "0", "3", "10")) {
+      val token = account()["accessToken"].asString()
+      val records = fixture["records"].deepCopy()
+      val workout = records.first { it["kind"].asString() == "workout" }
+      for (section in workout["payload"]["exercises"]) {
+        for (set in section["sets"]) {
+          val node = set as tools.jackson.databind.node.ObjectNode
+          node.set("targetRir", json.readTree(rir))
+          node.set("actualRir", json.readTree(rir))
+        }
+      }
+      val request =
+        mapOf(
+          "operationId" to UUID.randomUUID().toString(),
+          "changes" to
+            records.toList().map {
+              change(it["id"].asString(), 0, it["payload"], it["kind"].asString())
+            },
+        )
+      assertEquals(200, call("POST", "/sync", request, token, "3").status)
+      assertEquals(200, call("POST", "/sync", request, token, "3").status)
+      val restored =
+        call("GET", "/sync", token = token, version = "3").body!!["records"].first {
+          it["kind"].asString() == "workout"
+        }
+      assertEquals(workout["payload"], restored["payload"])
+    }
+  }
+
+  @Test
+  fun `workout RIR rejects strings fractions booleans and values outside zero to ten atomically`() {
+    val fixture = json.readTree(javaClass.getResourceAsStream("/android-coach-snapshot.json"))
+    val token = account()["accessToken"].asString()
+    for (field in listOf("targetRir", "actualRir")) {
+      for (rir in listOf("-1", "11", "1.5", "3.0", "true", "\"3\"", "{}", "[]")) {
+        val records = fixture["records"].deepCopy()
+        val workout = records.first { it["kind"].asString() == "workout" }
+        val set =
+          workout["payload"]["exercises"][0]["sets"][0] as tools.jackson.databind.node.ObjectNode
+        set.set(field, json.readTree(rir))
+        val request =
+          mapOf(
+            "operationId" to UUID.randomUUID().toString(),
+            "changes" to
+              records.toList().map {
+                change(it["id"].asString(), 0, it["payload"], it["kind"].asString())
+              },
+          )
+        assertEquals(400, call("POST", "/sync", request, token, "3").status, "$field=$rir")
+        assertEquals(0, call("GET", "/sync", token = token, version = "3").body!!["records"].size())
+      }
+    }
+  }
+
+  @Test
   fun `OpenAPI describes auth and synchronization endpoints`() {
     val token = account()["accessToken"].asString()
     val request =
