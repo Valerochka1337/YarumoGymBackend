@@ -137,6 +137,7 @@ server {
         self.assertIn("^x-yarumo-route:[[:space:]]*routine-share", deploy)
         self.assertIn('nginx -T > "$effective_config"', deploy)
         self.assertIn("Expected one active IPv4 HTTPS config", deploy)
+        self.assertIn("Loaded Nginx route counts", deploy)
         self.assertNotIn(
             "readlink -f /etc/nginx/sites-enabled/api.valerochkagym.tech", deploy
         )

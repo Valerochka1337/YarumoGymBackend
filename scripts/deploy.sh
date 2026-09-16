@@ -40,7 +40,7 @@ set_image() {
 }
 install_nginx_routes() {
   local target backup candidate headers share_headers body asset_status share_status root_status
-  local effective_config targets_file config canonical probe
+  local effective_config targets_file config canonical probe managed_count share_location_count marker_count
   local host=api.valerochkagym.tech
   local origin="https://$host"
   local -a nginx_targets=()
@@ -121,6 +121,17 @@ install_nginx_routes() {
     echo 'Nginx App Links smoke check failed; restoring the previous server block.' >&2
     echo 'Routine-share response headers:' >&2
     sed -n '1,30p' "$share_headers" >&2
+    effective_config=$(mktemp nginx.failed-effective.XXXXXX)
+    if nginx -T > "$effective_config" 2>/dev/null; then
+      managed_count=$(grep -Fc '# BEGIN MANAGED ROUTINE SHARE ROUTES' "$effective_config" || true)
+      share_location_count=$(grep -Ec 'location[[:space:]]+\^~[[:space:]]+/r/' "$effective_config" || true)
+      marker_count=$(grep -Fc 'add_header X-Yarumo-Route routine-share always' "$effective_config" || true)
+      printf 'Loaded Nginx route counts: managed=%s share_location=%s marker=%s\n' \
+        "$managed_count" "$share_location_count" "$marker_count" >&2
+    else
+      echo 'Unable to inspect the loaded Nginx configuration.' >&2
+    fi
+    rm -f "$effective_config"
     if ! restore_nginx; then echo 'Nginx rollback also failed' >&2; fi
     rm -f "$backup" "$candidate" "$headers" "$share_headers" "$body"
     return 1
