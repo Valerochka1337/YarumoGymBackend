@@ -106,12 +106,31 @@ server {
         self.assertIn(MODULE.BEGIN, merged[slice(*ipv4)])
 
     def test_wildcard_https_listener_uses_loopback_for_smoke_check(self):
-        self.assertEqual("127.0.0.1", MODULE.https_api_listen_address(self.current))
+        self.assertEqual("127.0.0.1", MODULE.https_listen_address(self.current))
 
     def test_explicit_https_listener_is_used_for_smoke_check(self):
         current = self.current.replace("listen 443 ssl;", "listen 62.84.122.55:443 ssl;")
 
-        self.assertEqual("62.84.122.55", MODULE.https_api_listen_address(current))
+        self.assertEqual("62.84.122.55", MODULE.https_listen_address(current))
+
+    def test_default_spa_strategy_selects_runtime_fallback_server(self):
+        current = """server {
+    listen 443 ssl;
+    server_name api.valerochkagym.tech;
+    location / { try_files $uri $uri/ /index.html; }
+}
+server {
+    listen 443 ssl default_server;
+    server_name _;
+    location / { try_files $uri $uri/ /index.html; }
+}
+"""
+
+        merged = MODULE.merge(current, self.source, strategy="default-spa")
+        api, fallback = MODULE.server_blocks(merged)
+
+        self.assertNotIn(MODULE.BEGIN, merged[slice(*api)])
+        self.assertIn(MODULE.BEGIN, merged[slice(*fallback)])
 
     def test_unmanaged_public_route_is_rejected(self):
         current = self.current.replace(
@@ -141,6 +160,8 @@ server {
         self.assertIn("install_nginx_routes", deploy)
         self.assertIn("--noproxy '*'", deploy)
         self.assertIn('--listen-address-output "$listen_address_file"', deploy)
+        self.assertIn('for strategy in default-spa api', deploy)
+        self.assertIn('--server-strategy "$selected_strategy"', deploy)
         self.assertIn('--resolve "$host:443:$smoke_address"', deploy)
         self.assertIn("Nginx smoke: assetlinks=%s share=%s root=%s", deploy)
         self.assertIn("^x-yarumo-route:[[:space:]]*routine-share", deploy)
