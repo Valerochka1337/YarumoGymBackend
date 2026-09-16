@@ -164,6 +164,8 @@ server {
         self.assertIn('--server-strategy "$selected_strategy"', deploy)
         self.assertIn('--resolve "$host:443:$smoke_address"', deploy)
         self.assertIn("Nginx smoke: assetlinks=%s share=%s root=%s", deploy)
+        self.assertIn("for attempt in {1..15}", deploy)
+        self.assertIn('if [[ "$smoke_ready" != true ]]', deploy)
         self.assertIn("^x-yarumo-route:[[:space:]]*routine-share", deploy)
         self.assertIn('nginx -T > "$effective_config"', deploy)
         self.assertIn("Expected one active IPv4 HTTPS config", deploy)
