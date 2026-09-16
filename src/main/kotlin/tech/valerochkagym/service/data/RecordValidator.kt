@@ -219,6 +219,8 @@ class RecordValidator(
       "reportedFeelingsJson",
       "restSnapshotJson",
       "coachMutationRevision",
+      "targetRir",
+      "actualRir",
     )
 
   private fun set(n: JsonNode, completed: Boolean) {
@@ -246,9 +248,9 @@ class RecordValidator(
           number(
             n,
             it,
-            integer = it.endsWith("Reps") || it.endsWith("DurationSec"),
+            integer = it.endsWith("Reps") || it.endsWith("DurationSec") || it.endsWith("Rir"),
             min = if (it.endsWith("InclinePct")) -100.0 else 0.0,
-            max = 1e6,
+            max = if (it.endsWith("Rir")) 10.0 else 1e6,
           )
         }
       n["setType"]?.let {
