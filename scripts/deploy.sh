@@ -40,7 +40,7 @@ set_image() {
 }
 install_nginx_routes() {
   local target backup candidate headers share_headers body listen_address_file smoke_address
-  local asset_status share_status root_status
+  local asset_status share_status root_status attempt smoke_ready=false
   local effective_config targets_file config canonical probe strategy selected_strategy
   local managed_count share_location_count marker_count
   local host=api.valerochkagym.tech
@@ -133,15 +133,24 @@ install_nginx_routes() {
   )
   # Verify the Nginx instance we just reloaded. Public DNS can be cached or routed through
   # another edge, which must not make an otherwise valid on-host deployment roll back.
-  asset_status=$("${smoke_curl[@]}" --dump-header "$headers" --output "$body" --write-out '%{http_code}' "$origin/.well-known/assetlinks.json" || true)
-  share_status=$("${smoke_curl[@]}" --dump-header "$share_headers" --output /dev/null --write-out '%{http_code}' "$origin/r/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" || true)
-  root_status=$("${smoke_curl[@]}" --output /dev/null --write-out '%{http_code}' "$origin/" || true)
+  # `systemctl reload` only signals the Nginx master. Old workers can still accept new
+  # connections for a brief window, so wait until requests observe the new route table.
+  for attempt in {1..15}; do
+    asset_status=$("${smoke_curl[@]}" --dump-header "$headers" --output "$body" --write-out '%{http_code}' "$origin/.well-known/assetlinks.json" || true)
+    share_status=$("${smoke_curl[@]}" --dump-header "$share_headers" --output /dev/null --write-out '%{http_code}' "$origin/r/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" || true)
+    root_status=$("${smoke_curl[@]}" --output /dev/null --write-out '%{http_code}' "$origin/" || true)
+    if [[ "$asset_status" == 200 && "$root_status" == 200 ]] &&
+       grep -Eiq '^content-type:[[:space:]]*application/json' "$headers" &&
+       grep -q 'com.valerochka1337.valerochkagym' "$body" &&
+       grep -q 'delegate_permission/common.handle_all_urls' "$body" &&
+       grep -Eiq '^x-yarumo-route:[[:space:]]*routine-share' "$share_headers"; then
+      smoke_ready=true
+      break
+    fi
+    if [[ "$attempt" != 15 ]]; then sleep 1; fi
+  done
   printf 'Nginx smoke: assetlinks=%s share=%s root=%s\n' "$asset_status" "$share_status" "$root_status"
-  if [[ "$asset_status" != 200 || "$root_status" != 200 ]] ||
-     ! grep -Eiq '^content-type:[[:space:]]*application/json' "$headers" ||
-     ! grep -q 'com.valerochka1337.valerochkagym' "$body" ||
-     ! grep -q 'delegate_permission/common.handle_all_urls' "$body" ||
-     ! grep -Eiq '^x-yarumo-route:[[:space:]]*routine-share' "$share_headers"; then
+  if [[ "$smoke_ready" != true ]]; then
     echo 'Nginx App Links smoke check failed; restoring the previous server block.' >&2
     echo 'Routine-share response headers:' >&2
     sed -n '1,30p' "$share_headers" >&2
