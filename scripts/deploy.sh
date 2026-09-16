@@ -39,18 +39,13 @@ set_image() {
   mv .env.next .env
 }
 install_nginx_routes() {
-  local target backup candidate headers share_headers body asset_status share_status root_status
+  local target backup candidate headers share_headers body listen_address_file smoke_address
+  local asset_status share_status root_status
   local effective_config targets_file config canonical probe managed_count share_location_count marker_count
   local host=api.valerochkagym.tech
   local origin="https://$host"
   local -a nginx_targets=()
-  local -a smoke_curl=(
-    curl --silent --show-error
-    --noproxy '*'
-    --resolve "$host:443:127.0.0.1"
-    --connect-timeout 5 --max-time 15
-    --retry 3 --retry-delay 1 --retry-connrefused
-  )
+  local -a smoke_curl=()
   if [[ ! -f incoming/nginx.conf && ! -f incoming/install-nginx-routes.py ]]; then return 0; fi
   [[ -f incoming/nginx.conf && -f incoming/install-nginx-routes.py ]] || {
     echo 'Nginx deployment files are missing' >&2
@@ -93,20 +88,38 @@ install_nginx_routes() {
   headers=$(mktemp nginx.headers.XXXXXX)
   share_headers=$(mktemp nginx.share-headers.XXXXXX)
   body=$(mktemp nginx.body.XXXXXX)
+  listen_address_file=$(mktemp nginx.listen-address.XXXXXX)
   cp "$target" "$backup"
   restore_nginx() {
     cp "$backup" "$target"
     nginx -t && systemctl reload nginx
   }
-  if ! python3 incoming/install-nginx-routes.py "$target" incoming/nginx.conf "$candidate" ||
+  if ! python3 incoming/install-nginx-routes.py \
+       --listen-address-output "$listen_address_file" \
+       "$target" incoming/nginx.conf "$candidate" ||
      ! install -m 0644 "$candidate" "$target" ||
      ! nginx -t ||
      ! systemctl reload nginx; then
     echo 'Nginx route installation failed; restoring the previous server block.' >&2
     if ! restore_nginx; then echo 'Nginx rollback also failed' >&2; fi
-    rm -f "$backup" "$candidate" "$headers" "$share_headers" "$body"
+    rm -f "$backup" "$candidate" "$headers" "$share_headers" "$body" "$listen_address_file"
     return 1
   fi
+  smoke_address=$(cat "$listen_address_file")
+  if [[ ! "$smoke_address" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    echo 'Nginx route installer returned an invalid listen address; restoring the previous server block.' >&2
+    if ! restore_nginx; then echo 'Nginx rollback also failed' >&2; fi
+    rm -f "$backup" "$candidate" "$headers" "$share_headers" "$body" "$listen_address_file"
+    return 1
+  fi
+  printf 'Checking App Links routes through selected listener: %s:443\n' "$smoke_address"
+  smoke_curl=(
+    curl --silent --show-error
+    --noproxy '*'
+    --resolve "$host:443:$smoke_address"
+    --connect-timeout 5 --max-time 15
+    --retry 3 --retry-delay 1 --retry-connrefused
+  )
   # Verify the Nginx instance we just reloaded. Public DNS can be cached or routed through
   # another edge, which must not make an otherwise valid on-host deployment roll back.
   asset_status=$("${smoke_curl[@]}" --dump-header "$headers" --output "$body" --write-out '%{http_code}' "$origin/.well-known/assetlinks.json" || true)
@@ -133,11 +146,11 @@ install_nginx_routes() {
     fi
     rm -f "$effective_config"
     if ! restore_nginx; then echo 'Nginx rollback also failed' >&2; fi
-    rm -f "$backup" "$candidate" "$headers" "$share_headers" "$body"
+    rm -f "$backup" "$candidate" "$headers" "$share_headers" "$body" "$listen_address_file"
     return 1
   fi
   install -m 0644 "$target" nginx.conf
-  rm -f "$backup" "$candidate" "$headers" "$share_headers" "$body"
+  rm -f "$backup" "$candidate" "$headers" "$share_headers" "$body" "$listen_address_file"
 }
 set_image "$new_image"
 if ! "${compose[@]}" up -d --wait --wait-timeout 180 ||

@@ -16,6 +16,9 @@ from pathlib import Path
 BEGIN = "# BEGIN MANAGED ROUTINE SHARE ROUTES"
 END = "# END MANAGED ROUTINE SHARE ROUTES"
 API_HOST = "api.valerochkagym.tech"
+IPV4_HTTPS_LISTEN = re.compile(
+    r"(?m)^[ \t]*listen\s+(?:(?P<address>(?:(?:\d{1,3}\.){3}\d{1,3}|\*)):)?443(?:\s|;)"
+)
 
 
 def marked_block(source: str) -> str:
@@ -81,21 +84,28 @@ def https_api_server(current: str) -> tuple[int, int]:
     host = re.compile(
         rf"(?m)^[ \t]*server_name\s+[^;]*\b{re.escape(API_HOST)}\b[^;]*;"
     )
-    # The deployment smoke check connects to 127.0.0.1, so an IPv6-only virtual host is
-    # not the server that handles it. Select an IPv4 or wildcard HTTPS listener.
-    https = re.compile(
-        r"(?m)^[ \t]*listen\s+(?:(?:(?:\d{1,3}\.){3}\d{1,3}|\*):)?443(?:\s|;)"
-    )
     matches = [
         (start, end)
         for start, end in server_blocks(current)
-        if host.search(current[start:end]) and https.search(current[start:end])
+        if host.search(current[start:end]) and IPV4_HTTPS_LISTEN.search(current[start:end])
     ]
     if not matches:
         raise ValueError("api.valerochkagym.tech HTTPS server block was not found")
     if len(matches) > 1:
         raise ValueError("multiple api.valerochkagym.tech HTTPS server blocks were found")
     return matches[0]
+
+
+def https_api_listen_address(current: str) -> str:
+    """Return an address that reaches the selected IPv4 HTTPS virtual host locally."""
+    server_start, server_end = https_api_server(current)
+    listeners = list(IPV4_HTTPS_LISTEN.finditer(current[server_start:server_end]))
+    if any(match.group("address") in {None, "*"} for match in listeners):
+        return "127.0.0.1"
+    addresses = {match.group("address") for match in listeners}
+    if len(addresses) != 1:
+        raise ValueError("HTTPS server block has multiple explicit IPv4 listen addresses")
+    return addresses.pop()
 
 
 def remove_managed_blocks(current: str) -> str:
@@ -139,6 +149,7 @@ def merge(current: str, source: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--listen-address-output", type=Path)
     parser.add_argument("installed", type=Path)
     parser.add_argument("source", type=Path)
     parser.add_argument("output", type=Path)
@@ -147,6 +158,11 @@ def main() -> None:
         merge(args.installed.read_text(), args.source.read_text()),
         encoding="utf-8",
     )
+    if args.listen_address_output is not None:
+        args.listen_address_output.write_text(
+            https_api_listen_address(args.installed.read_text()),
+            encoding="utf-8",
+        )
 
 
 if __name__ == "__main__":

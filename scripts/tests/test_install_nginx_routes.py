@@ -105,6 +105,14 @@ server {
         self.assertNotIn(MODULE.BEGIN, merged[slice(*ipv6)])
         self.assertIn(MODULE.BEGIN, merged[slice(*ipv4)])
 
+    def test_wildcard_https_listener_uses_loopback_for_smoke_check(self):
+        self.assertEqual("127.0.0.1", MODULE.https_api_listen_address(self.current))
+
+    def test_explicit_https_listener_is_used_for_smoke_check(self):
+        current = self.current.replace("listen 443 ssl;", "listen 62.84.122.55:443 ssl;")
+
+        self.assertEqual("62.84.122.55", MODULE.https_api_listen_address(current))
+
     def test_unmanaged_public_route_is_rejected(self):
         current = self.current.replace(
             "    location / {",
@@ -132,7 +140,8 @@ server {
         self.assertIn("incoming/nginx.conf", workflow)
         self.assertIn("install_nginx_routes", deploy)
         self.assertIn("--noproxy '*'", deploy)
-        self.assertIn('--resolve "$host:443:127.0.0.1"', deploy)
+        self.assertIn('--listen-address-output "$listen_address_file"', deploy)
+        self.assertIn('--resolve "$host:443:$smoke_address"', deploy)
         self.assertIn("Nginx smoke: assetlinks=%s share=%s root=%s", deploy)
         self.assertIn("^x-yarumo-route:[[:space:]]*routine-share", deploy)
         self.assertIn('nginx -T > "$effective_config"', deploy)
