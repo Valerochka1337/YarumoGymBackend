@@ -41,7 +41,8 @@ set_image() {
 install_nginx_routes() {
   local target backup candidate headers share_headers body listen_address_file smoke_address
   local asset_status share_status root_status
-  local effective_config targets_file config canonical probe managed_count share_location_count marker_count
+  local effective_config targets_file config canonical probe strategy selected_strategy
+  local managed_count share_location_count marker_count
   local host=api.valerochkagym.tech
   local origin="https://$host"
   local -a nginx_targets=()
@@ -57,17 +58,26 @@ install_nginx_routes() {
     rm -f "$effective_config" "$targets_file"
     return 1
   fi
-  while IFS= read -r config; do
-    canonical=$(readlink -f "$config" 2>/dev/null || true)
-    [[ -n "$canonical" && -f "$canonical" ]] || continue
-    probe=$(mktemp nginx.probe.XXXXXX)
-    if python3 incoming/install-nginx-routes.py \
-      "$canonical" incoming/nginx.conf "$probe" 2>/dev/null; then
-      printf '%s\n' "$canonical" >> "$targets_file"
+  for strategy in default-spa api; do
+    : > "$targets_file"
+    while IFS= read -r config; do
+      canonical=$(readlink -f "$config" 2>/dev/null || true)
+      [[ -n "$canonical" && -f "$canonical" ]] || continue
+      probe=$(mktemp nginx.probe.XXXXXX)
+      if python3 incoming/install-nginx-routes.py --server-strategy "$strategy" \
+        "$canonical" incoming/nginx.conf "$probe" 2>/dev/null; then
+        printf '%s\n' "$canonical" >> "$targets_file"
+      fi
+      rm -f "$probe"
+    done < <(sed -n 's/^# configuration file \(.*\):$/\1/p' "$effective_config")
+    mapfile -t nginx_targets < <(sort -u "$targets_file")
+    printf 'Nginx route candidates using %s: %s\n' "$strategy" "${#nginx_targets[@]}"
+    if [[ ${#nginx_targets[@]} == 1 ]]; then
+      selected_strategy=$strategy
+      break
     fi
-    rm -f "$probe"
-  done < <(sed -n 's/^# configuration file \(.*\):$/\1/p' "$effective_config")
-  mapfile -t nginx_targets < <(sort -u "$targets_file")
+    if [[ ${#nginx_targets[@]} -gt 1 ]]; then break; fi
+  done
   if [[ ${#nginx_targets[@]} != 1 ]]; then
     echo "Expected one active IPv4 HTTPS config for $host; found ${#nginx_targets[@]}." >&2
     echo 'Loaded config files mentioning the API host:' >&2
@@ -81,7 +91,7 @@ install_nginx_routes() {
     return 1
   fi
   target=${nginx_targets[0]}
-  printf 'Installing App Links routes into active config: %s\n' "$target"
+  printf 'Installing App Links routes into active config: %s (%s)\n' "$target" "$selected_strategy"
   rm -f "$effective_config" "$targets_file"
   backup=$(mktemp nginx.rollback.XXXXXX)
   candidate=$(mktemp nginx.candidate.XXXXXX)
@@ -96,6 +106,7 @@ install_nginx_routes() {
   }
   if ! python3 incoming/install-nginx-routes.py \
        --listen-address-output "$listen_address_file" \
+       --server-strategy "$selected_strategy" \
        "$target" incoming/nginx.conf "$candidate" ||
      ! install -m 0644 "$candidate" "$target" ||
      ! nginx -t ||
