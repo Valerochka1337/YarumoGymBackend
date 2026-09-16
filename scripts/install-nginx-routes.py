@@ -100,25 +100,21 @@ def https_api_server(current: str) -> tuple[int, int]:
     return unique_server(matches, "api.valerochkagym.tech HTTPS server block")
 
 
-def https_default_spa_server(current: str) -> tuple[int, int]:
-    default_https = re.compile(
-        r"(?m)^[ \t]*listen\s+(?:(?:(?:\d{1,3}\.){3}\d{1,3}|\*):)?443"
-        r"[^;]*\bdefault_server\b[^;]*;"
-    )
+def https_spa_server(current: str) -> tuple[int, int]:
     spa = re.compile(r"\btry_files\s+[^;]*/index\.html[^;]*;")
     matches = [
         (start, end)
         for start, end in server_blocks(current)
-        if default_https.search(current[start:end]) and spa.search(current[start:end])
+        if IPV4_HTTPS_LISTEN.search(current[start:end]) and spa.search(current[start:end])
     ]
-    return unique_server(matches, "default IPv4 HTTPS SPA server block")
+    return unique_server(matches, "IPv4 HTTPS SPA server block")
 
 
 def target_server(current: str, strategy: str) -> tuple[int, int]:
     if strategy == "api":
         return https_api_server(current)
-    if strategy == "default-spa":
-        return https_default_spa_server(current)
+    if strategy == "spa":
+        return https_spa_server(current)
     raise ValueError(f"unsupported server selection strategy: {strategy}")
 
 
@@ -177,7 +173,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--listen-address-output", type=Path)
     parser.add_argument(
-        "--server-strategy", choices=("api", "default-spa"), default="api"
+        "--server-strategy", choices=("api", "spa"), default="api"
     )
     parser.add_argument("installed", type=Path)
     parser.add_argument("source", type=Path)

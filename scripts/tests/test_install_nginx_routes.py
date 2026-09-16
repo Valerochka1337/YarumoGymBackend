@@ -113,11 +113,11 @@ server {
 
         self.assertEqual("62.84.122.55", MODULE.https_listen_address(current))
 
-    def test_default_spa_strategy_selects_runtime_fallback_server(self):
+    def test_spa_strategy_selects_runtime_fallback_server(self):
         current = """server {
     listen 443 ssl;
     server_name api.valerochkagym.tech;
-    location / { try_files $uri $uri/ /index.html; }
+    location / { proxy_pass http://127.0.0.1:18080; }
 }
 server {
     listen 443 ssl default_server;
@@ -126,7 +126,7 @@ server {
 }
 """
 
-        merged = MODULE.merge(current, self.source, strategy="default-spa")
+        merged = MODULE.merge(current, self.source, strategy="spa")
         api, fallback = MODULE.server_blocks(merged)
 
         self.assertNotIn(MODULE.BEGIN, merged[slice(*api)])
@@ -160,7 +160,7 @@ server {
         self.assertIn("install_nginx_routes", deploy)
         self.assertIn("--noproxy '*'", deploy)
         self.assertIn('--listen-address-output "$listen_address_file"', deploy)
-        self.assertIn('for strategy in default-spa api', deploy)
+        self.assertIn('for strategy in spa api', deploy)
         self.assertIn('--server-strategy "$selected_strategy"', deploy)
         self.assertIn('--resolve "$host:443:$smoke_address"', deploy)
         self.assertIn("Nginx smoke: assetlinks=%s share=%s root=%s", deploy)
