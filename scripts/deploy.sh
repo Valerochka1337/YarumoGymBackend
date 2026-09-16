@@ -58,7 +58,7 @@ install_nginx_routes() {
     rm -f "$effective_config" "$targets_file"
     return 1
   fi
-  for strategy in default-spa api; do
+  for strategy in spa api; do
     : > "$targets_file"
     while IFS= read -r config; do
       canonical=$(readlink -f "$config" 2>/dev/null || true)
