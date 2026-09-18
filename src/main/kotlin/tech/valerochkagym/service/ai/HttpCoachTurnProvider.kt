@@ -16,7 +16,7 @@ class HttpCoachTurnProvider(
       .connectTimeout(Duration.ofSeconds(5))
       .followRedirects(HttpClient.Redirect.NEVER)
       .build(),
-  private val deadlineMillis: Long = 45000,
+  private val deadlineMillis: Long = 120000,
 ) : CoachTurnProvider {
   override fun catalog() = CoachModelCatalog("AVAILABLE", settings.defaultModel, settings.models)
 
