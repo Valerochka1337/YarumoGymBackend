@@ -59,3 +59,6 @@ databaseChangeLog:
   - include:
       file: 020-strength-planner-personalization.sql
       relativeToChangelogFile: true
+  - include:
+      file: 021-coach-runs.sql
+      relativeToChangelogFile: true

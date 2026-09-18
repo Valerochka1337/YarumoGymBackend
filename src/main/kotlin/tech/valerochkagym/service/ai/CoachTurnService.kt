@@ -28,8 +28,7 @@ interface CoachTurnProvider {
 
   fun complete(input: CoachTurnInput): JsonNode
 
-  fun stream(input: CoachTurnInput, delta: (String) -> Unit): JsonNode =
-    throw aiError("ai_unavailable")
+  fun stream(input: CoachTurnInput, delta: (String) -> Unit): JsonNode = complete(input)
 }
 
 class UnconfiguredCoachTurnProvider : CoachTurnProvider {

@@ -415,3 +415,42 @@ immediate execution. Past requested dates become `EXPIRED`, never silently resch
 в payload и возвращаются синхронизацией; повтор того же operationId сохраняет идемпотентность.
 Android с RIR требует сервер с этой поддержкой; более ранний сервер отклоняет даже null
 как неизвестное поле. Миграция PostgreSQL не нужна: подходы хранятся в JSON payload.
+
+
+## Durable Live Coach runs
+
+`POST /v1/coach/runs` accepts `{requestId, workoutId, contextVersion, snapshot, message,
+history:[{role,text}], model?, automatic?}` and returns HTTP 202 with `Location` and
+`Retry-After: 2`. `runId` equals the client-generated UUID `requestId`. Repeating an
+identical request returns the existing run; changing its content with the same ID
+returns 409. Snapshot identifiers are portable UUIDs; all access is owner-scoped.
+
+- `GET /v1/coach/runs/{id}` returns state, stage, result, `lastEventSequence` and `ordinal`.
+- `GET /v1/coach/sessions/{workoutId}/runs?after=<ordinal>` lists up to 200 runs;
+  continue after the largest returned ordinal when the page is full.
+- `GET /v1/coach/runs/{id}/events?after=<sequence>` returns persisted SSE events with
+  numeric `id`, event types `progress`, `text`, `completed`, and JSON
+  `{sequence,type,stage?,text?,run?}`. Text represents the cumulative visible draft.
+  `Last-Event-ID` is also accepted. Disconnecting a subscriber never cancels execution.
+- `POST /v1/coach/runs/{id}/cancel` explicitly cancels the task and fences late publication.
+- `PUT /v1/coach/sessions/{workoutId}` accepts
+  `{eventId,sequence,contextVersion,snapshot,initiativeEnabled,active}`. Full snapshots
+  allow recovery across sequence gaps; older snapshots never overwrite newer state.
+- `POST /v1/coach/runs/{id}/receipt` accepts `{receiptId,proposalId,status}` where status
+  is `APPLIED`, `REJECTED` or `STALE`. Application state is distinct from run state.
+
+States: `QUEUED`, `RUNNING`, `SUCCEEDED`, `FAILED`, `CANCELLED`, `SUPERSEDED`.
+Successful results contain `{kind:answer|proposal|no_change,text,quickReplies,proposal?}`.
+Proposal metadata: `{proposalId,baseRevision,contextVersion,expiresAtMillis,operations,reason?}`.
+Operations use portable `submit_workout_changes` intents. The server never applies
+workout changes: Android checks the full context version and expiration, asks for
+confirmation, then applies atomically and delivers a receipt. `no_change` stays silent.
+
+The worker persists model/tool checkpoints, renews its lease independently of provider
+calls, and fences every checkpoint/event/result by lease token and expiry. Manual runs
+are FIFO within an owner's workout. Automatic pending checks may be coalesced. Timer
+checks use an absolute deadline and require a fresh session snapshot. The provider budget
+is independent from SSE delivery; execution has bounded request/tool/retry and wall-time
+budgets. Prompts and tools are server-owned. Start/stop of HTTP delivery does not control
+the worker. Deploy migration 021 and this backend before distributing the new Android app;
+older coach-turn endpoints remain available for older clients.

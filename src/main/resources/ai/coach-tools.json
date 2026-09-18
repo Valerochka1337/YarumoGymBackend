@@ -1,0 +1,761 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "get_workout_state",
+      "description": "Read pinned full workout state, profile and decisions. Optional autoregulation requests deterministic server calculation; never infer RIR or equipment.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "autoregulation": {
+            "type": "object",
+            "properties": {
+              "goal": {
+                "type": "string",
+                "enum": [
+                  "PRESERVE_PLAN",
+                  "STRENGTH",
+                  "HYPERTROPHY"
+                ]
+              },
+              "exercise_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "available_weights_kg": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "maxItems": 100,
+                "uniqueItems": true
+              },
+              "observed_rest_seconds": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "find_exercises",
+      "description": "Search authorized catalogue. Includes latest completed workout sets. Equipment filter matches exercises requiring all supplied equipment IDs; an empty filter is unrestricted. Requirements do not prove present availability. Empty history means unknown. Use returned UUIDs.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "equipment_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "uniqueItems": true
+          },
+          "muscle_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "uniqueItems": true
+          },
+          "muscle_groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "uniqueItems": true
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_exercise_history",
+      "description": "Read completed sets from latest three finished workouts owned by this user.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "exercise_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "exercise_id"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "submit_workout_changes",
+      "description": "Validate and save one immutable proposal; never applies changes. Completed results are protected. add_exercise prefills last completed history locally. autoregulate expands on server into concrete operations. reorder_exercises includes every section once. Proposal terminates this run.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "base_revision": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "operations": {
+            "type": "array",
+            "items": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "autoregulate"
+                      ]
+                    },
+                    "goal": {
+                      "type": "string",
+                      "enum": [
+                        "PRESERVE_PLAN",
+                        "STRENGTH",
+                        "HYPERTROPHY"
+                      ]
+                    },
+                    "exercise_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "available_weights_kg": {
+                      "type": "array",
+                      "items": {
+                        "type": "number",
+                        "minimum": 0
+                      },
+                      "maxItems": 100,
+                      "uniqueItems": true
+                    },
+                    "observed_rest_seconds": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "action"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "add_exercise"
+                      ]
+                    },
+                    "exercise_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "position": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "exercise_id"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "remove_remaining"
+                      ]
+                    },
+                    "section_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "section_id"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "move_exercise"
+                      ]
+                    },
+                    "section_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "position": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "section_id",
+                    "position"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "swap_exercises"
+                      ]
+                    },
+                    "first_section_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "second_section_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "first_section_id",
+                    "second_section_id"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "reorder_exercises"
+                      ]
+                    },
+                    "section_ids": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "maxItems": 100,
+                      "uniqueItems": true
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "section_ids"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "replace_remaining"
+                      ]
+                    },
+                    "section_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "exercise_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "remaining_set_ids": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "maxItems": 100,
+                      "uniqueItems": true
+                    },
+                    "weight_kg": {
+                      "type": "number",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "section_id",
+                    "exercise_id",
+                    "remaining_set_ids"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "add_set"
+                      ]
+                    },
+                    "section_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "section_id"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "delete_set"
+                      ]
+                    },
+                    "set_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "set_id"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "edit_set"
+                      ]
+                    },
+                    "set_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "values": {
+                      "type": "object",
+                      "properties": {
+                        "weight_kg": {
+                          "type": [
+                            "number",
+                            "null"
+                          ],
+                          "minimum": 0,
+                          "maximum": 1000000
+                        },
+                        "reps": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0,
+                          "maximum": 1000000
+                        },
+                        "duration_sec": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0,
+                          "maximum": 1000000
+                        },
+                        "speed_kmh": {
+                          "type": [
+                            "number",
+                            "null"
+                          ],
+                          "minimum": 0,
+                          "maximum": 1000000
+                        },
+                        "incline_pct": {
+                          "type": [
+                            "number",
+                            "null"
+                          ],
+                          "minimum": -100,
+                          "maximum": 1000000
+                        },
+                        "actual_rir": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0,
+                          "maximum": 10
+                        },
+                        "set_type": {
+                          "type": "string",
+                          "enum": [
+                            "WORK",
+                            "WARMUP",
+                            "UNKNOWN",
+                            "DROP",
+                            "AMRAP"
+                          ]
+                        }
+                      },
+                      "required": [],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "set_id",
+                    "values"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "record_result"
+                      ]
+                    },
+                    "set_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "values": {
+                      "type": "object",
+                      "properties": {
+                        "weight_kg": {
+                          "type": [
+                            "number",
+                            "null"
+                          ],
+                          "minimum": 0,
+                          "maximum": 1000000
+                        },
+                        "reps": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0,
+                          "maximum": 1000000
+                        },
+                        "duration_sec": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0,
+                          "maximum": 1000000
+                        },
+                        "speed_kmh": {
+                          "type": [
+                            "number",
+                            "null"
+                          ],
+                          "minimum": 0,
+                          "maximum": 1000000
+                        },
+                        "incline_pct": {
+                          "type": [
+                            "number",
+                            "null"
+                          ],
+                          "minimum": -100,
+                          "maximum": 1000000
+                        },
+                        "actual_rir": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0,
+                          "maximum": 10
+                        },
+                        "set_type": {
+                          "type": "string",
+                          "enum": [
+                            "WORK",
+                            "WARMUP",
+                            "UNKNOWN",
+                            "DROP",
+                            "AMRAP"
+                          ]
+                        }
+                      },
+                      "required": [],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "set_id",
+                    "values"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "set_completed"
+                      ]
+                    },
+                    "set_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "completed": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "set_id",
+                    "completed"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "start_rest"
+                      ]
+                    },
+                    "seconds": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "seconds"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "future_rest_duration"
+                      ]
+                    },
+                    "seconds": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "seconds"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "extend_rest"
+                      ]
+                    },
+                    "seconds": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "rest_start_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "seconds",
+                    "rest_start_id"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "skip_rest"
+                      ]
+                    },
+                    "rest_start_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "rest_start_id"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "available_time"
+                      ]
+                    },
+                    "minutes": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "minutes"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "excluded_exercises"
+                      ]
+                    },
+                    "exercise_ids": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "maxItems": 100,
+                      "uniqueItems": true
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "exercise_ids"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "report_feelings"
+                      ]
+                    },
+                    "set_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "feelings": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "PAIN",
+                          "FATIGUE",
+                          "TECHNIQUE_BREAKDOWN",
+                          "INTERRUPTED",
+                          "PLANNED_EFFORT",
+                          "HARDER_THAN_EXPECTED"
+                        ]
+                      },
+                      "maxItems": 100,
+                      "uniqueItems": true
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "set_id",
+                    "feelings"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "undo_last"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "minItems": 1,
+            "maxItems": 32
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "base_revision",
+          "operations"
+        ],
+        "additionalProperties": false
+      }
+    }
+  }
+]
