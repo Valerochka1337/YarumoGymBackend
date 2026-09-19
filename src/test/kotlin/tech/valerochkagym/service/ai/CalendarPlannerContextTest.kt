@@ -241,6 +241,29 @@ class CalendarPlannerContextTest {
   }
 
   @Test
+  fun `agentic context removes mass health and notes for every training goal`() {
+    val captured =
+      capture(listOf(source(1)))
+        .copy(
+          mass = mapOf("kg" to 77.0, "healthSecret" to "must-not-leak"),
+          notes = listOf(mapOf("kind" to "WORKOUT_NOTE", "text" to "private note")),
+        )
+    val eligible =
+      CalendarCandidateSelector.eligible(
+        captured.candidates,
+        captured.gyms,
+        request(),
+        captured.facts,
+        "MUSCLE_GAIN",
+      )
+    val payload =
+      CalendarPlannerContext.serializeAgentic(json, captured, request(), eligible, eligible.size)
+    assertFalse(payload.contains("healthSecret"))
+    assertFalse(payload.contains("private note"))
+    assertFalse(payload.contains("\"mass\""))
+  }
+
+  @Test
   fun `synthetic before after utf8 report measures actual serialized contexts`() {
     val small = (1..12).map { source(it) }
     val regular = (1..8).flatMap { w -> (1..4).map { e -> fact(e, 100 + w, now - w * 86400000L) } }

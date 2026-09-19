@@ -1,0 +1,38 @@
+package tech.valerochkagym.service.ai
+
+/** Fixed server-private tool vocabulary; no tool can mutate routines, proposals or calendars. */
+object PlannerToolProtocol {
+  const val maxRounds = 3
+  const val maxCalls = 6
+  const val maxCandidateIds = 24
+  const val maxAttemptBytes = 256 * 1024
+  val names =
+    setOf(
+      "get_strength_skeleton",
+      "get_candidate_details_and_history",
+      "validate_and_finalize_plan",
+    )
+
+  data class Call(
+    val id: String,
+    val name: String,
+    val candidateIds: List<String> = emptyList(),
+    /** Exact UTF-8 function arguments received from the provider. */
+    val bytes: ByteArray,
+    val plan: tools.jackson.databind.JsonNode? = null,
+  )
+
+  fun validate(call: Call, candidates: Set<String>) {
+    if (
+      !call.id.matches(Regex("[A-Za-z0-9_-]{1,128}")) ||
+        call.name !in names ||
+        call.bytes.size !in 1..16_384 ||
+        call.candidateIds.size > maxCandidateIds ||
+        call.candidateIds.distinct().size != call.candidateIds.size ||
+        call.candidateIds.any { it !in candidates } ||
+        (call.name == "validate_and_finalize_plan" && call.plan == null) ||
+        (call.name != "validate_and_finalize_plan" && call.plan != null)
+    )
+      throw aiError("ai_invalid_response")
+  }
+}

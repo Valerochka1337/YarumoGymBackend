@@ -59,3 +59,15 @@ databaseChangeLog:
   - include:
       file: 020-strength-planner-personalization.sql
       relativeToChangelogFile: true
+  - include:
+      file: 021-planner-exercise-preferences.sql
+      relativeToChangelogFile: true
+  - include:
+      file: 022-calendar-planner-refinements.sql
+      relativeToChangelogFile: true
+  - include:
+      file: 023-calendar-ai-v2-receipts.sql
+      relativeToChangelogFile: true
+  - include:
+      file: 024-calendar-refinement-leases.sql
+      relativeToChangelogFile: true

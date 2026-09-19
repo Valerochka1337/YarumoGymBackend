@@ -36,9 +36,15 @@ data class CalendarCapturedContext(
   val capturedAtMillis: Long = 0,
   val windowStartMillis: Long = 0,
   val strengthPriorities: Map<String, String> = emptyMap(),
+  val plannerPreferences: Map<String, String> = emptyMap(),
 )
 
-data class CalendarCandidateSource(val id: String, val payload: tools.jackson.databind.JsonNode)
+data class CalendarCandidateSource(
+  val id: String,
+  val payload: tools.jackson.databind.JsonNode,
+  /** Provenance comes from the catalog query, never an exercise payload flag. */
+  val curatedCanonical: Boolean = false,
+)
 
 data class CalendarFact(
   val exerciseId: String,
@@ -151,13 +157,18 @@ class AiContextReader(
         throw aiError("ai_context_too_large")
       // Fetch only rows which passed key/count/byte accounting. A personal record overrides a
       // catalog one.
-      fun rows(sql: String, vararg args: Any): List<CalendarCandidateSource> =
+      fun rows(
+        curatedCanonical: Boolean,
+        sql: String,
+        vararg args: Any,
+      ): List<CalendarCandidateSource> =
         jdbc.query(
           sql,
           { rs, _ ->
             CalendarCandidateSource(
               rs.getObject(1, java.util.UUID::class.java).toString(),
               json.readTree(rs.getString(2)),
+              curatedCanonical,
             )
           },
           *args,
@@ -166,6 +177,7 @@ class AiContextReader(
         if (effectiveStandardKeys.isEmpty()) emptyList()
         else
           rows(
+            true,
             "SELECT id,payload::text FROM standard_records WHERE kind='exercise' AND NOT archived AND id IN (${effectiveStandardKeys.joinToString(",") { "?" }}) ORDER BY id",
             *effectiveStandardKeys.map { it.id }.toTypedArray(),
           )
@@ -173,6 +185,7 @@ class AiContextReader(
         if (personalKeys.isEmpty()) emptyList()
         else
           rows(
+            false,
             "SELECT id,payload::text FROM records WHERE user_id=? AND kind='exercise' AND NOT deleted ORDER BY id LIMIT 1001",
             identity.userId,
           )
@@ -263,6 +276,42 @@ class AiContextReader(
                       .getOrDefault(false)
                 )
                   exerciseId to requireNotNull(priority)
+                else null
+              }
+              .toMap()
+          }
+          .orEmpty()
+      val plannerPreferenceRows =
+        jdbc.query(
+          "SELECT id,payload::text,octet_length(payload::text) FROM records WHERE user_id=? AND kind='planner_exercise_preferences' AND NOT deleted ORDER BY id LIMIT 2",
+          { rs, _ ->
+            Triple(
+              rs.getObject(1, java.util.UUID::class.java),
+              json.readTree(rs.getString(2)),
+              rs.getInt(3),
+            )
+          },
+          identity.userId,
+        )
+      if (plannerPreferenceRows.size > 1) throw aiError("ai_context_too_large")
+      val plannerPreferences =
+        plannerPreferenceRows
+          .singleOrNull()
+          ?.let { (id, payload, bytes) ->
+            account("planner_exercise_preferences", id, bytes)
+            payload["preferences"]
+              ?.toList()
+              .orEmpty()
+              .mapNotNull { row ->
+                val exerciseId = row["exerciseId"]?.asString()
+                val preference = row["preference"]?.asString()
+                if (
+                  exerciseId != null &&
+                    preference in setOf("MORE", "LESS", "NEVER") &&
+                    runCatching { java.util.UUID.fromString(exerciseId).toString() == exerciseId }
+                      .getOrDefault(false)
+                )
+                  exerciseId to requireNotNull(preference)
                 else null
               }
               .toMap()
@@ -486,6 +535,7 @@ class AiContextReader(
         capturedAt,
         windowStart,
         strengthPriorities,
+        plannerPreferences,
       )
     }!!
 

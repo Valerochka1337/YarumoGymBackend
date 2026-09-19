@@ -20,6 +20,7 @@ import tech.valerochkagym.repository.data.HeadRepository
 import tech.valerochkagym.repository.data.RecordRepository
 import tech.valerochkagym.repository.model.*
 import tech.valerochkagym.repository.trainingproposal.*
+import tech.valerochkagym.service.ai.aiError
 import tech.valerochkagym.service.data.RecordValidator
 import tech.valerochkagym.service.model.Identity
 import tech.valerochkagym.service.model.RecordKey
@@ -36,6 +37,7 @@ class TrainingProposalService(
   private val versions: TrainingProposalVersionRepository,
   private val receipts: TrainingProposalReceiptRepository,
   private val operations: TrainingProposalOperationRepository,
+  private val refinements: CalendarPlannerRefinementRepository,
   private val validator: TrainingProposalValidator,
   private val recordValidator: RecordValidator,
   private val json: ObjectMapper,
@@ -43,6 +45,93 @@ class TrainingProposalService(
   private val clock: Clock,
   private val jdbc: JdbcTemplate,
 ) {
+  /**
+   * A refinement only creates another pending revision. It shares the proposal row lock with
+   * approval so a stale approve/refine race cannot create a routine or calendar record here.
+   */
+  fun refineInternalAi(
+    identity: Identity,
+    proposalId: UUID,
+    expectedVersion: Int,
+    expectedOwnerRevision: Long,
+    expectedCatalogRevision: Long,
+    requestId: UUID,
+    rawRequest: ByteArray,
+    requestSha256: String,
+    draft: ApprovalDraft,
+  ): ProposalResponse =
+    tx.execute {
+      // Serialize the owner/request key before selecting a proposal. A shared request ID cannot
+      // race two different proposal locks into a uniqueness exception or reveal another proposal.
+      jdbc.query(
+        "SELECT pg_advisory_xact_lock(hashtext(?))",
+        { _, _ -> Unit },
+        "planner-refinement:${identity.userId}:$requestId",
+      )
+      val previous = refinements.writeLock(identity.userId, requestId)
+      if (previous != null) {
+        if (
+          !previous.rawRequest.contentEquals(rawRequest) ||
+            previous.requestSha256 != requestSha256 ||
+            previous.proposalId != proposalId ||
+            previous.expectedVersion != expectedVersion
+        )
+          throw aiError("ai_request_conflict")
+        previous.receipt?.let {
+          return@execute json.readValue(it, ProposalResponse::class.java)
+        }
+        if (!previous.leaseUntil.isAfter(clock.instant())) throw aiError("ai_interrupted")
+      }
+      val catalogHead = catalog.readLock()
+      val ownerHead = head(identity.userId)
+      val proposal = proposals.writeLock(proposalId) ?: hidden()
+      lockSession(identity)
+      if (proposal.recipientId != identity.userId || proposal.source != TrainingProposalSource.AI)
+        hidden()
+      if (proposal.status != TrainingProposalStatus.PENDING) error("proposal_stale")
+      val now = clock.instant()
+      if (!proposal.expiresAt.isAfter(now)) error("proposal_expired")
+      if (proposal.currentVersion != expectedVersion) error("proposal_version_conflict")
+      if (
+        ownerHead.revision != expectedOwnerRevision ||
+          catalogHead.revision != expectedCatalogRevision
+      )
+        error("proposal_stale")
+      val nextDraft = validator.normalize(draft)
+      validator.validateDraft(nextDraft, now)
+      validateCalendarLiveDraft(nextDraft, identity.userId, catalogHead.active, now)
+      val committedAt = clock.instant()
+      if (previous != null && !previous.leaseUntil.isAfter(committedAt))
+        throw aiError("ai_interrupted")
+      proposal.currentVersion += 1
+      proposal.updatedAt = committedAt
+      val next =
+        TrainingProposalVersionEntity(
+          proposalId = proposal.id,
+          version = proposal.currentVersion,
+          draft = json.writeValueAsString(nextDraft),
+          ownerRevision = ownerHead.revision,
+          catalogRevision = catalogHead.revision,
+          createdAt = committedAt,
+        )
+      versions.save(next)
+      proposal(proposal, next).also { response ->
+        refinements.save(
+          CalendarPlannerRefinementEntity(
+            identity.userId,
+            requestId,
+            proposalId,
+            expectedVersion,
+            requestSha256,
+            rawRequest.copyOf(),
+            json.writeValueAsString(response),
+            previous?.leaseUntil ?: committedAt,
+            committedAt,
+          )
+        )
+      }
+    }!!
+
   private sealed interface ApprovalAttempt {
     data class Success(val result: AcceptedResult) : ApprovalAttempt
 

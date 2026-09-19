@@ -55,3 +55,35 @@ data class CalendarDraftResponse(
   val context: CalendarDraftContext,
   val proposal: ProposalResponse,
 )
+
+data class AgenticSkeletonSlot(
+  val slotId: String,
+  val allowedExerciseIds: List<String>,
+  val minDurationSec: Int,
+  val maxDurationSec: Int,
+)
+
+data class AgenticSkeleton(
+  val focusExerciseId: String,
+  val slots: List<AgenticSkeletonSlot>,
+  val minDurationSec: Int,
+  val maxDurationSec: Int,
+)
+
+data class AgenticProjection(val candidateIds: List<String>, val skeleton: AgenticSkeleton)
+
+/** Additive response; CalendarDraftResponse stays byte-compatible for v1 clients. */
+data class CalendarDraftV2Response(
+  val requestId: String,
+  val context: CalendarDraftContext,
+  val proposal: ProposalResponse,
+  val agenticProjection: AgenticProjection,
+)
+
+data class CalendarRefinementRequest(
+  val requestId: String,
+  val expectedRevision: Long,
+  val expectedCatalogRevision: Long,
+  val expectedProposalVersion: Int,
+  val refinement: String,
+)

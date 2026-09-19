@@ -35,6 +35,7 @@ class RecordValidator(
         "exercise_hint",
         "profile",
         "strength_planner_profile",
+        "planner_exercise_preferences",
         "workout_effort",
       ) + calendarKinds
     val measurementFields =
@@ -423,10 +424,29 @@ class RecordValidator(
     if (!n["effort"].isNull) enum(n, "effort", setOf("EASY", "MODERATE", "HARD"))
   }
 
+  /** Canonical aggregate. Unknown fields are rejected so future clients cannot alter selection. */
+  private fun plannerExercisePreferences(n: JsonNode) {
+    val fields = setOf("schemaVersion", "preferences")
+    shape(n, fields)
+    if (fields.any { !n.has(it) }) bad("Настройки планировщика требуют все поля")
+    number(n, "schemaVersion", true, true, min = 1.0, max = 1.0)
+    val values = array(n, "preferences", 1000)
+    val ids =
+      values.map {
+        shape(it, setOf("exerciseId", "preference"))
+        val id = calendarUuid(it["exerciseId"]).toString()
+        enum(it, "preference", setOf("MORE", "LESS", "NEVER"))
+        id
+      }
+    if (ids.distinct().size != ids.size || ids != ids.sorted())
+      bad("Настройки планировщика должны быть канонически упорядочены")
+  }
+
   fun validate(kind: String, n: JsonNode) {
     when (kind) {
       "profile" -> profile(n)
       "strength_planner_profile" -> strengthPlannerProfile(n)
+      "planner_exercise_preferences" -> plannerExercisePreferences(n)
       "workout_effort" -> workoutEffort(n)
       "exercise_hint" -> {
         shape(n, setOf("text", "updatedAt"))
@@ -653,6 +673,15 @@ class RecordValidator(
               }
             }
           }
+          "planner_exercise_preferences" -> {
+            n["preferences"].forEach { preference ->
+              val exerciseId = calendarUuid(preference["exerciseId"])
+              val exercise = records[RecordKey("exercise", exerciseId)]
+              // A stale saved preference may be removed later, but a new preference is only for a
+              // live exercise. This mirrors the Android transaction fence.
+              if (exercise?.deleted != false) bad("Предпочтение требует доступное упражнение")
+            }
+          }
           "workout_effort" -> {
             if (RecordKey(r.kind, r.id) in changed) {
               val workoutId = calendarUuid(n["workoutId"])
@@ -760,6 +789,8 @@ class RecordValidator(
     when (r.kind) {
       "exercise_hint" -> refs.add(RecordKey("exercise", r.id))
       "strength_planner_profile" -> n["keyExercises"].forEach { add("exercise", it["exerciseId"]) }
+      "planner_exercise_preferences" ->
+        n["preferences"].forEach { add("exercise", it["exerciseId"]) }
       "gym" -> n["exerciseIds"].forEach { add("exercise", it) }
       "routine",
       "workout" -> {

@@ -1,0 +1,158 @@
+package tech.valerochkagym.service.ai
+
+import java.util.UUID
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
+import tech.valerochkagym.controller.advice.ApiException
+import tools.jackson.databind.json.JsonMapper
+
+class CalendarPlannerAgentTest {
+  private val json = JsonMapper.builder().build()
+  private val candidate = UUID(0, 1).toString()
+
+  @Test
+  fun `three tool rounds reject a fourth provider turn`() {
+    var calls = 0
+    val arguments = "{\"candidateIds\":[\"$candidate\"]}".encodeToByteArray()
+    val agent =
+      CalendarPlannerAgent(
+        turn = {
+          val id = "call-${++calls}"
+          PlannerTurn(
+            calls =
+              listOf(
+                PlannerToolProtocol.Call(
+                  id,
+                  "get_candidate_details_and_history",
+                  listOf(candidate),
+                  arguments,
+                )
+              )
+          )
+        },
+        tool = { ByteArray(16_384) { 1 } },
+      )
+    val error = assertThrows<ApiException> { agent.run(setOf(candidate)) { 45_000 } }
+    assertEquals("ai_invalid_response", error.code)
+    assertEquals(PlannerToolProtocol.maxRounds, calls)
+  }
+
+  @Test
+  fun `cumulative exchange budget rejects the next result before it is retained`() {
+    var toolCalls = 0
+    val arguments = "{\"candidateIds\":[\"$candidate\"]}".encodeToByteArray()
+    val agent =
+      CalendarPlannerAgent(
+        turn = {
+          PlannerTurn(
+            calls =
+              listOf(
+                PlannerToolProtocol.Call(
+                  "call-${toolCalls + 1}",
+                  "get_candidate_details_and_history",
+                  listOf(candidate),
+                  arguments,
+                )
+              )
+          )
+        },
+        tool = {
+          toolCalls++
+          ByteArray(40) { 1 }
+        },
+        maxAttemptBytes = arguments.size + 40 + 1,
+      )
+    val error = assertThrows<ApiException> { agent.run(setOf(candidate)) { 45_000 } }
+    assertEquals("ai_invalid_response", error.code)
+    assertEquals(2, toolCalls)
+  }
+
+  @Test
+  fun `unknown and out of pool tools are rejected without calling the tool`() {
+    var invoked = false
+    val agent =
+      CalendarPlannerAgent(
+        turn = {
+          PlannerTurn(
+            calls =
+              listOf(
+                PlannerToolProtocol.Call(
+                  "call-1",
+                  "get_candidate_details_and_history",
+                  listOf(UUID(0, 2).toString()),
+                  "{\"candidateIds\":[\"${UUID(0, 2)}\"]}".encodeToByteArray(),
+                )
+              )
+          )
+        },
+        tool = {
+          invoked = true
+          "{}".encodeToByteArray()
+        },
+      )
+    val error = assertThrows<ApiException> { agent.run(setOf(candidate)) { 45_000 } }
+    assertEquals("ai_invalid_response", error.code)
+    assertEquals(false, invoked)
+  }
+
+  @Test
+  fun `expired deadline prevents a provider turn`() {
+    var invoked = false
+    val agent =
+      CalendarPlannerAgent(
+        turn = {
+          invoked = true
+          PlannerTurn(final = json.readTree("{}"))
+        },
+        tool = { error("unused") },
+      )
+    val error = assertThrows<ApiException> { agent.run(setOf(candidate)) { 0 } }
+    assertEquals("ai_timeout", error.code)
+    assertEquals(false, invoked)
+  }
+
+  @Test
+  fun `deadline crossing during a provider turn prevents its final answer`() {
+    var remaining = 1L
+    val agent =
+      CalendarPlannerAgent(
+        turn = {
+          remaining = 0
+          PlannerTurn(final = json.readTree("{}"))
+        },
+        tool = { error("unused") },
+      )
+
+    val error = assertThrows<ApiException> { agent.run(setOf(candidate)) { remaining } }
+    assertEquals("ai_timeout", error.code)
+  }
+
+  @Test
+  fun `deadline crossing during a tool prevents retaining its exchange`() {
+    var remaining = 1L
+    val agent =
+      CalendarPlannerAgent(
+        turn = {
+          PlannerTurn(
+            calls =
+              listOf(
+                PlannerToolProtocol.Call(
+                  "call-1",
+                  "get_candidate_details_and_history",
+                  listOf(candidate),
+                  "{\"candidateIds\":[\"$candidate\"]}".encodeToByteArray(),
+                )
+              )
+          )
+        },
+        tool = {
+          remaining = 0
+          "{}".encodeToByteArray()
+        },
+      )
+
+    val error = assertThrows<ApiException> { agent.run(setOf(candidate)) { remaining } }
+    assertEquals("ai_timeout", error.code)
+  }
+}

@@ -34,6 +34,7 @@ data class Change(
             "exercise_hint",
             "profile",
             "strength_planner_profile",
+            "planner_exercise_preferences",
             "workout_effort",
           ) && raw != id.toString()
       )

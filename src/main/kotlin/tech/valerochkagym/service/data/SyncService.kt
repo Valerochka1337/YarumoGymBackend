@@ -40,7 +40,9 @@ class SyncService(
 ) {
   companion object {
     const val strengthPlannerCapability = "strength-planner-personalization"
+    const val agenticPlannerCapability = "ai-planner-agentic-v1"
     private const val strengthPlannerProfileKind = "strength_planner_profile"
+    private const val plannerExercisePreferencesKind = "planner_exercise_preferences"
     private const val workoutEffortKind = "workout_effort"
   }
 
@@ -58,6 +60,11 @@ class SyncService(
     postgres.ensureHead(user)
     return (if (exclusive) heads.writeLock(user) else heads.readLock(user)).revision
   }
+
+  private fun plannerExercisePreferencesId(owner: UUID): UUID =
+    UUID.nameUUIDFromBytes(
+      "ValerochkaGym.planner-exercise-preferences.v1:$owner".toByteArray(Charsets.UTF_8)
+    )
 
   private fun records(user: UUID): List<Record> =
     recordRows.findByUserIdOrderByKindAscIdAsc(user).map {
@@ -115,6 +122,15 @@ class SyncService(
         426,
         "capability_required",
         "Требуется возможность $strengthPlannerCapability",
+      )
+    if (
+      agenticPlannerCapability !in capabilities &&
+        incoming.changes.any { it.kind == plannerExercisePreferencesKind }
+    )
+      throw ApiException(
+        426,
+        "capability_required",
+        "Требуется возможность $agenticPlannerCapability",
       )
     val request =
       incoming.copy(
@@ -202,6 +218,10 @@ class SyncService(
               change.payload?.get("syncId")?.asString() != change.id.toString()
           )
             bad("Профиль силы не соответствует владельцу")
+        }
+        if (change.kind == plannerExercisePreferencesKind) {
+          if (change.id != plannerExercisePreferencesId(user))
+            bad("Настройки планировщика не соответствуют владельцу")
         }
         if (change.kind == workoutEffortKind) {
           if (
@@ -374,7 +394,8 @@ class SyncService(
       ("exercise-hint" in capabilities || kind != "exercise_hint") &&
       ("profile" in capabilities || kind != "profile") &&
       (strengthPlannerCapability in capabilities ||
-        kind !in setOf(strengthPlannerProfileKind, workoutEffortKind))
+        kind !in setOf(strengthPlannerProfileKind, workoutEffortKind)) &&
+      (agenticPlannerCapability in capabilities || kind != plannerExercisePreferencesKind)
 
   private fun hasSetNotes(payload: tools.jackson.databind.JsonNode?): Boolean =
     payload?.get("exercises")?.any { section ->
