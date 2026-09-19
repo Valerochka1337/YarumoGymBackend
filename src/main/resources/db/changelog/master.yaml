@@ -62,3 +62,9 @@ databaseChangeLog:
   - include:
       file: 021-coach-runs.sql
       relativeToChangelogFile: true
+  - include:
+      file: 022-coach-session-stream.sql
+      relativeToChangelogFile: true
+  - include:
+      file: 023-coach-session-acknowledgements.sql
+      relativeToChangelogFile: true

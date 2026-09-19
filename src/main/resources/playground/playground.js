@@ -34,10 +34,11 @@ function enqueue(action) {
 }
 function persistSession(activeSession = true) {
   state.sequence++;
-  state.pendingSession = {
+  const next = {
     eventId: S.uuid(), sequence: state.sequence, contextVersion: state.contextVersion,
     snapshot: S.clone(state.snapshot), initiativeEnabled: state.initiative, active: activeSession,
   };
+  if (state.pendingSession) state.nextSession = next; else state.pendingSession = next;
   save();
   return enqueue(flushSession);
 }
@@ -46,7 +47,8 @@ async function flushSession() {
   if (!body) return;
   const result = await request(`/v1/coach/sessions/${body.snapshot.workout_id}`, 'PUT', body);
   if (!result.accepted) throw Error('Состояние сервера новее этой вкладки. Начните новый сценарий.');
-  if (state.pendingSession === body) { delete state.pendingSession; save(); }
+  if (state.pendingSession === body) { state.pendingSession = state.nextSession; delete state.nextSession; save(); }
+  if (state.pendingSession) await flushSession();
 }
 async function flushReceipts() {
   while (state.receipts.length) {
@@ -121,6 +123,7 @@ function renderMessages() {
     const message = state.messages.find(m => m.runId === run.runId);
     if (message) target.append(el('div', message.text, 'bubble user'));
     const noChange = run.result?.kind === 'no_change';
+    if (run.origin === 'COACH' && (run.state !== 'SUCCEEDED' || noChange || (run.result?.proposal && S.stale(state, run.result.proposal)))) continue;
     const bubble = el('div', null, `bubble${noChange ? ' no-change' : ''}`);
     bubble.append(el('div', `${message ? 'Coach' : 'Инициативная проверка'} · ${labels[run.state] || run.state}${run.elapsed ? ` · ${run.elapsed} с` : ''}`, 'meta'));
     bubble.append(el('div', noChange ? 'План сохранён · без сообщения пользователю' : run.result?.text ?? run.draft ?? run.errorCode ?? 'Ожидание ответа…'));
@@ -167,13 +170,14 @@ function mergeRun(incoming) {
   }
   state.runs.sort((a,b) => (a.ordinal || Infinity) - (b.ordinal || Infinity));
   save(); renderMessages();
-  if (active(run) && !paused) stream(run).catch(error);
+  if (!paused) stream().catch(error);
 }
-async function stream(run) {
-  if (streams.has(run.runId) || paused) return;
-  const controller = new AbortController(); streams.set(run.runId, controller);
+async function stream() {
+  const workout = state.snapshot.workout_id;
+  if (streams.has(workout) || paused) return;
+  const controller = new AbortController(); streams.set(workout, controller);
   try {
-    const response = await fetch(`/v1/coach/runs/${run.runId}/events?after=${run.cursor || 0}`, { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal });
+    const response = await fetch(`/v1/coach/sessions/${workout}/events?after=${state.eventCursor || 0}`, { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal });
     if (response.status === 401) { await authenticate(); return; }
     if (!response.ok) throw Error(`Поток: HTTP ${response.status}`);
     const reader = response.body.getReader(), decoder = new TextDecoder(); let buffer = '';
@@ -186,17 +190,18 @@ async function stream(run) {
         const data = block.split('\n').filter(l => l.startsWith('data:')).map(l => l.slice(5).trimStart()).join('\n');
         if (!data) continue;
         const event = JSON.parse(data);
-        if (event.sequence <= (run.cursor || 0)) continue;
-        run.cursor = event.sequence;
-        if (event.type === 'text') { run.draft = event.text; renderMessages(); }
-        if (event.type === 'progress') trace(`${run.runId.slice(0,8)} · ${event.stage}`);
-        if (event.type === 'completed') mergeRun(event.run);
-        save();
+        if (workout !== state.snapshot.workout_id) return;
+        if (event.sequence <= (state.eventCursor || 0)) continue;
+        if (event.run) mergeRun(event.run);
+        const run = state.runs.find(r => r.runId === event.runId);
+        if (run && event.origin === 'USER' && event.type === 'text') run.draft = event.text;
+        state.eventCursor = event.sequence;
+        save(); renderMessages();
       }
     }
   } catch (e) {
     if (e.name !== 'AbortError') { trace('Поток прерван; повторное подключение через несколько секунд'); }
-  } finally { streams.delete(run.runId); }
+  } finally { streams.delete(workout); }
 }
 async function discover() {
   const workout = state.snapshot.workout_id;
@@ -214,7 +219,7 @@ async function discover() {
 async function sendPending() {
   if (!state.pendingRun) return;
   const body = state.pendingRun;
-  const run = await request('/v1/coach/runs','POST',body);
+  const run = await request(body.state ? `/v1/coach/sessions/${body.state.snapshot.workout_id}/messages` : '/v1/coach/runs','POST',body);
   if (state.pendingRun === body) delete state.pendingRun;
   mergeRun(run); save();
 }
@@ -225,7 +230,8 @@ async function submit(event) {
   try {
     await enqueue(async () => { await flushSession(); await flushReceipts(); await sendPending(); });
     const requestId = S.uuid();
-    state.pendingRun = { requestId, workoutId: state.snapshot.workout_id, contextVersion: state.contextVersion, snapshot: S.clone(state.snapshot), message: text, history: [], model: $('model').value || undefined };
+    state.pendingRun = { requestId, message: text, model: $('model').value || undefined,
+      state: { eventId: S.uuid(), sequence: ++state.sequence, contextVersion: state.contextVersion, snapshot: S.clone(state.snapshot), initiativeEnabled: state.initiative, active: true } };
     state.messages.push({ runId: requestId, text }); save();
     $('message').value = '';
     await enqueue(sendPending);
@@ -276,7 +282,7 @@ $('reset').onclick = async () => {
 $('stream-toggle').onclick = () => {
   paused = !paused; $('stream-toggle').textContent = paused ? 'Подключить поток' : 'Отключить поток';
   if (paused) streams.forEach(c => c.abort());
-  else enqueue(discover).catch(error);
+  else stream().catch(error);
   trace(paused ? 'Доставка событий отключена; worker продолжает работу' : 'Возобновление с сохранённой позиции');
 };
 $('cancel').onclick = () => enqueue(async () => { await sendPending(); await discover(); for (const run of state.runs.filter(active)) mergeRun(await request(`/v1/coach/runs/${run.runId}/cancel`,'POST')); }).catch(error);
@@ -288,7 +294,7 @@ async function tick() {
   try {
     await enqueue(async () => {
       await flushSession(); await flushReceipts(); await sendPending();
-      if (!paused) await discover();
+      if (!paused) { if (!streams.has(state.snapshot.workout_id)) await discover(); stream().catch(error); }
       for (const run of state.runs) if (run.result?.proposal && !run.receiptStatus && !run.applicationStatus && S.stale(state, run.result.proposal)) {
         S.decide(state,run,'STALE',catalog); save(); renderMessages();
       }
@@ -303,8 +309,8 @@ async function start() {
   if (!state?.snapshot || !Array.isArray(state.receipts)) state = S.scenario(catalog,'normal');
   renderWorkout(); renderMessages(); renderTrace();
   await loadSettings(); await loadModels();
-  await persistSession(); await tick();
+  await persistSession(); stream().catch(error); await tick();
   // Fresh snapshots keep server-side time-based initiative eligible while the page is open.
-  setInterval(() => { if (state.initiative) persistSession().catch(error); },30000);
+  setInterval(() => persistSession().catch(error),60000);
 }
 start().catch(error);

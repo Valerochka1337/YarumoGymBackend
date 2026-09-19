@@ -66,7 +66,8 @@ async function ui(t, saved, override) {
     else if(path.endsWith('/settings'))data={revision:0,baseUrl:'https://example.test/v1',coachModel:'real-model',textModel:'real-model',visionModel:'real-model',coachModels:['real-model'],enabled:true,hasApiKey:true};
     else if(path.endsWith('/coach-models'))data={availability:'AVAILABLE',models:['real-model'],defaultModel:'real-model'};
     else if(options.method==='PUT')data={accepted:true};
-    else if(path==='/v1/coach/runs')data={runId:body.requestId,workoutId:body.workoutId,ordinal:1,state:'SUCCEEDED',result:{kind:'answer',text:'<img src=x onerror=alert(1)>',quickReplies:[]},lastEventSequence:2};
+    else if(path==='/v1/coach/runs' || path.endsWith('/messages'))data={runId:body.requestId,workoutId:body.state?.snapshot.workout_id || body.workoutId,ordinal:1,state:'SUCCEEDED',result:{kind:'answer',text:'<img src=x onerror=alert(1)>',quickReplies:[]},lastEventSequence:2};
+    else if(path.includes('/events?'))return {ok:true,status:200,body:new ReadableStream({start(){}})};
     else if(path.includes('/receipt'))data={};
     else if(path.includes('/runs?'))data=[];
     else throw Error('Unexpected request '+path);
@@ -81,8 +82,8 @@ test('UI submits real coach contract, renders model text safely and never persis
   w.document.getElementById('message').value='Слишком тяжело';
   w.document.getElementById('chat-form').dispatchEvent(new w.Event('submit',{cancelable:true}));
   await until(()=>w.document.getElementById('messages').textContent.includes('<img'));
-  const sent=requests.find(r=>r.path==='/v1/coach/runs');
-  assert.equal(sent.body.model,'real-model'); assert.equal(sent.body.snapshot.exercises.length,3);
+  const sent=requests.find(r=>r.path.endsWith('/messages'));
+  assert.equal(sent.body.model,'real-model'); assert.equal(sent.body.state.snapshot.exercises.length,3);
   assert.equal(sent.options.headers.Authorization,'Bearer test-secret-token');
   assert.equal(w.document.querySelector('#messages img'),null);
   assert.ok(!w.sessionStorage.getItem('coach-playground-v1').includes('test-secret-token'));
@@ -102,14 +103,14 @@ test('reload delivers pending receipt and retries identical submission',async t=
 test('SSE resumes persisted cursor and fragmented frames render only the cumulative final answer', async t => {
   const state=fixture(), id=S.uuid();
   state.runs=[{runId:id,workoutId:state.snapshot.workout_id,ordinal:1,state:'RUNNING',cursor:7,startedAt:Date.now(),draft:'Старый черновик'}];
-  state.discoveryCursor=1;
+  state.discoveryCursor=1; state.eventCursor=7;
   const final={runId:id,workoutId:state.snapshot.workout_id,ordinal:1,state:'SUCCEEDED',lastEventSequence:10,result:{kind:'answer',text:'Итоговый ответ',quickReplies:[]}};
   const frames=[
     {sequence:7,type:'text',text:'Повторное событие'},
     {sequence:8,type:'text',text:'Новый'},
     {sequence:9,type:'text',text:'Новый ответ'},
     {sequence:10,type:'completed',run:final},
-  ].map(event=>`id: ${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`).join('');
+  ].map(event=>`id: ${event.sequence}\ndata: ${JSON.stringify({...event,runId:id,origin:'USER'})}\n\n`).join('');
   const bytes=new TextEncoder().encode(frames);
   const {w,requests}=await ui(t,state,async path=>{
     if(path.includes('/events?'))return {ok:true,status:200,body:new ReadableStream({start(controller){ for(let i=0;i<bytes.length;i+=13)controller.enqueue(bytes.slice(i,i+13));controller.close();}})};
@@ -118,7 +119,7 @@ test('SSE resumes persisted cursor and fragmented frames render only the cumulat
   await until(()=>w.document.getElementById('messages').textContent.includes('Итоговый ответ'));
   assert.ok(requests.some(r=>r.path.endsWith('/events?after=7')));
   const persisted=JSON.parse(w.sessionStorage.getItem('coach-playground-v1'));
-  assert.equal(persisted.runs[0].cursor,10);
+  assert.equal(persisted.eventCursor,10);
   assert.equal(w.document.querySelectorAll('#messages .bubble').length,1);
   assert.ok(!w.document.getElementById('messages').textContent.includes('Повторное событие'));
 });
