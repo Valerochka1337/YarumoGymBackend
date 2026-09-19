@@ -27,12 +27,14 @@ class InstallNginxRoutesTest(unittest.TestCase):
 
         self.assertLess(merged.index(MODULE.BEGIN), merged.index("location / {"))
         self.assertIn("location = /.well-known/assetlinks.json", merged)
-        self.assertIn('location ~ "^/r/[A-Za-z0-9_-]{43}$"', merged)
-        self.assertIn("location /r/ { return 404; }", merged)
+        self.assertIn("location ^~ /r/", merged)
+        self.assertIn('if ($uri !~ "^/r/[A-Za-z0-9_-]{43}$") { return 404; }', merged)
+        self.assertIn("location = /r { return 404; }", merged)
         self.assertIn("/trial-results", merged)
+        self.assertIn("location ^~ /v1/routine-shares/preview/", merged)
         self.assertIn("add_header X-Yarumo-Route browser-trial always", merged)
         self.assertIn("try_files /index.html =404", merged)
-        self.assertLess(merged.index('location ~ "^/r/'), merged.index("location / {"))
+        self.assertLess(merged.index("location ^~ /r/"), merged.index("location / {"))
         self.assertIn("try_files $uri $uri/ /index.html", merged)
 
     def test_coach_api_and_streams_bypass_spa_and_proxy_buffering(self):
@@ -72,7 +74,7 @@ server {
         self.assertNotIn(MODULE.BEGIN, merged[slice(*http)])
         self.assertIn(MODULE.BEGIN, merged[slice(*https)])
         self.assertLess(
-            merged[slice(*https)].index('location ~ "^/r/'),
+            merged[slice(*https)].index("location ^~ /r/"),
             merged[slice(*https)].index("location ^~ / {"),
         )
 

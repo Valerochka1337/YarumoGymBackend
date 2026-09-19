@@ -191,7 +191,7 @@ install_nginx_routes() {
     effective_config=$(mktemp nginx.failed-effective.XXXXXX)
     if nginx -T > "$effective_config" 2>/dev/null; then
       managed_count=$(grep -Fc '# BEGIN MANAGED ROUTINE SHARE ROUTES' "$effective_config" || true)
-      share_location_count=$(grep -Ec 'location[[:space:]]+~[[:space:]]+"\^/r/' "$effective_config" || true)
+      share_location_count=$(grep -Ec 'location[[:space:]]+\^~[[:space:]]+/r/' "$effective_config" || true)
       marker_count=$(grep -Fc 'add_header X-Yarumo-Route browser-trial always' "$effective_config" || true)
       printf 'Loaded Nginx route counts: managed=%s share_location=%s marker=%s\n' \
         "$managed_count" "$share_location_count" "$marker_count" >&2
