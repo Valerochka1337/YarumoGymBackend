@@ -33,6 +33,16 @@ class InstallNginxRoutesTest(unittest.TestCase):
         self.assertLess(merged.index("location ^~ /r/"), merged.index("location / {"))
         self.assertIn("try_files $uri $uri/ /index.html", merged)
 
+    def test_coach_api_and_streams_bypass_spa_and_proxy_buffering(self):
+        merged = MODULE.merge(self.current, self.source)
+        start = merged.index("location ^~ /v1/coach/ {")
+        route = merged[start:merged.index("}", start)]
+        self.assertIn("proxy_buffering off;", route)
+        self.assertIn("proxy_cache off;", route)
+        self.assertIn("proxy_intercept_errors off;", route)
+        self.assertLess(start, merged.index("location / {"))
+        self.assertEqual(1, MODULE.merge(merged, self.source).count("location ^~ /v1/coach/ {"))
+
     def test_merge_is_idempotent(self):
         once = MODULE.merge(self.current, self.source)
         twice = MODULE.merge(once, self.source)
@@ -164,6 +174,8 @@ server {
         self.assertIn('--server-strategy "$selected_strategy"', deploy)
         self.assertIn('--resolve "$host:443:$smoke_address"', deploy)
         self.assertIn("Nginx smoke: assetlinks=%s share=%s root=%s", deploy)
+        self.assertIn("for attempt in {1..15}", deploy)
+        self.assertIn('if [[ "$smoke_ready" != true ]]', deploy)
         self.assertIn("^x-yarumo-route:[[:space:]]*routine-share", deploy)
         self.assertIn('nginx -T > "$effective_config"', deploy)
         self.assertIn("Expected one active IPv4 HTTPS config", deploy)

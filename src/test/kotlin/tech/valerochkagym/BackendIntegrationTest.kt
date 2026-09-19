@@ -629,7 +629,7 @@ class BackendIntegrationTest {
         ),
       )
       assertEquals(
-        "22",
+        "23",
         command(
           "psql",
           "-U",
@@ -798,6 +798,147 @@ class BackendIntegrationTest {
   }
 
   @Test
+  fun `workout RIR accepts nullable bounded integers and survives sync replay`() {
+    val fixture = json.readTree(javaClass.getResourceAsStream("/android-coach-snapshot.json"))
+    for (rir in listOf("null", "0", "3", "10")) {
+      val token = account()["accessToken"].asString()
+      val records = fixture["records"].deepCopy()
+      val workout = records.first { it["kind"].asString() == "workout" }
+      for (section in workout["payload"]["exercises"]) {
+        for (set in section["sets"]) {
+          val node = set as tools.jackson.databind.node.ObjectNode
+          node.set("targetRir", json.readTree(rir))
+          node.set("actualRir", json.readTree(rir))
+        }
+      }
+      val request =
+        mapOf(
+          "operationId" to UUID.randomUUID().toString(),
+          "changes" to
+            records.toList().map {
+              change(it["id"].asString(), 0, it["payload"], it["kind"].asString())
+            },
+        )
+      assertEquals(200, call("POST", "/sync", request, token, "3", "workout-rir-v1").status)
+      assertEquals(200, call("POST", "/sync", request, token, "3", "workout-rir-v1").status)
+      val restored =
+        call("GET", "/sync", token = token, version = "3", capabilities = "workout-rir-v1")
+          .body!!["records"]
+          .first { it["kind"].asString() == "workout" }
+      assertEquals(workout["payload"], restored["payload"])
+    }
+  }
+
+  @Test
+  fun `workout RIR rejects strings fractions booleans and values outside zero to ten atomically`() {
+    val fixture = json.readTree(javaClass.getResourceAsStream("/android-coach-snapshot.json"))
+    val token = account()["accessToken"].asString()
+    for (field in listOf("targetRir", "actualRir")) {
+      for (rir in listOf("-1", "11", "1.5", "3.0", "true", "\"3\"", "{}", "[]")) {
+        val records = fixture["records"].deepCopy()
+        val workout = records.first { it["kind"].asString() == "workout" }
+        val set =
+          workout["payload"]["exercises"][0]["sets"][0] as tools.jackson.databind.node.ObjectNode
+        set.set(field, json.readTree(rir))
+        val request =
+          mapOf(
+            "operationId" to UUID.randomUUID().toString(),
+            "changes" to
+              records.toList().map {
+                change(it["id"].asString(), 0, it["payload"], it["kind"].asString())
+              },
+          )
+        assertEquals(
+          400,
+          call("POST", "/sync", request, token, "3", "workout-rir-v1").status,
+          "$field=$rir",
+        )
+        assertEquals(0, call("GET", "/sync", token = token, version = "3").body!!["records"].size())
+      }
+    }
+  }
+
+  @Test
+  fun `workout RIR four plus is capability bound and cannot be downgraded`() {
+    val fixture = json.readTree(javaClass.getResourceAsStream("/android-coach-snapshot.json"))
+    val token = account()["accessToken"].asString()
+    val records = fixture["records"].deepCopy()
+    val workout = records.first { it["kind"].asString() == "workout" }
+    for (section in workout["payload"]["exercises"]) {
+      for (set in section["sets"]) {
+        val node = set as tools.jackson.databind.node.ObjectNode
+        node.putNull("actualRir")
+        node.put("actualRirAtLeastFour", true)
+      }
+    }
+    val request =
+      mapOf(
+        "operationId" to UUID.randomUUID().toString(),
+        "changes" to
+          records.toList().map {
+            change(it["id"].asString(), 0, it["payload"], it["kind"].asString())
+          },
+      )
+    val accepted = call("POST", "/sync", request, token, "3", "workout-rir-v1")
+    assertEquals(200, accepted.status)
+    assertEquals("workout-rir-v1", accepted.capabilities)
+
+    val legacy = call("GET", "/sync", token = token, version = "3")
+    val legacySet =
+      legacy.body!!["records"].first { it["kind"].asString() == "workout" }["payload"]["exercises"][
+        0]["sets"][0]
+    assertFalse(legacySet.has("actualRir"))
+    assertFalse(legacySet.has("targetRir"))
+    assertFalse(legacySet.has("actualRirAtLeastFour"))
+
+    val stripped = workout["payload"].deepCopy()
+    stripped["exercises"].forEach { section ->
+      section["sets"].forEach { set ->
+        (set as tools.jackson.databind.node.ObjectNode).apply {
+          remove("targetRir")
+          remove("actualRir")
+          remove("actualRirAtLeastFour")
+        }
+      }
+    }
+    val downgrade =
+      mapOf(
+        "operationId" to UUID.randomUUID().toString(),
+        "changes" to listOf(change(workout["id"].asString(), 1, stripped, "workout")),
+      )
+    val rejected = call("POST", "/sync", downgrade, token, "3")
+    assertEquals(409, rejected.status)
+    assertEquals("workout_rir_requires_capability", rejected.body!!["code"].asString())
+    assertEquals(
+      workout["payload"],
+      call("GET", "/sync", token = token, version = "3", capabilities = "workout-rir-v1")
+        .body!!["records"]
+        .first { it["kind"].asString() == "workout" }["payload"],
+    )
+
+    val invalidRecords = fixture["records"].deepCopy()
+    val invalidSet =
+      invalidRecords.first { it["kind"].asString() == "workout" }["payload"]["exercises"][0][
+        "sets"][0]
+        as tools.jackson.databind.node.ObjectNode
+    invalidSet.put("actualRir", 3)
+    invalidSet.put("actualRirAtLeastFour", true)
+    val invalid =
+      mapOf(
+        "operationId" to UUID.randomUUID().toString(),
+        "changes" to
+          invalidRecords.toList().map {
+            change(it["id"].asString(), 0, it["payload"], it["kind"].asString())
+          },
+      )
+    assertEquals(
+      400,
+      call("POST", "/sync", invalid, account()["accessToken"].asString(), "3", "workout-rir-v1")
+        .status,
+    )
+  }
+
+  @Test
   fun `OpenAPI describes auth and synchronization endpoints`() {
     val token = account()["accessToken"].asString()
     val request =
@@ -823,6 +964,14 @@ class BackendIntegrationTest {
           "string",
           responseSchema["headers"]["X-Gym-Capabilities"]["schema"]["type"].asString(),
         )
+        val capabilityDescription =
+          responseSchema["headers"]["X-Gym-Capabilities"]["description"].asString()
+        for (capability in
+          listOf(
+            "strength-planner-personalization",
+            "workout-rir-v1",
+            "ai-planner-agentic-v1",
+          )) assertTrue(capabilityDescription.contains(capability), "$path $verb: $capability")
         assertTrue(responseSchema.has("content"))
       }
     }
@@ -2212,6 +2361,56 @@ class BackendIntegrationTest {
   }
 
   @Test
+  fun `agentic planner preferences require negotiated capability and stay hidden otherwise`() {
+    val owner = account()
+    val token = owner["accessToken"].asString()
+    val ownerId = owner["userId"].asString()
+    val exerciseId = UUID.randomUUID().toString()
+    assertEquals(200, push(token, listOf(change(exerciseId))).status)
+
+    val preferenceId =
+      UUID.nameUUIDFromBytes(
+          "ValerochkaGym.planner-exercise-preferences.v1:$ownerId".toByteArray(Charsets.UTF_8)
+        )
+        .toString()
+    val request =
+      mapOf(
+        "operationId" to UUID.randomUUID(),
+        "changes" to
+          listOf(
+            change(
+              preferenceId,
+              payload =
+                mapOf(
+                  "schemaVersion" to 1,
+                  "preferences" to listOf(mapOf("exerciseId" to exerciseId, "preference" to "MORE")),
+                ),
+              kind = "planner_exercise_preferences",
+            )
+          ),
+      )
+
+    assertEquals(426, call("POST", "/sync", request, token).status)
+    assertEquals(
+      200,
+      call("POST", "/sync", request, token, capabilities = "ai-planner-agentic-v1").status,
+    )
+    assertFalse(
+      call("GET", "/sync", token = token).body!!["records"].any {
+        it["kind"].asString() == "planner_exercise_preferences"
+      }
+    )
+    val capable = call("GET", "/sync", token = token, capabilities = "ai-planner-agentic-v1")
+    assertEquals("ai-planner-agentic-v1", capable.capabilities)
+    assertTrue(
+      capable.body!!["records"].any {
+        it["kind"].asString() == "planner_exercise_preferences" &&
+          it["id"].asString() == preferenceId
+      }
+    )
+  }
+
+  @Test
   fun `strength planner records require capability validate identity and cascade an old client workout delete`() {
     val owner = account()
     val token = owner["accessToken"].asString()
@@ -2634,7 +2833,7 @@ class BackendIntegrationTest {
 
   @Test
   fun `Liquibase has applied auth sync and admin changesets`() {
-    assertEquals(22, db.queryForObject("SELECT count(*) FROM databasechangelog", Int::class.java))
+    assertEquals(23, db.queryForObject("SELECT count(*) FROM databasechangelog", Int::class.java))
   }
 
   @Test

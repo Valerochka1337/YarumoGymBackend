@@ -104,7 +104,10 @@ nullable. equipmentRequirementState — KNOWN или UNKNOWN; KNOWN с пуст�
 Клиент передаёт `X-Gym-Capabilities: calendar-plans` для `GET/POST /v1/sync`,
 `GET /v1/sync/changes` и обоих вариантов `GET /v1/records/*`. Заголовок допускает
 список через запятую; сервер возвращает в `X-Gym-Capabilities` только пересечение
-с поддержанными возможностями. Поддерживаются `calendar-plans`, `annotated-workout-writes`, `exercise-hint`, `profile`, `strength-planner-personalization`; ответ содержит только запрошенное пересечение.
+с поддержанными возможностями. Поддерживаются `calendar-plans`, `annotated-workout-writes`,
+`exercise-hint`, `profile`, `strength-planner-personalization`, `workout-rir-v1`,
+`ai-planner-agentic-v1`;
+ответ содержит только запрошенное пересечение.
 Неизвестные capability игнорируются. Клиент считает отсутствующий/пустой ответ
 отсутствием поддержки и сохраняет неподдерживаемые локальные данные и outbox.
 
@@ -291,6 +294,38 @@ wire fixture — `src/test/resources/strength-planner-personalization-sync-contr
 POST с ними отклоняется `426 capability_required` до ledger. Rollout server-first: клиент хранит
 локальные payload и pending bytes до согласования, не синтезирует удаление при downgrade.
 
+## Агентное планирование — capability `ai-planner-agentic-v1`
+
+Клиент запрашивает `ai-planner-agentic-v1` в `X-Gym-Capabilities` на всех sync и records
+запросах и использует v2 только если сервер вернул эту capability. Она открывает owner-bound
+kind `planner_exercise_preferences`. Его единственный ID равен
+`UUID.nameUUIDFromBytes(UTF8("ValerochkaGym.planner-exercise-preferences.v1:" + ownerUuid))`;
+payload строго `{schemaVersion:1,preferences}`. `preferences` — канонически отсортированный
+список до 1000 уникальных `{exerciseId,preference}`, где `exerciseId` — UUID живого упражнения,
+а `preference` — `MORE`, `LESS` или `NEVER`. Без capability kind скрывается до пагинации и
+single-record lookup, а POST возвращает `426 capability_required` до ledger; клиент сохраняет
+локальные данные и outbox до следующего согласования.
+
+`POST /v1/ai/calendar-drafts-v2` принимает в точности тот же строгий
+`CalendarDraftRequest`, что и legacy `/v1/ai/calendar-drafts`: все 13 полей обязательны,
+неизвестные и повторённые JSON-поля, BOM, trailing data и не-UTF-8 отклоняются. Успех возвращает
+`{requestId,context,proposal,agenticProjection}`. `agenticProjection` содержит
+`candidateIds` и фиксированный `skeleton` (`focusExerciseId`, slots с
+`slotId,allowedExerciseIds,minDurationSec,maxDurationSec`, а также
+`minDurationSec,maxDurationSec`). Это серверная проверяемая проекция именно принятого
+черновика, не право создавать или применять календарный план; v1 bytes и ответ не меняются.
+
+`POST /v1/ai/calendar-drafts/{proposalId}/refinements` принимает строго
+`{requestId,expectedRevision,expectedCatalogRevision,expectedProposalVersion,refinement}`.
+Все UUID канонические lowercase, revisions неотрицательны, `expectedProposalVersion >= 1`, а
+`refinement` — уже trimmed строка длиной 1…2000. Тело ограничено 16 KiB и связывается с
+owner, proposal ID, expected version и exact raw bytes. Повтор тех же bytes возвращает тот же
+следующий `ProposalResponse`; другой запрос с тем же requestId даёт `409 ai_request_conflict`.
+Только текущий AI `PENDING` proposal той же версии может быть уточнён. Успешное уточнение
+создаёт следующую pending-версию и никогда само не создаёт программу или календарное событие.
+Обычные ошибки: `400 invalid_request`, `409 ai_in_progress|ai_interrupted|ai_context_stale`,
+`502 ai_invalid_response`, `503 ai_busy|ai_unavailable`, `504 ai_timeout`.
+
 ### Контекст планировщика для цели STRENGTH
 
 Сервер применяет прежние ограничения доступности/архива/оборудования, затем детерминированно
@@ -405,3 +440,59 @@ immediate execution. Past requested dates become `EXPIRED`, never silently resch
 Редактирование: `coachPrompt` в существующем `PUT /admin/api/ai-settings` с проверкой `revision`.
 Пустой текст, NUL и более 16000 символов отклоняются; переносы строк сохраняются.
 Сначала развернуть сервер с миграцией, затем Android. Старые клиенты продолжают использовать встроенный текст.
+
+### RIR в подходах тренировок
+
+В протоколе 3 capability `workout-rir-v1` открывает необязательные
+`workout.exercises[].sets[]` поля `targetRir`, `actualRir` и `actualRirAtLeastFour`.
+Первые два — null или целое число 0…10; последнее — boolean. `true` означает `4+` и требует,
+чтобы `actualRir` отсутствовал либо был null. Отсутствующие поля остаются отсутствующими,
+исторические значения не вычисляются из веса или повторов. Строки, дробные числа, numeric
+boolean и значения вне диапазона, как и комбинация `actualRirAtLeastFour:true` с точным
+`actualRir`, отклоняются HTTP 400 до записи всего пакета.
+
+Клиент передаёт capability во всех sync/records запросах и использует RIR только если сервер
+вернул её в `X-Gym-Capabilities`. Без capability сервер скрывает три поля на всех read-проекциях
+и не принимает изменение workout, которое добавляет, удаляет или перезаписывает сохранённый RIR;
+это сохраняет точные локальные и серверные значения до следующего согласования. Поля хранятся
+в payload, поэтому PostgreSQL-миграция не нужна; повтор того же operationId остаётся
+идемпотентным.
+
+
+## Durable Live Coach runs
+
+`POST /v1/coach/runs` accepts `{requestId, workoutId, contextVersion, snapshot, message,
+history:[{role,text}], model?, automatic?}` and returns HTTP 202 with `Location` and
+`Retry-After: 2`. `runId` equals the client-generated UUID `requestId`. Repeating an
+identical request returns the existing run; changing its content with the same ID
+returns 409. Snapshot identifiers are portable UUIDs; all access is owner-scoped.
+
+- `GET /v1/coach/runs/{id}` returns state, stage, result, `lastEventSequence` and `ordinal`.
+- `GET /v1/coach/sessions/{workoutId}/runs?after=<ordinal>` lists up to 200 runs;
+  continue after the largest returned ordinal when the page is full.
+- `GET /v1/coach/runs/{id}/events?after=<sequence>` returns persisted SSE events with
+  numeric `id`, event types `progress`, `text`, `completed`, and JSON
+  `{sequence,type,stage?,text?,run?}`. Text represents the cumulative visible draft.
+  `Last-Event-ID` is also accepted. Disconnecting a subscriber never cancels execution.
+- `POST /v1/coach/runs/{id}/cancel` explicitly cancels the task and fences late publication.
+- `PUT /v1/coach/sessions/{workoutId}` accepts
+  `{eventId,sequence,contextVersion,snapshot,initiativeEnabled,active}`. Full snapshots
+  allow recovery across sequence gaps; older snapshots never overwrite newer state.
+- `POST /v1/coach/runs/{id}/receipt` accepts `{receiptId,proposalId,status}` where status
+  is `APPLIED`, `REJECTED` or `STALE`. Application state is distinct from run state.
+
+States: `QUEUED`, `RUNNING`, `SUCCEEDED`, `FAILED`, `CANCELLED`, `SUPERSEDED`.
+Successful results contain `{kind:answer|proposal|no_change,text,quickReplies,proposal?}`.
+Proposal metadata: `{proposalId,baseRevision,contextVersion,expiresAtMillis,operations,reason?}`.
+Operations use portable `submit_workout_changes` intents. The server never applies
+workout changes: Android checks the full context version and expiration, asks for
+confirmation, then applies atomically and delivers a receipt. `no_change` stays silent.
+
+The worker persists model/tool checkpoints, renews its lease independently of provider
+calls, and fences every checkpoint/event/result by lease token and expiry. Manual runs
+are FIFO within an owner's workout. Automatic pending checks may be coalesced. Timer
+checks use an absolute deadline and require a fresh session snapshot. The provider budget
+is independent from SSE delivery; execution has bounded request/tool/retry and wall-time
+budgets. Prompts and tools are server-owned. Start/stop of HTTP delivery does not control
+the worker. Deploy migration 021 and this backend before distributing the new Android app;
+older coach-turn endpoints remain available for older clients.

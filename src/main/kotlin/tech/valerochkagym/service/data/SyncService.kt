@@ -40,6 +40,7 @@ class SyncService(
 ) {
   companion object {
     const val strengthPlannerCapability = "strength-planner-personalization"
+    const val workoutRirCapability = "workout-rir-v1"
     const val agenticPlannerCapability = "ai-planner-agentic-v1"
     private const val strengthPlannerProfileKind = "strength_planner_profile"
     private const val plannerExercisePreferencesKind = "planner_exercise_preferences"
@@ -252,6 +253,16 @@ class SyncService(
             "annotated_workout_requires_capability",
             "Требуется возможность annotated-workout-writes",
           )
+        if (
+          change.kind == "workout" &&
+            workoutRirCapability !in capabilities &&
+            (hasWorkoutRir(old?.payload) || hasWorkoutRir(change.payload))
+        )
+          throw ApiException(
+            409,
+            "workout_rir_requires_capability",
+            "Требуется возможность $workoutRirCapability",
+          )
         if (change.kind == "calendar_rule" && !change.deleted && old?.deleted == true)
           bad("Удалённое правило требует нового UUID")
         if (change.kind == "workout" && !change.deleted) {
@@ -404,16 +415,24 @@ class SyncService(
       } == true
     } == true
 
+  private val workoutRirFields = setOf("targetRir", "actualRir", "actualRirAtLeastFour")
+
+  private fun hasWorkoutRir(payload: tools.jackson.databind.JsonNode?): Boolean =
+    payload?.get("exercises")?.any { section ->
+      section.get("sets")?.any { set -> workoutRirFields.any { field -> set.has(field) } } == true
+    } == true
+
   private fun project(record: Record, capabilities: Set<String>): Record {
-    if (
-      record.kind != "workout" ||
-        record.payload == null ||
-        "annotated-workout-writes" in capabilities
-    )
+    if (record.kind != "workout" || record.payload == null) return record
+    if ("annotated-workout-writes" in capabilities && workoutRirCapability in capabilities)
       return record
     val payload = record.payload.deepCopy()
     payload.get("exercises")?.forEach { section ->
-      section.get("sets")?.forEach { (it as tools.jackson.databind.node.ObjectNode).remove("note") }
+      section.get("sets")?.forEach {
+        it as tools.jackson.databind.node.ObjectNode
+        if ("annotated-workout-writes" !in capabilities) it.remove("note")
+        if (workoutRirCapability !in capabilities) workoutRirFields.forEach(it::remove)
+      }
     }
     return record.copy(payload = payload)
   }

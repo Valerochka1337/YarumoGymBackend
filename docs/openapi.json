@@ -233,7 +233,7 @@
             "description": "OK",
             "headers": {
               "X-Gym-Capabilities": {
-                "description": "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile; otherwise empty",
+                "description": "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile, strength-planner-personalization, workout-rir-v1, ai-planner-agentic-v1; otherwise empty",
                 "style": "simple",
                 "schema": {
                   "type": "string"
@@ -288,7 +288,7 @@
             "description": "OK",
             "headers": {
               "X-Gym-Capabilities": {
-                "description": "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile; otherwise empty",
+                "description": "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile, strength-planner-personalization, workout-rir-v1, ai-planner-agentic-v1; otherwise empty",
                 "style": "simple",
                 "schema": {
                   "type": "string"
@@ -823,6 +823,196 @@
         }
       }
     },
+    "/v1/ai/calendar-drafts-v2": {
+      "post": {
+        "tags": [
+          "ai-controller"
+        ],
+        "operationId": "calendarV2",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CalendarDraftRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/CalendarDraftV2Response"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/ai/calendar-drafts/{proposalId}/refinements": {
+      "post": {
+        "tags": [
+          "ai-controller"
+        ],
+        "operationId": "refineCalendar",
+        "parameters": [
+          {
+            "name": "proposalId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CalendarRefinementRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProposalResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/coach/runs": {
+      "post": {
+        "tags": ["coach-run-controller"],
+        "operationId": "submitCoachRun",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CoachRunSubmitRequest" }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Run accepted",
+            "headers": {
+              "Location": { "schema": { "type": "string" } },
+              "Retry-After": { "schema": { "type": "string" } }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CoachRunResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/coach/runs/{id}": {
+      "get": {
+        "tags": ["coach-run-controller"],
+        "operationId": "coachRunStatus",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current durable run state",
+            "headers": {
+              "Cache-Control": { "schema": { "type": "string" } },
+              "Retry-After": { "schema": { "type": "string" } }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CoachRunResponse" } } }
+          }
+        }
+      }
+    },
+    "/v1/coach/runs/{id}/cancel": {
+      "post": {
+        "tags": ["coach-run-controller"],
+        "operationId": "cancelCoachRun",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Cancelled or terminal run", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CoachRunResponse" } } } }
+        }
+      }
+    },
+    "/v1/coach/runs/{id}/receipt": {
+      "post": {
+        "tags": ["coach-run-controller"],
+        "operationId": "recordCoachRunReceipt",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CoachRunReceiptRequest" } } }
+        },
+        "responses": { "200": { "description": "Receipt recorded", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": false } } } } }
+      }
+    },
+    "/v1/coach/runs/{id}/events": {
+      "get": {
+        "tags": ["coach-run-controller"],
+        "operationId": "coachRunEvents",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "after", "in": "query", "schema": { "type": "integer", "format": "int64", "default": 0 } },
+          { "name": "Last-Event-ID", "in": "header", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Persisted progress, text and completed SSE events",
+            "content": { "text/event-stream": { "schema": { "type": "string" } } }
+          }
+        }
+      }
+    },
+    "/v1/coach/sessions/{workoutId}/runs": {
+      "get": {
+        "tags": ["coach-run-controller"],
+        "operationId": "listCoachRuns",
+        "parameters": [
+          { "name": "workoutId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "after", "in": "query", "schema": { "type": "integer", "format": "int64", "default": 0 } }
+        ],
+        "responses": {
+          "200": { "description": "Up to 200 runs after ordinal", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/CoachRunResponse" } } } } }
+        }
+      }
+    },
+    "/v1/coach/sessions/{workoutId}": {
+      "put": {
+        "tags": ["coach-run-controller"],
+        "operationId": "updateCoachSession",
+        "parameters": [
+          { "name": "workoutId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CoachSessionUpdateRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Accepted session sequence", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CoachSessionUpdateResponse" } } } }
+        }
+      }
+    },
     "/admin/api/users/{id}/revoke-sessions": {
       "post": {
         "tags": [
@@ -1008,7 +1198,7 @@
             "description": "OK",
             "headers": {
               "X-Gym-Capabilities": {
-                "description": "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile; otherwise empty",
+                "description": "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile, strength-planner-personalization, workout-rir-v1, ai-planner-agentic-v1; otherwise empty",
                 "style": "simple",
                 "schema": {
                   "type": "string"
@@ -1106,7 +1296,7 @@
             "description": "OK",
             "headers": {
               "X-Gym-Capabilities": {
-                "description": "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile; otherwise empty",
+                "description": "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile, strength-planner-personalization, workout-rir-v1, ai-planner-agentic-v1; otherwise empty",
                 "style": "simple",
                 "schema": {
                   "type": "string"
@@ -1173,7 +1363,7 @@
             "description": "OK",
             "headers": {
               "X-Gym-Capabilities": {
-                "description": "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile; otherwise empty",
+                "description": "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile, strength-planner-personalization, workout-rir-v1, ai-planner-agentic-v1; otherwise empty",
                 "style": "simple",
                 "schema": {
                   "type": "string"
@@ -2604,6 +2794,381 @@
               "type": "string"
             }
           }
+        }
+      },
+      "CalendarDraftRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "requestId",
+          "expectedRevision",
+          "expectedCatalogRevision",
+          "startsAtMillis",
+          "timeZoneId",
+          "gymIds",
+          "excludedExerciseIds",
+          "excludedEquipmentIds",
+          "priorityMuscles",
+          "includeNotes",
+          "availableDurationMinutes",
+          "currentState",
+          "preferences"
+        ],
+        "properties": {
+          "requestId": { "$ref": "#/components/schemas/CanonicalUuid" },
+          "expectedRevision": { "$ref": "#/components/schemas/NonNegativeLong" },
+          "expectedCatalogRevision": { "$ref": "#/components/schemas/NonNegativeLong" },
+          "startsAtMillis": { "$ref": "#/components/schemas/NonNegativeLong" },
+          "timeZoneId": { "type": "string", "minLength": 1, "maxLength": 255 },
+          "gymIds": {
+            "type": "array",
+            "uniqueItems": true,
+            "maxItems": 1000,
+            "items": { "$ref": "#/components/schemas/CanonicalUuid" }
+          },
+          "excludedExerciseIds": {
+            "type": "array",
+            "uniqueItems": true,
+            "maxItems": 1000,
+            "items": { "$ref": "#/components/schemas/CanonicalUuid" }
+          },
+          "excludedEquipmentIds": {
+            "type": "array",
+            "uniqueItems": true,
+            "maxItems": 200,
+            "items": { "type": "string", "minLength": 1, "maxLength": 255 }
+          },
+          "priorityMuscles": {
+            "type": "array",
+            "uniqueItems": true,
+            "maxItems": 25,
+            "items": { "type": "string" }
+          },
+          "includeNotes": { "type": "boolean" },
+          "availableDurationMinutes": { "type": "integer", "minimum": 10, "maximum": 240 },
+          "currentState": { "$ref": "#/components/schemas/NullableCalendarText" },
+          "preferences": { "$ref": "#/components/schemas/NullableCalendarText" }
+        }
+      },
+      "CalendarRefinementRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "requestId",
+          "expectedRevision",
+          "expectedCatalogRevision",
+          "expectedProposalVersion",
+          "refinement"
+        ],
+        "properties": {
+          "requestId": { "$ref": "#/components/schemas/CanonicalUuid" },
+          "expectedRevision": { "$ref": "#/components/schemas/NonNegativeLong" },
+          "expectedCatalogRevision": { "$ref": "#/components/schemas/NonNegativeLong" },
+          "expectedProposalVersion": { "type": "integer", "minimum": 1 },
+          "refinement": { "type": "string", "minLength": 1, "maxLength": 2000, "pattern": "^\\S(?:.*\\S)?$" }
+        }
+      },
+      "CanonicalUuid": {
+        "type": "string",
+        "format": "uuid",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+      },
+      "NonNegativeLong": {
+        "type": "integer",
+        "format": "int64",
+        "minimum": 0
+      },
+      "NullableCalendarText": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "maxLength": 2000,
+        "pattern": ".*\\S.*"
+      },
+      "CalendarDraftV2Response": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "requestId",
+          "context",
+          "proposal",
+          "agenticProjection"
+        ],
+        "properties": {
+          "requestId": { "type": "string" },
+          "context": { "$ref": "#/components/schemas/CalendarDraftContext" },
+          "proposal": { "$ref": "#/components/schemas/ProposalResponse" },
+          "agenticProjection": { "$ref": "#/components/schemas/AgenticProjection" }
+        }
+      },
+      "CalendarDraftContext": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "revision",
+          "catalogRevision",
+          "capturedAtMillis"
+        ],
+        "properties": {
+          "revision": { "type": "integer", "format": "int64" },
+          "catalogRevision": { "type": "integer", "format": "int64" },
+          "capturedAtMillis": { "type": "integer", "format": "int64" }
+        }
+      },
+      "AgenticProjection": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "candidateIds",
+          "skeleton"
+        ],
+        "properties": {
+          "candidateIds": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "skeleton": { "$ref": "#/components/schemas/AgenticSkeleton" }
+        }
+      },
+      "AgenticSkeleton": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "focusExerciseId",
+          "slots",
+          "minDurationSec",
+          "maxDurationSec"
+        ],
+        "properties": {
+          "focusExerciseId": { "type": "string" },
+          "slots": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/AgenticSkeletonSlot" }
+          },
+          "minDurationSec": { "type": "integer", "format": "int32" },
+          "maxDurationSec": { "type": "integer", "format": "int32" }
+        }
+      },
+      "AgenticSkeletonSlot": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "slotId",
+          "allowedExerciseIds",
+          "minDurationSec",
+          "maxDurationSec"
+        ],
+        "properties": {
+          "slotId": { "type": "string" },
+          "allowedExerciseIds": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "minDurationSec": { "type": "integer", "format": "int32" },
+          "maxDurationSec": { "type": "integer", "format": "int32" }
+        }
+      },
+      "ProposalResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "proposalId",
+          "author",
+          "recipientId",
+          "source",
+          "status",
+          "currentVersion",
+          "createdAt",
+          "updatedAt",
+          "expiresAt",
+          "snapshot"
+        ],
+        "properties": {
+          "proposalId": { "type": "string", "format": "uuid" },
+          "author": { "$ref": "#/components/schemas/ProposalAuthor" },
+          "recipientId": { "type": "string", "format": "uuid" },
+          "source": { "type": "string" },
+          "status": { "type": "string" },
+          "currentVersion": { "type": "integer", "format": "int32" },
+          "createdAt": { "type": "integer", "format": "int64" },
+          "updatedAt": { "type": "integer", "format": "int64" },
+          "expiresAt": { "type": "integer", "format": "int64" },
+          "snapshot": { "$ref": "#/components/schemas/ProposalSnapshot" }
+        }
+      },
+      "ProposalAuthor": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "accountId"
+        ],
+        "properties": {
+          "kind": { "type": "string" },
+          "accountId": { "type": ["string", "null"], "format": "uuid" }
+        }
+      },
+      "ProposalSnapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "version",
+          "draft",
+          "ownerRevision",
+          "catalogRevision",
+          "createdAt"
+        ],
+        "properties": {
+          "version": { "type": "integer", "format": "int32" },
+          "draft": { "$ref": "#/components/schemas/ApprovalDraft" },
+          "ownerRevision": { "type": "integer", "format": "int64" },
+          "catalogRevision": { "type": "integer", "format": "int64" },
+          "createdAt": { "type": "integer", "format": "int64" }
+        }
+      },
+      "ApprovalDraft": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "gymIds",
+          "exercises",
+          "startsAtMillis",
+          "timeZoneId"
+        ],
+        "properties": {
+          "name": { "type": "string" },
+          "gymIds": { "type": "array", "items": { "type": "string" } },
+          "exercises": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/PlannedExercise" }
+          },
+          "startsAtMillis": { "type": "integer", "format": "int64" },
+          "timeZoneId": { "type": "string" }
+        }
+      },
+      "PlannedExercise": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "exerciseId",
+          "restSeconds",
+          "plannedSets"
+        ],
+        "properties": {
+          "exerciseId": { "type": "string" },
+          "restSeconds": { "type": ["integer", "null"], "format": "int32" },
+          "plannedSets": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/PlannedSet" }
+          }
+        }
+      },
+      "PlannedSet": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "weightKg",
+          "reps",
+          "durationSec",
+          "speedKmh",
+          "inclinePct"
+        ],
+        "properties": {
+          "weightKg": { "type": ["number", "null"], "format": "double" },
+          "reps": { "type": ["integer", "null"], "format": "int32" },
+          "durationSec": { "type": ["integer", "null"], "format": "int32" },
+          "speedKmh": { "type": ["number", "null"], "format": "double" },
+          "inclinePct": { "type": ["number", "null"], "format": "double" }
+        }
+      },
+      "CoachRunSubmitRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["requestId", "workoutId", "contextVersion", "snapshot", "message", "history"],
+        "properties": {
+          "requestId": { "$ref": "#/components/schemas/CanonicalUuid" },
+          "workoutId": { "$ref": "#/components/schemas/CanonicalUuid" },
+          "contextVersion": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "snapshot": { "$ref": "#/components/schemas/CoachWorkoutSnapshot" },
+          "message": { "type": "string", "maxLength": 4000 },
+          "history": {
+            "type": "array",
+            "maxItems": 80,
+            "items": { "$ref": "#/components/schemas/CoachHistoryEntry" }
+          },
+          "model": { "type": ["string", "null"], "maxLength": 200 },
+          "automatic": { "type": "boolean" }
+        }
+      },
+      "CoachWorkoutSnapshot": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["workout_id", "revision", "exercises"],
+        "properties": {
+          "workout_id": { "$ref": "#/components/schemas/CanonicalUuid" },
+          "revision": { "$ref": "#/components/schemas/NonNegativeLong" },
+          "exercises": { "type": "array", "maxItems": 100, "items": { "type": "object" } }
+        }
+      },
+      "CoachHistoryEntry": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["role", "text"],
+        "properties": {
+          "role": { "type": "string", "enum": ["user", "assistant"] },
+          "text": { "type": "string", "maxLength": 16000 }
+        }
+      },
+      "CoachRunResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["runId", "ordinal", "requestId", "workoutId", "contextVersion", "state", "stage", "lastEventSequence", "result", "errorCode", "applicationStatus"],
+        "properties": {
+          "runId": { "type": "string", "format": "uuid" },
+          "ordinal": { "type": "integer", "format": "int64" },
+          "requestId": { "type": "string", "format": "uuid" },
+          "workoutId": { "type": "string", "format": "uuid" },
+          "contextVersion": { "type": "string" },
+          "state": { "type": "string" },
+          "stage": { "type": "string" },
+          "lastEventSequence": { "type": "integer", "format": "int64" },
+          "result": { "type": ["object", "null"] },
+          "errorCode": { "type": ["string", "null"] },
+          "applicationStatus": { "type": ["string", "null"] }
+        }
+      },
+      "CoachRunReceiptRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["receiptId", "proposalId", "status"],
+        "properties": {
+          "receiptId": { "$ref": "#/components/schemas/CanonicalUuid" },
+          "proposalId": { "$ref": "#/components/schemas/CanonicalUuid" },
+          "status": { "type": "string", "enum": ["APPLIED", "REJECTED", "STALE"] }
+        }
+      },
+      "CoachSessionUpdateRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["eventId", "sequence", "contextVersion", "snapshot"],
+        "properties": {
+          "eventId": { "$ref": "#/components/schemas/CanonicalUuid" },
+          "sequence": { "type": "integer", "minimum": 1 },
+          "contextVersion": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "snapshot": { "$ref": "#/components/schemas/CoachWorkoutSnapshot" },
+          "initiativeEnabled": { "type": "boolean" },
+          "active": { "type": "boolean" }
+        }
+      },
+      "CoachSessionUpdateResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["accepted", "sequence"],
+        "properties": {
+          "accepted": { "type": "boolean" },
+          "sequence": { "type": "integer", "format": "int64" }
         }
       },
       "AdminPage": {

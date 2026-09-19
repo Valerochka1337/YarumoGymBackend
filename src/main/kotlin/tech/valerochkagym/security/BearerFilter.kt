@@ -32,7 +32,8 @@ class BearerFilter(
     // retain its initial principal and never append a JSON authentication error to SSE.
     if (
       request.dispatcherType == jakarta.servlet.DispatcherType.ASYNC &&
-        request.requestURI == "/v1/ai/coach-turn/stream"
+        (request.requestURI == "/v1/ai/coach-turn/stream" ||
+          request.requestURI.matches(Regex("/v1/coach/runs/[^/]+/events")))
     ) {
       val identity = request.getAttribute("coach.stream.identity")
       if (identity != null)
@@ -59,7 +60,10 @@ class BearerFilter(
         val identity = auth.authenticate(header.removePrefix("Bearer ")) ?: unauthorized()
         SecurityContextHolder.getContext().authentication =
           UsernamePasswordAuthenticationToken(identity, null, emptyList())
-        if (request.requestURI == "/v1/ai/coach-turn/stream")
+        if (
+          (request.requestURI == "/v1/ai/coach-turn/stream" ||
+            request.requestURI.matches(Regex("/v1/coach/runs/[^/]+/events")))
+        )
           request.setAttribute("coach.stream.identity", identity)
         limits.check("user:${identity.userId}", 300)
       }

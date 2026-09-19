@@ -1,5 +1,5 @@
 --liquibase formatted sql
---changeset codex:022-calendar-planner-refinements
+--changeset codex:023-calendar-planner-refinements
 CREATE TABLE calendar_planner_refinements (
   owner_id UUID NOT NULL,
   request_id UUID NOT NULL,

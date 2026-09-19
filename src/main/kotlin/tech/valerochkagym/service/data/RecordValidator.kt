@@ -220,6 +220,9 @@ class RecordValidator(
       "reportedFeelingsJson",
       "restSnapshotJson",
       "coachMutationRevision",
+      "targetRir",
+      "actualRir",
+      "actualRirAtLeastFour",
     )
 
   private fun set(n: JsonNode, completed: Boolean) {
@@ -247,11 +250,18 @@ class RecordValidator(
           number(
             n,
             it,
-            integer = it.endsWith("Reps") || it.endsWith("DurationSec"),
+            integer = it.endsWith("Reps") || it.endsWith("DurationSec") || it.endsWith("Rir"),
             min = if (it.endsWith("InclinePct")) -100.0 else 0.0,
-            max = 1e6,
+            max = if (it.endsWith("Rir")) 10.0 else 1e6,
           )
         }
+      if (n.has("actualRirAtLeastFour")) bool(n, "actualRirAtLeastFour")
+      if (
+        n["actualRirAtLeastFour"]?.asBoolean() == true &&
+          n["actualRir"] != null &&
+          !n["actualRir"].isNull
+      )
+        bad("RIR 4+ несовместим с точным RIR")
       n["setType"]?.let {
         enum(
           n,
