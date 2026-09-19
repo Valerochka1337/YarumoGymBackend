@@ -77,6 +77,23 @@ class CoachRunIntegrationTest {
   @Autowired lateinit var crypto: tech.valerochkagym.utils.Crypto
   @org.springframework.boot.test.web.server.LocalServerPort var port: Int = 0
 
+  @Test
+  fun `playground bootstrap is unavailable without its profile`() {
+    val response =
+      java.net.http.HttpClient.newHttpClient()
+        .send(
+          java.net.http.HttpRequest.newBuilder(
+              java.net.URI("http://localhost:$port/dev/coach/api/bootstrap")
+            )
+            .header("X-Coach-Playground", "1")
+            .POST(java.net.http.HttpRequest.BodyPublishers.noBody())
+            .build(),
+          java.net.http.HttpResponse.BodyHandlers.ofString(),
+        )
+    assertEquals(401, response.statusCode())
+    assertFalse(response.body().contains("accessToken"))
+  }
+
   @BeforeEach
   fun reset() {
     db.execute(

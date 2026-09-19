@@ -1,0 +1,543 @@
+{
+  "catalog": [
+    {
+      "exercise_id": "c0ac0000-0000-4000-8000-000000000010",
+      "name": "Жим штанги лёжа",
+      "type": "STRENGTH",
+      "weight_kg": 60,
+      "equipment": [
+        "BARBELL",
+        "BENCH"
+      ]
+    },
+    {
+      "exercise_id": "c0ac0000-0000-4000-8000-000000000011",
+      "name": "Тяга верхнего блока",
+      "type": "STRENGTH",
+      "weight_kg": 45,
+      "equipment": [
+        "CABLE_MACHINE"
+      ]
+    },
+    {
+      "exercise_id": "c0ac0000-0000-4000-8000-000000000012",
+      "name": "Приседания со штангой",
+      "type": "STRENGTH",
+      "weight_kg": 70,
+      "equipment": [
+        "BARBELL"
+      ]
+    },
+    {
+      "exercise_id": "c0ac0000-0000-4000-8000-000000000013",
+      "name": "Жим гантелей лёжа",
+      "type": "STRENGTH",
+      "weight_kg": 20,
+      "equipment": [
+        "DUMBBELL",
+        "BENCH"
+      ]
+    }
+  ],
+  "records": [
+    {
+      "kind": "exercise",
+      "id": "c0ac0000-0000-4000-8000-000000000010",
+      "payload": {
+        "name": "Жим штанги лёжа",
+        "muscleGroup": "CHEST",
+        "type": "STRENGTH",
+        "isCustom": true,
+        "updatedAt": 1750000000000,
+        "needsMuscleMapReview": false,
+        "equipmentRequirementState": "KNOWN",
+        "muscles": [],
+        "equipmentIds": [
+          "BARBELL",
+          "BENCH"
+        ]
+      }
+    },
+    {
+      "kind": "exercise",
+      "id": "c0ac0000-0000-4000-8000-000000000011",
+      "payload": {
+        "name": "Тяга верхнего блока",
+        "muscleGroup": "BACK",
+        "type": "STRENGTH",
+        "isCustom": true,
+        "updatedAt": 1750000000000,
+        "needsMuscleMapReview": false,
+        "equipmentRequirementState": "KNOWN",
+        "muscles": [],
+        "equipmentIds": [
+          "CABLE_MACHINE"
+        ]
+      }
+    },
+    {
+      "kind": "exercise",
+      "id": "c0ac0000-0000-4000-8000-000000000012",
+      "payload": {
+        "name": "Приседания со штангой",
+        "muscleGroup": "LEGS",
+        "type": "STRENGTH",
+        "isCustom": true,
+        "updatedAt": 1750000000000,
+        "needsMuscleMapReview": false,
+        "equipmentRequirementState": "KNOWN",
+        "muscles": [],
+        "equipmentIds": [
+          "BARBELL"
+        ]
+      }
+    },
+    {
+      "kind": "exercise",
+      "id": "c0ac0000-0000-4000-8000-000000000013",
+      "payload": {
+        "name": "Жим гантелей лёжа",
+        "muscleGroup": "CHEST",
+        "type": "STRENGTH",
+        "isCustom": true,
+        "updatedAt": 1750000000000,
+        "needsMuscleMapReview": false,
+        "equipmentRequirementState": "KNOWN",
+        "muscles": [],
+        "equipmentIds": [
+          "DUMBBELL",
+          "BENCH"
+        ]
+      }
+    },
+    {
+      "kind": "workout",
+      "id": "c0ac0000-0000-4000-8000-000000000100",
+      "payload": {
+        "name": "Тестовая тренировка",
+        "startedAt": 1749996400000,
+        "finishedAt": 1750000000000,
+        "exercises": [
+          {
+            "exerciseId": "c0ac0000-0000-4000-8000-000000000010",
+            "sectionId": "f0e8d444-151a-5084-925f-d322c285bacf",
+            "sets": [
+              {
+                "setIndex": 0,
+                "weightKg": 60,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1749999400000,
+                "setType": "WORK",
+                "actualRir": 2
+              },
+              {
+                "setIndex": 1,
+                "weightKg": 60,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1749999580000,
+                "setType": "WORK",
+                "actualRir": 2
+              },
+              {
+                "setIndex": 2,
+                "weightKg": 60,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1749999760000,
+                "setType": "WORK",
+                "actualRir": 2
+              }
+            ]
+          },
+          {
+            "exerciseId": "c0ac0000-0000-4000-8000-000000000011",
+            "sectionId": "55622692-c4e9-5802-8ad0-33deea627a2a",
+            "sets": [
+              {
+                "setIndex": 0,
+                "weightKg": 45,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1749999400000,
+                "setType": "WORK",
+                "actualRir": 2
+              },
+              {
+                "setIndex": 1,
+                "weightKg": 45,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1749999580000,
+                "setType": "WORK",
+                "actualRir": 2
+              },
+              {
+                "setIndex": 2,
+                "weightKg": 45,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1749999760000,
+                "setType": "WORK",
+                "actualRir": 2
+              }
+            ]
+          },
+          {
+            "exerciseId": "c0ac0000-0000-4000-8000-000000000012",
+            "sectionId": "81fa6e11-09d9-529c-9ed2-1a9768ee95c9",
+            "sets": [
+              {
+                "setIndex": 0,
+                "weightKg": 70,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1749999400000,
+                "setType": "WORK",
+                "actualRir": 2
+              },
+              {
+                "setIndex": 1,
+                "weightKg": 70,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1749999580000,
+                "setType": "WORK",
+                "actualRir": 2
+              },
+              {
+                "setIndex": 2,
+                "weightKg": 70,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1749999760000,
+                "setType": "WORK",
+                "actualRir": 2
+              }
+            ]
+          },
+          {
+            "exerciseId": "c0ac0000-0000-4000-8000-000000000013",
+            "sectionId": "6c4dc738-cacc-500a-8cfa-6d15b75ac410",
+            "sets": [
+              {
+                "setIndex": 0,
+                "weightKg": 20,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1749999400000,
+                "setType": "WORK",
+                "actualRir": 2
+              },
+              {
+                "setIndex": 1,
+                "weightKg": 20,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1749999580000,
+                "setType": "WORK",
+                "actualRir": 2
+              },
+              {
+                "setIndex": 2,
+                "weightKg": 20,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1749999760000,
+                "setType": "WORK",
+                "actualRir": 2
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "workout",
+      "id": "c0ac0000-0000-4000-8000-000000000101",
+      "payload": {
+        "name": "Тестовая тренировка",
+        "startedAt": 1750255600000,
+        "finishedAt": 1750259200000,
+        "exercises": [
+          {
+            "exerciseId": "c0ac0000-0000-4000-8000-000000000010",
+            "sectionId": "38423ab3-f5e4-54ca-b82b-0b66fc18895d",
+            "sets": [
+              {
+                "setIndex": 0,
+                "weightKg": 60,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1750258600000,
+                "setType": "WORK",
+                "actualRir": 2
+              },
+              {
+                "setIndex": 1,
+                "weightKg": 60,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1750258780000,
+                "setType": "WORK",
+                "actualRir": 2
+              },
+              {
+                "setIndex": 2,
+                "weightKg": 60,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1750258960000,
+                "setType": "WORK",
+                "actualRir": 2
+              }
+            ]
+          },
+          {
+            "exerciseId": "c0ac0000-0000-4000-8000-000000000011",
+            "sectionId": "5b1f818b-acd5-558e-b8d1-5b5b307780fe",
+            "sets": [
+              {
+                "setIndex": 0,
+                "weightKg": 45,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1750258600000,
+                "setType": "WORK",
+                "actualRir": 2
+              },
+              {
+                "setIndex": 1,
+                "weightKg": 45,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1750258780000,
+                "setType": "WORK",
+                "actualRir": 2
+              },
+              {
+                "setIndex": 2,
+                "weightKg": 45,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1750258960000,
+                "setType": "WORK",
+                "actualRir": 2
+              }
+            ]
+          },
+          {
+            "exerciseId": "c0ac0000-0000-4000-8000-000000000012",
+            "sectionId": "908b922c-d184-51ef-8993-2902490a4de6",
+            "sets": [
+              {
+                "setIndex": 0,
+                "weightKg": 70,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1750258600000,
+                "setType": "WORK",
+                "actualRir": 2
+              },
+              {
+                "setIndex": 1,
+                "weightKg": 70,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1750258780000,
+                "setType": "WORK",
+                "actualRir": 2
+              },
+              {
+                "setIndex": 2,
+                "weightKg": 70,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1750258960000,
+                "setType": "WORK",
+                "actualRir": 2
+              }
+            ]
+          },
+          {
+            "exerciseId": "c0ac0000-0000-4000-8000-000000000013",
+            "sectionId": "7f8b67bc-6114-5662-a1dc-7578ed959c61",
+            "sets": [
+              {
+                "setIndex": 0,
+                "weightKg": 20,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1750258600000,
+                "setType": "WORK",
+                "actualRir": 2
+              },
+              {
+                "setIndex": 1,
+                "weightKg": 20,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1750258780000,
+                "setType": "WORK",
+                "actualRir": 2
+              },
+              {
+                "setIndex": 2,
+                "weightKg": 20,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1750258960000,
+                "setType": "WORK",
+                "actualRir": 2
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "workout",
+      "id": "c0ac0000-0000-4000-8000-000000000102",
+      "payload": {
+        "name": "Тестовая тренировка",
+        "startedAt": 1750514800000,
+        "finishedAt": 1750518400000,
+        "exercises": [
+          {
+            "exerciseId": "c0ac0000-0000-4000-8000-000000000010",
+            "sectionId": "ec885fb5-f4b3-5b66-ad1b-e90dfa4245c1",
+            "sets": [
+              {
+                "setIndex": 0,
+                "weightKg": 60,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1750517800000,
+                "setType": "WORK",
+                "actualRir": 2
+              },
+              {
+                "setIndex": 1,
+                "weightKg": 60,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1750517980000,
+                "setType": "WORK",
+                "actualRir": 2
+              },
+              {
+                "setIndex": 2,
+                "weightKg": 60,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1750518160000,
+                "setType": "WORK",
+                "actualRir": 2
+              }
+            ]
+          },
+          {
+            "exerciseId": "c0ac0000-0000-4000-8000-000000000011",
+            "sectionId": "d793fbb7-00bc-5d3c-8b7d-426509049399",
+            "sets": [
+              {
+                "setIndex": 0,
+                "weightKg": 45,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1750517800000,
+                "setType": "WORK",
+                "actualRir": 2
+              },
+              {
+                "setIndex": 1,
+                "weightKg": 45,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1750517980000,
+                "setType": "WORK",
+                "actualRir": 2
+              },
+              {
+                "setIndex": 2,
+                "weightKg": 45,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1750518160000,
+                "setType": "WORK",
+                "actualRir": 2
+              }
+            ]
+          },
+          {
+            "exerciseId": "c0ac0000-0000-4000-8000-000000000012",
+            "sectionId": "1203a1f6-a9b2-5c77-9b8f-a945d0c3c35d",
+            "sets": [
+              {
+                "setIndex": 0,
+                "weightKg": 70,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1750517800000,
+                "setType": "WORK",
+                "actualRir": 2
+              },
+              {
+                "setIndex": 1,
+                "weightKg": 70,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1750517980000,
+                "setType": "WORK",
+                "actualRir": 2
+              },
+              {
+                "setIndex": 2,
+                "weightKg": 70,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1750518160000,
+                "setType": "WORK",
+                "actualRir": 2
+              }
+            ]
+          },
+          {
+            "exerciseId": "c0ac0000-0000-4000-8000-000000000013",
+            "sectionId": "deef6d3d-43f3-5bf8-91bf-dc680a85624e",
+            "sets": [
+              {
+                "setIndex": 0,
+                "weightKg": 20,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1750517800000,
+                "setType": "WORK",
+                "actualRir": 2
+              },
+              {
+                "setIndex": 1,
+                "weightKg": 20,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1750517980000,
+                "setType": "WORK",
+                "actualRir": 2
+              },
+              {
+                "setIndex": 2,
+                "weightKg": 20,
+                "reps": 10,
+                "isCompleted": true,
+                "completedAt": 1750518160000,
+                "setType": "WORK",
+                "actualRir": 2
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

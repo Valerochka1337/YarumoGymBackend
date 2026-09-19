@@ -1,0 +1,11 @@
+server:
+  address: 127.0.0.1
+  port: 18081
+  forward-headers-strategy: none
+spring:
+  datasource:
+    url: jdbc:postgresql://127.0.0.1:15433/gym_playground
+    username: gym
+    password: local-playground-only
+gym:
+  mail-enabled: false
