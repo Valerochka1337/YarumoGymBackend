@@ -1,5 +1,5 @@
 --liquibase formatted sql
---changeset codex:022-records-kind-check
+--changeset codex:024-records-kind-check
 ALTER TABLE records DROP CONSTRAINT records_kind_check;
 ALTER TABLE records ADD CONSTRAINT records_kind_check CHECK (kind IN (
   'exercise','gym','routine','workout','measurement','schedule','exercise_hint','profile',

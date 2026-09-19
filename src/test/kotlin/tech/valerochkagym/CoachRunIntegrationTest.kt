@@ -437,4 +437,290 @@ class CoachRunIntegrationTest {
     )
     assertEquals(1, db.queryForObject("SELECT count(*) FROM coach_run_receipts", Int::class.java))
   }
+
+  private fun sessionBody(
+    workout: UUID,
+    sequence: Long,
+    enabled: Boolean = false,
+    snapshot: JsonNode? = null,
+  ): ByteArray =
+    json.writeValueAsBytes(
+      mapOf(
+        "eventId" to UUID.randomUUID().toString(),
+        "sequence" to sequence,
+        "contextVersion" to "e".repeat(64),
+        "snapshot" to (snapshot ?: json.readTree(request(workout = workout))["snapshot"]),
+        "initiativeEnabled" to enabled,
+        "active" to true,
+      )
+    )
+
+  @Test
+  fun `message snapshot admission rolls back together and replay cannot revert model`() {
+    val owner = owner()
+    val workout = UUID.randomUUID()
+    val id = UUID.randomUUID()
+    val state = json.readTree(sessionBody(workout, 1)) as tools.jackson.databind.node.ObjectNode
+    state.put("sequence", 0)
+    fun body(model: String = "fixture") =
+      json.writeValueAsBytes(
+        mapOf(
+          "requestId" to id.toString(),
+          "message" to "Привет",
+          "model" to model,
+          "state" to state,
+        )
+      )
+    assertThrows(ApiException::class.java) { runs.message(owner, workout, body()) }
+    assertEquals(0, db.queryForObject("SELECT count(*) FROM coach_runs", Int::class.java))
+    state.put("sequence", 1)
+    val bytes = body()
+    runs.message(owner, workout, bytes)
+    db.update("UPDATE coach_sessions SET model='newer'")
+    runs.message(owner, workout, bytes)
+    assertEquals("newer", db.queryForObject("SELECT model FROM coach_sessions", String::class.java))
+    assertEquals(1, db.queryForObject("SELECT count(*) FROM coach_runs", Int::class.java))
+    assertEquals("USER", runs.status(owner, id)["origin"].asString())
+    assertThrows(ApiException::class.java) { runs.message(owner, workout, body("changed")) }
+  }
+
+  @Test
+  fun `stale snapshots replay their original refusal without refreshing session`() {
+    val owner = owner()
+    val workout = UUID.randomUUID()
+    runs.session(owner, workout, sessionBody(workout, 9))
+    val stale = sessionBody(workout, 2)
+    val first = runs.session(owner, workout, stale)
+    assertFalse(first["accepted"].asBoolean())
+    assertEquals(
+      first["accepted"].asBoolean(),
+      runs.session(owner, workout, stale)["accepted"].asBoolean(),
+    )
+    assertEquals(
+      first["sequence"].asLong(),
+      runs.session(owner, workout, stale)["sequence"].asLong(),
+    )
+    assertEquals(9L, db.queryForObject("SELECT sequence FROM coach_sessions", Long::class.java))
+  }
+
+  @Test
+  fun `semantic versions ignore clocks pulse and json field order`() {
+    val a =
+      json.readTree(
+        """{"revision":1,"pulse":{"bpm":80},"observed_at_millis":1,"elapsed_seconds":3,"rest":{"start_id":"a","remaining_seconds":60},"available_time_ends_at_millis":1000,"available_time_minutes":1}"""
+      )
+    val b =
+      json.readTree(
+        """{"rest":{"remaining_seconds":40,"start_id":"a"},"revision":1,"observed_at_millis":2,"elapsed_seconds":4,"available_time_ends_at_millis":1000,"available_time_minutes":0}"""
+      )
+    assertEquals(runs.semanticVersion(a), runs.semanticVersion(b))
+    (b as tools.jackson.databind.node.ObjectNode).put("revision", 2)
+    assertNotEquals(runs.semanticVersion(a), runs.semanticVersion(b))
+  }
+
+  @Test
+  fun `workout journal stays ordered across tasks and revalidates revoked login`() {
+    val owner = owner()
+    val workout = UUID.randomUUID()
+    assertTrue(runs.workoutEvents(owner, workout, 0).isEmpty())
+    val first = UUID.randomUUID()
+    val second = UUID.randomUUID()
+    runs.submit(owner, request(first, workout))
+    runs.runNext()
+    runs.submit(owner, request(second, workout))
+    val events = runs.workoutEvents(owner, workout, 0)
+    assertEquals((1L..events.size.toLong()).toList(), events.map { it["sequence"].asLong() })
+    assertEquals("created", events.first()["type"].asString())
+    assertEquals(second.toString(), events.last()["runId"].asString())
+    assertTrue(events.all { it["origin"].asString() == "USER" })
+    assertEquals(events.drop(2), runs.workoutEvents(owner, workout, 2))
+    db.update("DELETE FROM sessions WHERE id=?", owner.sessionId)
+    assertThrows(ApiException::class.java) { runs.workoutEvents(owner, workout, 0) }
+  }
+
+  @Test
+  fun `automatic result expires before publication while accepted user work survives disconnection`() {
+    val owner = owner()
+    val workout = UUID.randomUUID()
+    val id = UUID.randomUUID()
+    val input = json.readTree(request(id, workout)) as tools.jackson.databind.node.ObjectNode
+    input.put("automatic", true)
+    runs.session(owner, workout, sessionBody(workout, 1, true, input["snapshot"]))
+    runs.submit(owner, json.writeValueAsBytes(input))
+    provider.onCall = {
+      db.update("UPDATE coach_sessions SET updated_at=now()-interval '121 seconds'")
+    }
+    runs.runNext()
+    assertEquals("SUPERSEDED", runs.status(owner, id)["state"].asString())
+    assertTrue(runs.status(owner, id)["result"].isNull)
+    val user = UUID.randomUUID()
+    runs.submit(owner, request(user, workout))
+    runs.runNext()
+    assertEquals("SUCCEEDED", runs.status(owner, user)["state"].asString())
+  }
+
+  @Test
+  fun `receipts persist rejection evidence and deduplicate migrated memory`() {
+    val owner = owner()
+    val workout = UUID.randomUUID()
+    val id = UUID.randomUUID()
+    val proposal = UUID.randomUUID()
+    runs.submit(owner, request(id, workout))
+    db.update(
+      "UPDATE coach_runs SET state='SUCCEEDED',result=?::jsonb WHERE request_id=?",
+      json.writeValueAsString(
+        mapOf(
+          "kind" to "proposal",
+          "proposal" to
+            mapOf(
+              "proposalId" to proposal.toString(),
+              "operations" to listOf(mapOf("action" to "add_set", "section_id" to "section")),
+            ),
+        )
+      ),
+      id,
+    )
+    val snapshot =
+      json.readTree(request(workout = workout))["snapshot"]
+        as tools.jackson.databind.node.ObjectNode
+    val raw =
+      json.writeValueAsBytes(
+        mapOf(
+          "receiptId" to UUID.randomUUID().toString(),
+          "proposalId" to proposal.toString(),
+          "status" to "REJECTED",
+          "reason" to "KEEP_EXERCISE",
+          "snapshot" to snapshot,
+        )
+      )
+    runs.receipt(owner, id, raw)
+    runs.receipt(owner, id, raw)
+    snapshot.set(
+      "decisions",
+      json.valueToTree<JsonNode>(
+        listOf(
+          mapOf(
+            "proposalId" to proposal.toString(),
+            "status" to "REJECTED",
+            "reason" to "UNAVAILABLE_WEIGHT",
+          )
+        )
+      ),
+    )
+    runs.session(owner, workout, sessionBody(workout, 1, snapshot = snapshot))
+    assertEquals(1, db.queryForObject("SELECT count(*) FROM coach_decisions", Int::class.java))
+    assertEquals(
+      "KEEP_EXERCISE",
+      db.queryForObject("SELECT payload->>'reason' FROM coach_decisions", String::class.java),
+    )
+    assertNotNull(
+      db.queryForObject("SELECT snapshot::text FROM coach_run_receipts", String::class.java)
+    )
+  }
+
+  @Test
+  fun `idle workout SSE discovers tasks stays open after completion and resumes with last event id`() {
+    val owner = owner()
+    val workout = UUID.randomUUID()
+    val token = UUID.randomUUID().toString() + UUID.randomUUID().toString()
+    db.update("UPDATE sessions SET access_hash=? WHERE id=?", crypto.hash(token), owner.sessionId)
+    val client = java.net.http.HttpClient.newHttpClient()
+    fun open(after: Long) =
+      client.send(
+        java.net.http.HttpRequest.newBuilder(
+            java.net.URI("http://localhost:$port/v1/coach/sessions/$workout/events")
+          )
+          .header("Authorization", "Bearer $token")
+          .header("Last-Event-ID", after.toString())
+          .GET()
+          .build(),
+        java.net.http.HttpResponse.BodyHandlers.ofInputStream(),
+      )
+    java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor().use { executor ->
+      val connection = open(0)
+      assertEquals(200, connection.statusCode())
+      connection.body().bufferedReader().use { reader ->
+        fun nextData(): JsonNode =
+          executor
+            .submit<JsonNode> {
+              generateSequence { reader.readLine() }
+                .first { it.startsWith("data:") }
+                .removePrefix("data:")
+                .let(json::readTree)
+            }
+            .get(5, java.util.concurrent.TimeUnit.SECONDS)
+        val first = UUID.randomUUID()
+        runs.submit(owner, request(first, workout))
+        assertEquals("created", nextData()["type"].asString())
+        runs.runNext()
+        var terminal = nextData()
+        while (terminal["type"].asString() != "completed") terminal = nextData()
+        val cursor = terminal["sequence"].asLong()
+        val second = UUID.randomUUID()
+        runs.submit(owner, request(second, workout))
+        assertEquals(second.toString(), nextData()["runId"].asString())
+        open(cursor).body().bufferedReader().use { resumed ->
+          val replay =
+            executor
+              .submit<String> {
+                generateSequence { resumed.readLine() }.first { it.startsWith("data:") }
+              }
+              .get(5, java.util.concurrent.TimeUnit.SECONDS)
+          assertEquals(
+            second.toString(),
+            json.readTree(replay.removePrefix("data:"))["runId"].asString(),
+          )
+          db.update("UPDATE sessions SET revoked_at=now() WHERE id=?", owner.sessionId)
+          executor
+            .submit<Unit> { while (resumed.readLine() != null) {} }
+            .get(5, java.util.concurrent.TimeUnit.SECONDS)
+        }
+      }
+    }
+  }
+
+  @Autowired lateinit var dataSource: javax.sql.DataSource
+
+  @Test
+  fun `both applied variants of migration 022 upgrade without losing session events`() {
+    val owner = owner()
+    val workout = UUID.randomUUID()
+    runs.session(owner, workout, sessionBody(workout, 1))
+    val id = UUID.randomUUID()
+    runs.submit(owner, request(id, workout))
+    val eventCount = db.queryForObject("SELECT count(*) FROM coach_workout_events", Int::class.java)
+    for ((checksum, hadResponse) in
+      listOf(
+        "9:94adf1dec72cd01e3aea086dc4c5c9d4" to false,
+        "9:e6359f6df0e93593ba68ddd6229dba2d" to true,
+      )) {
+      db.update("DELETE FROM databasechangelog WHERE id='023-coach-session-acknowledgements'")
+      db.update(
+        "UPDATE databasechangelog SET md5sum=? WHERE id='022-coach-session-stream'",
+        checksum,
+      )
+      if (!hadResponse) db.execute("ALTER TABLE coach_session_events DROP COLUMN response")
+      liquibase.integration.spring.SpringLiquibase().apply {
+        setDataSource(this@CoachRunIntegrationTest.dataSource)
+        setChangeLog("classpath:db/changelog/master.yaml")
+        afterPropertiesSet()
+      }
+      assertEquals(
+        1,
+        db.queryForObject(
+          "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='coach_session_events' AND column_name='response'",
+          Int::class.java,
+        ),
+      )
+      assertEquals(
+        eventCount,
+        db.queryForObject("SELECT count(*) FROM coach_workout_events", Int::class.java),
+      )
+      assertEquals(
+        1,
+        db.queryForObject("SELECT count(*) FROM coach_session_events", Int::class.java),
+      )
+      assertEquals(id.toString(), runs.status(owner, id)["runId"].asString())
+    }
+  }
 }

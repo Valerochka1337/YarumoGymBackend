@@ -81,6 +81,7 @@ class CoachRunService(
     json.valueToTree(
       mapOf(
         "runId" to r.id.toString(),
+        "origin" to if (r.input["automatic"]?.asBoolean() == true) "COACH" else "USER",
         "ordinal" to r.ordinal,
         "requestId" to r.id.toString(),
         "workoutId" to r.workout.toString(),
@@ -281,13 +282,17 @@ class CoachRunService(
         owner,
         id,
       )!!
+    val run = read(owner, id)!!
+    val origin = if (run.input["automatic"]?.asBoolean() == true) "COACH" else "USER"
     val payload =
       mapOf(
+        "runId" to id.toString(),
+        "origin" to origin,
         "sequence" to sequence,
         "type" to type,
         "stage" to stage,
         "text" to text,
-        "run" to if (type == "completed") response(read(owner, id)!!) else null,
+        "run" to response(run),
       )
     jdbc.update(
       "INSERT INTO coach_run_events(owner_id,request_id,sequence,payload) VALUES (?,?,?,?::jsonb)",
@@ -296,7 +301,83 @@ class CoachRunService(
       sequence,
       json.writeValueAsString(payload),
     )
+    val workoutSequence =
+      jdbc.queryForObject(
+        "INSERT INTO coach_workout_event_cursors(owner_id,workout_id,sequence) VALUES (?,?,1) ON CONFLICT(owner_id,workout_id) DO UPDATE SET sequence=coach_workout_event_cursors.sequence+1 RETURNING sequence",
+        Long::class.java,
+        owner,
+        run.workout,
+      )!!
+    jdbc.update(
+      "INSERT INTO coach_workout_events(owner_id,workout_id,sequence,request_id,payload) VALUES (?,?,?,?,?::jsonb)",
+      owner,
+      run.workout,
+      workoutSequence,
+      id,
+      json.writeValueAsString(
+        payload +
+          mapOf("sequence" to workoutSequence, "type" to if (sequence == 1L) "created" else type)
+      ),
+    )
   }
+
+  fun workoutEvents(identity: Identity, workout: UUID, after: Long): List<JsonNode> =
+    tx.execute {
+      guard.lock(identity)
+      jdbc.query(
+        "SELECT payload::text FROM coach_workout_events WHERE owner_id=? AND workout_id=? AND sequence>? ORDER BY sequence LIMIT 100",
+        { r, _ -> json.readTree(r.getString(1)) },
+        identity.userId,
+        workout,
+        after,
+      )
+    }!!
+
+  fun message(identity: Identity, workout: UUID, raw: ByteArray): JsonNode =
+    tx.execute {
+      guard.lock(identity)
+      val body = parse(raw)
+      uuid(body["requestId"])
+      val message = body["message"]
+      if (
+        message?.isString != true ||
+          message.asString().isBlank() ||
+          message.asString().length > 4000
+      )
+        bad("Некорректное сообщение")
+      val state = body["state"] ?: bad("Необходим снимок")
+      validateSnapshot(state, workout)
+      val model = body["model"]
+      if (model != null && !model.isNull && (!model.isString || model.asString().length > 200))
+        bad("Некорректная модель")
+      // Insert first so admission of this snapshot cannot initiate a competing automatic run.
+      val input =
+        json.valueToTree<JsonNode>(
+          mapOf(
+            "requestId" to body["requestId"],
+            "workoutId" to workout.toString(),
+            "contextVersion" to state["contextVersion"],
+            "snapshot" to state["snapshot"],
+            "message" to message,
+            "model" to model,
+            "automatic" to false,
+            "history" to emptyList<Any>(),
+            "admissionDigest" to digest(body),
+          )
+        )
+      val existed = read(identity.userId, uuid(body["requestId"])) != null
+      val result = insert(identity.userId, input)
+      if (existed) return@execute result
+      session(identity, workout, json.writeValueAsBytes(state))
+      if (model != null)
+        jdbc.update(
+          "UPDATE coach_sessions SET model=? WHERE owner_id=? AND workout_id=?",
+          model.takeUnless { it.isNull }?.asString(),
+          identity.userId,
+          workout,
+        )
+      result
+    }!!
 
   fun session(identity: Identity, workout: UUID, raw: ByteArray): JsonNode =
     tx.execute {
@@ -324,7 +405,14 @@ class CoachRunService(
           .firstOrNull()
       if (prior != null) {
         if (prior != hash) conflict()
-        return@execute json.valueToTree(mapOf("accepted" to true, "sequence" to sequence))
+        return@execute jdbc
+          .query(
+            "SELECT response::text FROM coach_session_events WHERE owner_id=? AND event_id=?",
+            { r, _ -> r.getString(1)?.let(json::readTree) },
+            identity.userId,
+            eventId,
+          )
+          .firstOrNull() ?: json.valueToTree(mapOf("accepted" to true, "sequence" to sequence))
       }
       val previous =
         jdbc
@@ -342,8 +430,22 @@ class CoachRunService(
         workout,
         hash,
       )
+      fun acknowledge(accepted: Boolean, acknowledgedSequence: Long): JsonNode {
+        val result =
+          json.valueToTree<JsonNode>(
+            mapOf("accepted" to accepted, "sequence" to acknowledgedSequence)
+          )
+        jdbc.update(
+          "UPDATE coach_session_events SET response=?::jsonb WHERE owner_id=? AND event_id=?",
+          json.writeValueAsString(result),
+          identity.userId,
+          eventId,
+        )
+        return result
+      }
       if (previous != null && sequence <= previous.first)
-        return@execute json.valueToTree(mapOf("accepted" to false, "sequence" to previous.first))
+        return@execute acknowledge(false, previous.first)
+      val semantic = semanticVersion(input["snapshot"])
       val active = input["active"]?.asBoolean() ?: true
       val initiative = input["initiativeEnabled"]?.asBoolean() ?: false
       jdbc.update(
@@ -356,6 +458,23 @@ class CoachRunService(
         initiative,
         active,
       )
+      jdbc.update(
+        "UPDATE coach_sessions SET semantic_version=? WHERE owner_id=? AND workout_id=?",
+        semantic,
+        identity.userId,
+        workout,
+      )
+      input["model"]?.let { model ->
+        if (!model.isNull && (!model.isString || model.asString().length > 200))
+          bad("Некорректная модель")
+        jdbc.update(
+          "UPDATE coach_sessions SET model=? WHERE owner_id=? AND workout_id=?",
+          model.takeUnless { it.isNull }?.asString(),
+          identity.userId,
+          workout,
+        )
+      }
+      migrateMemory(identity.userId, workout, input["snapshot"])
       if (!active || !initiative) {
         jdbc
           .query(
@@ -372,63 +491,10 @@ class CoachRunService(
             )
             event(identity.userId, id, "completed", "superseded")
           }
-      } else if (initiative && previous?.third != input["contextVersion"].asString()) {
-        val memory =
-          json.valueToTree<JsonNode>(
-            jdbc.query(
-              "SELECT r.status,j.result::text FROM coach_run_receipts r JOIN coach_runs j ON j.owner_id=r.owner_id AND j.request_id=r.request_id WHERE r.owner_id=? AND j.workout_id=?",
-              { r, _ ->
-                val proposal = json.readTree(r.getString(2))["proposal"]
-                mapOf(
-                  "status" to r.getString(1),
-                  "reason" to proposal?.get("reason"),
-                  "sectionIds" to
-                    proposal
-                      ?.get("operations")
-                      ?.toList()
-                      .orEmpty()
-                      .mapNotNull { it["section_id"]?.asString() }
-                      .distinct(),
-                )
-              },
-              identity.userId,
-              workout,
-            )
-          )
-        val reason = executor.initiativeDecision(input["snapshot"], previous?.second, memory)
-        if (reason != null) {
-          jdbc
-            .query(
-              "SELECT request_id FROM coach_runs WHERE owner_id=? AND workout_id=? AND automatic AND state='QUEUED' FOR UPDATE",
-              { r, _ -> r.getObject(1, UUID::class.java) },
-              identity.userId,
-              workout,
-            )
-            .forEach { id ->
-              jdbc.update(
-                "UPDATE coach_runs SET state='SUPERSEDED',stage='superseded' WHERE owner_id=? AND request_id=?",
-                identity.userId,
-                id,
-              )
-              event(identity.userId, id, "completed", "superseded")
-            }
-          insert(
-            identity.userId,
-            json.valueToTree(
-              mapOf(
-                "requestId" to eventId.toString(),
-                "workoutId" to workout.toString(),
-                "contextVersion" to input["contextVersion"],
-                "snapshot" to input["snapshot"],
-                "message" to reason,
-                "history" to emptyList<Any>(),
-                "automatic" to true,
-              )
-            ),
-          )
-        }
+      } else {
+        evaluate(identity.userId, workout)
       }
-      json.valueToTree(mapOf("accepted" to true, "sequence" to sequence))
+      acknowledge(true, sequence)
     }!!
 
   fun receipt(identity: Identity, id: UUID, raw: ByteArray) =
@@ -438,6 +504,28 @@ class CoachRunService(
       val receipt = uuid(input["receiptId"])
       val proposal = uuid(input["proposalId"])
       val status = input["status"]?.asString()
+      val reason = input["reason"]?.takeUnless { it.isNull }?.asString()
+      if (reason != null && reason.length > 2000) bad("Некорректная причина")
+      input["snapshot"]
+        ?.takeUnless { it.isNull }
+        ?.let {
+          if (
+            !it.isObject ||
+              uuid(it["workout_id"]) != (read(identity.userId, id) ?: missing()).workout
+          )
+            bad("Некорректный снимок решения")
+        }
+      val requestHash = digest(input)
+      val storedHash =
+        jdbc
+          .query(
+            "SELECT request_digest FROM coach_run_receipts WHERE owner_id=? AND receipt_id=?",
+            { r, _ -> r.getString(1) },
+            identity.userId,
+            receipt,
+          )
+          .firstOrNull()
+      if (storedHash != null && storedHash != requestHash) conflict()
       if (status !in setOf("APPLIED", "REJECTED", "STALE")) bad("Некорректный статус")
       val run = read(identity.userId, id, true) ?: missing()
       if (run.result?.get("proposal")?.get("proposalId")?.asString() != proposal.toString())
@@ -479,6 +567,16 @@ class CoachRunService(
           proposal,
           status,
         )
+      jdbc.update(
+        "UPDATE coach_run_receipts SET reason=?,snapshot=?::jsonb,request_digest=? WHERE owner_id=? AND receipt_id=?",
+        reason,
+        json.writeValueAsString(input["snapshot"] ?: run.input["snapshot"]),
+        requestHash,
+        identity.userId,
+        receipt,
+      )
+      remember(run, proposal, status!!, reason, input["snapshot"] ?: run.input["snapshot"])
+      evaluate(identity.userId, run.workout)
     }
 
   @Scheduled(fixedDelayString = "\${gym.coach-runs.poll-ms:1000}")
@@ -529,6 +627,7 @@ class CoachRunService(
               Timestamp.from(clock.instant().minusSeconds(120)),
             )
             .firstOrNull() ?: return@executeWithoutResult
+        evaluate(owner, workout)
         val ends =
           session.first["available_time_ends_at_millis"]?.asLong() ?: return@executeWithoutResult
         val reminded =
@@ -571,6 +670,7 @@ class CoachRunService(
               "message" to
                 "До конца доступного времени осталось ${remaining.coerceAtLeast(0)/60000} мин. Проверь необходимость изменения оставшихся подходов.",
               "history" to emptyList<Any>(),
+              "model" to sessionModel(owner, workout),
               "automatic" to true,
             )
           ),
@@ -596,6 +696,10 @@ class CoachRunService(
           UUID::class.java,
           candidate.owner,
         )
+        if (!automaticAllowed(candidate)) {
+          supersede(candidate)
+          return@execute null
+        }
         val token = UUID.randomUUID()
         val changed =
           jdbc.update(
@@ -713,46 +817,347 @@ class CoachRunService(
     val prior =
       jdbc
         .query(
-          "SELECT input::text,result::text,automatic FROM coach_runs WHERE owner_id=? AND workout_id=? AND ordinal<? AND state='SUCCEEDED' ORDER BY ordinal DESC LIMIT 20",
+          "SELECT input::text,result::text,automatic FROM coach_runs WHERE owner_id=? AND workout_id=? AND ordinal<? AND (NOT automatic OR state='SUCCEEDED') ORDER BY ordinal DESC LIMIT 20",
           { r, _ ->
-            Triple(json.readTree(r.getString(1)), json.readTree(r.getString(2)), r.getBoolean(3))
+            Triple(
+              json.readTree(r.getString(1)),
+              r.getString(2)?.let(json::readTree) ?: json.nullNode(),
+              r.getBoolean(3),
+            )
           },
           run.owner,
           run.workout,
           run.ordinal,
         )
         .reversed()
-    if (prior.isEmpty()) return run.input
-    val history =
-      prior
-        .flatMap { (input, result, automatic) ->
-          buildList {
-            if (!automatic) add(mapOf("role" to "user", "text" to input["message"].asString()))
-            val text = result["text"]?.asString().orEmpty()
-            if (text.isNotBlank()) add(mapOf("role" to "assistant", "text" to text))
-          }
+    val knownIds =
+      jdbc
+        .query(
+          "SELECT request_id FROM coach_runs WHERE owner_id=? AND workout_id=?",
+          { r, _ -> r.getObject(1, UUID::class.java) },
+          run.owner,
+          run.workout,
+        )
+        .flatMap { listOf(it, UUID.nameUUIDFromBytes("coach-answer:$it".toByteArray())) }
+        .toSet()
+    val legacy =
+      jdbc
+        .query(
+          "SELECT id,payload::text FROM coach_journal WHERE user_id=? AND workout_id=? AND NOT deleted AND payload->>'role' IN ('user','assistant') AND created_at < (SELECT (extract(epoch FROM min(created_at))*1000)::bigint FROM coach_runs WHERE owner_id=? AND workout_id=?) ORDER BY created_at DESC,id LIMIT 40",
+          { r, _ -> r.getObject(1, UUID::class.java) to json.readTree(r.getString(2)) },
+          run.owner,
+          run.workout,
+          run.owner,
+          run.workout,
+        )
+        .reversed()
+        .filter { it.first !in knownIds }
+        .mapNotNull { (_, payload) ->
+          payload["text"]
+            ?.takeIf { it.isString }
+            ?.asString()
+            ?.take(16000)
+            ?.let { mapOf("role" to payload["role"].asString(), "text" to it) }
         }
-        .takeLast(20)
+    val history =
+      (legacy +
+          prior.flatMap { (input, result, automatic) ->
+            buildList {
+              if (!automatic) add(mapOf("role" to "user", "text" to input["message"].asString()))
+              val text = result["text"]?.asString().orEmpty()
+              if (text.isNotBlank() && result["kind"]?.asString() != "no_change")
+                add(mapOf("role" to "assistant", "text" to text))
+            }
+          })
+        .takeLast(40)
     return (run.input.deepCopy() as tools.jackson.databind.node.ObjectNode).apply {
       set("history", json.valueToTree<JsonNode>(history))
+      if (run.input["model"] == null || run.input["model"].isNull) {
+        sessionModel(run.owner, run.workout)?.let { put("model", it) }
+      }
+      val snapshot = run.input["snapshot"].deepCopy() as tools.jackson.databind.node.ObjectNode
+      snapshot.set("decisions", memory(run.owner, run.workout))
+      snapshot["available_time_ends_at_millis"]
+        ?.takeUnless { it.isNull }
+        ?.asLong()
+        ?.let { ends ->
+          snapshot.put(
+            "available_time_minutes",
+            ((ends - clock.millis()).coerceAtLeast(0) + 59999) / 60000,
+          )
+        }
+      (snapshot["rest"] as? tools.jackson.databind.node.ObjectNode)?.let { rest ->
+        rest["ends_at_millis"]
+          ?.takeUnless { it.isNull }
+          ?.asLong()
+          ?.let { ends ->
+            rest.put("remaining_seconds", ((ends - clock.millis()).coerceAtLeast(0) + 999) / 1000)
+          }
+      }
+      snapshot["observed_at_millis"]
+        ?.takeUnless { it.isNull }
+        ?.asLong()
+        ?.let { observed ->
+          snapshot.put(
+            "elapsed_seconds",
+            (snapshot["elapsed_seconds"]?.asLong() ?: 0) +
+              (clock.millis() - observed).coerceAtLeast(0) / 1000,
+          )
+        }
+      set("snapshot", snapshot)
     }
   }
 
-  private fun fenced(run: Run, action: () -> Unit) =
-    tx.executeWithoutResult {
-      val current = read(run.owner, run.id, true) ?: throw IllegalStateException("Lease lost")
-      val valid =
+  private fun fenced(run: Run, action: () -> Unit) {
+    val allowed =
+      tx.execute {
         jdbc.queryForObject(
-          "SELECT lease_until>? FROM coach_runs WHERE owner_id=? AND request_id=?",
-          Boolean::class.java,
-          Timestamp.from(clock.instant()),
+          "SELECT id FROM users WHERE id=? FOR UPDATE",
+          UUID::class.java,
           run.owner,
-          run.id,
-        ) == true
-      if (current.state != "RUNNING" || current.token != run.token || !valid)
-        throw IllegalStateException("Lease lost")
-      action()
+        )
+        val current = read(run.owner, run.id, true) ?: throw IllegalStateException("Lease lost")
+        val valid =
+          jdbc.queryForObject(
+            "SELECT lease_until>? FROM coach_runs WHERE owner_id=? AND request_id=?",
+            Boolean::class.java,
+            Timestamp.from(clock.instant()),
+            run.owner,
+            run.id,
+          ) == true
+        if (current.state != "RUNNING" || current.token != run.token || !valid)
+          throw IllegalStateException("Lease lost")
+        if (!automaticAllowed(current)) {
+          supersede(current)
+          false
+        } else {
+          action()
+          true
+        }
+      }
+    if (allowed != true) throw IllegalStateException("Automatic context expired")
+  }
+
+  internal fun semanticVersion(snapshot: JsonNode): String {
+    fun canonical(node: JsonNode): JsonNode =
+      when {
+        node.isObject ->
+          json.valueToTree(
+            node.properties().sortedBy { it.key }.associate { it.key to canonical(it.value) }
+          )
+        node.isArray -> json.valueToTree(node.toList().map(::canonical))
+        else -> node
+      }
+    val stable = snapshot.deepCopy() as tools.jackson.databind.node.ObjectNode
+    listOf("elapsed_seconds", "observed_at_millis", "pulse").forEach { stable.remove(it) }
+    if (stable.has("available_time_ends_at_millis")) stable.remove("available_time_minutes")
+    (stable["rest"] as? tools.jackson.databind.node.ObjectNode)?.remove("remaining_seconds")
+    return digest(canonical(stable))
+  }
+
+  private fun sessionModel(owner: UUID, workout: UUID): String? =
+    jdbc
+      .query(
+        "SELECT model FROM coach_sessions WHERE owner_id=? AND workout_id=?",
+        { r, _ -> r.getString(1) },
+        owner,
+        workout,
+      )
+      .firstOrNull()
+
+  private fun memory(owner: UUID, workout: UUID): JsonNode =
+    json.valueToTree(
+      jdbc
+        .query(
+          "SELECT payload::text FROM coach_decisions WHERE owner_id=? AND workout_id=? ORDER BY created_at DESC,proposal_id LIMIT 30",
+          { r, _ -> json.readTree(r.getString(1)) },
+          owner,
+          workout,
+        )
+        .reversed()
+    )
+
+  private fun migrateMemory(owner: UUID, workout: UUID, snapshot: JsonNode) {
+    snapshot["decisions"]
+      ?.takeIf { it.isArray }
+      ?.toList()
+      ?.takeLast(30)
+      ?.forEach { decision ->
+        val proposal =
+          runCatching { UUID.fromString(decision["proposalId"]?.asString()) }.getOrNull()
+            ?: return@forEach
+        if (decision["status"]?.asString() !in setOf("APPLIED", "REJECTED", "STALE")) return@forEach
+        jdbc.update(
+          "INSERT INTO coach_decisions(owner_id,workout_id,proposal_id,payload) VALUES (?,?,?,?::jsonb) ON CONFLICT DO NOTHING",
+          owner,
+          workout,
+          proposal,
+          json.writeValueAsString(decision),
+        )
+      }
+  }
+
+  private fun remember(
+    run: Run,
+    proposal: UUID,
+    status: String,
+    reason: String?,
+    snapshot: JsonNode,
+  ) {
+    val operations = run.result?.get("proposal")?.get("operations")?.toList().orEmpty()
+    val sets = operations.mapNotNull { it["set_id"]?.asString() }.toMutableSet()
+    if (operations.any { it["action"]?.asString()?.contains("rest") == true }) {
+      snapshot["previous_set_id"]?.takeUnless { it.isNull }?.asString()?.let(sets::add)
     }
+    val sections =
+      (operations.flatMap { op ->
+          listOfNotNull(op["section_id"]?.asString(), op["source_section_id"]?.asString()) +
+            op["section_ids"]?.toList()?.map { it.asString() }.orEmpty()
+        } +
+          snapshot["exercises"]
+            ?.filter { e -> e["sets"]?.any { it["set_id"]?.asString() in sets } == true }
+            ?.map { it["section_id"].asString() }
+            .orEmpty())
+        .toSet()
+    val evidence =
+      snapshot["exercises"]
+        ?.filter { it["section_id"]?.asString() in sections }
+        ?.mapNotNull { e ->
+          e["sets"]
+            ?.filter { it["completed"]?.asBoolean() == true }
+            ?.maxByOrNull { it["completed_at"]?.asLong() ?: 0 }
+            ?.let { set ->
+              mapOf(
+                "sectionId" to e["section_id"],
+                "setId" to set["set_id"],
+                "weightKg" to
+                  (set["actual_weight_kg"]?.takeUnless { it.isNull } ?: set["weight_kg"]),
+                "reps" to (set["actual_reps"]?.takeUnless { it.isNull } ?: set["reps"]),
+                "rir" to set["actual_rir"],
+                "feelings" to set["reported_feelings"],
+              )
+            }
+        }
+        .orEmpty()
+    val value =
+      mapOf(
+        "proposalId" to proposal.toString(),
+        "status" to status,
+        "reason" to reason,
+        "summary" to run.result?.get("proposal")?.get("reason"),
+        "sectionIds" to sections,
+        "exerciseIds" to
+          (snapshot["exercises"]
+              ?.filter { it["section_id"]?.asString() in sections }
+              ?.mapNotNull { it["exercise_id"]?.asString() }
+              .orEmpty() + operations.mapNotNull { it["exercise_id"]?.asString() })
+            .distinct(),
+        "evidence" to evidence,
+      )
+    jdbc.update(
+      "INSERT INTO coach_decisions(owner_id,workout_id,proposal_id,payload) VALUES (?,?,?,?::jsonb) ON CONFLICT(owner_id,workout_id,proposal_id) DO UPDATE SET payload=excluded.payload",
+      run.owner,
+      run.workout,
+      proposal,
+      json.writeValueAsString(value),
+    )
+  }
+
+  private fun blocked(owner: UUID, workout: UUID, excluding: UUID? = null): Boolean =
+    jdbc.queryForObject(
+      "SELECT count(*) FROM coach_runs r WHERE owner_id=? AND workout_id=? AND request_id<>? AND ((NOT automatic AND state IN ('QUEUED','RUNNING')) OR (state='SUCCEEDED' AND result->>'kind'='proposal' AND COALESCE((result->'proposal'->>'expiresAtMillis')::bigint,0)>? AND NOT EXISTS (SELECT 1 FROM coach_run_receipts p WHERE p.owner_id=r.owner_id AND p.request_id=r.request_id)))",
+      Int::class.java,
+      owner,
+      workout,
+      excluding ?: UUID(0, 0),
+      clock.millis(),
+    )!! > 0
+
+  private fun automaticAllowed(run: Run): Boolean {
+    if (run.input["automatic"]?.asBoolean() != true) return true
+    return jdbc.queryForObject(
+      "SELECT count(*) FROM coach_sessions WHERE owner_id=? AND workout_id=? AND active AND initiative_enabled AND (semantic_version=? OR (semantic_version IS NULL AND context_version=?)) AND updated_at>?",
+      Int::class.java,
+      run.owner,
+      run.workout,
+      semanticVersion(run.input["snapshot"]),
+      run.version,
+      Timestamp.from(clock.instant().minusSeconds(120)),
+    )!! > 0 && !blocked(run.owner, run.workout, run.id)
+  }
+
+  private fun supersede(run: Run) {
+    val changed =
+      jdbc.update(
+        "UPDATE coach_runs SET state='SUPERSEDED',stage='superseded',lease_token=null,lease_until=null WHERE owner_id=? AND request_id=? AND state IN ('QUEUED','RUNNING')",
+        run.owner,
+        run.id,
+      )
+    if (changed > 0) event(run.owner, run.id, "completed", "superseded")
+  }
+
+  /** Called under the account lock; deferred changes are re-evaluated by the timer scanner. */
+  private fun evaluate(owner: UUID, workout: UUID) {
+    val sessionRow =
+      jdbc
+        .query(
+          "SELECT snapshot::text,evaluated_snapshot::text,semantic_version,evaluated_version,context_version FROM coach_sessions WHERE owner_id=? AND workout_id=? AND active AND initiative_enabled AND updated_at>? FOR UPDATE",
+          { r, _ ->
+            listOf(r.getString(1), r.getString(2), r.getString(3), r.getString(4), r.getString(5))
+          },
+          owner,
+          workout,
+          Timestamp.from(clock.instant().minusSeconds(120)),
+        )
+        .firstOrNull() ?: return
+    if (sessionRow[2] == null || sessionRow[2] == sessionRow[3] || blocked(owner, workout)) return
+    if (
+      jdbc.queryForObject(
+        "SELECT count(*) FROM coach_runs WHERE owner_id=? AND workout_id=? AND automatic AND state='RUNNING'",
+        Int::class.java,
+        owner,
+        workout,
+      )!! > 0
+    )
+      return
+    val snapshot = json.readTree(sessionRow[0]) as tools.jackson.databind.node.ObjectNode
+    snapshot.set("decisions", memory(owner, workout))
+    val reason =
+      executor.initiativeDecision(
+        snapshot,
+        sessionRow[1]?.let(json::readTree),
+        memory(owner, workout),
+      )
+    jdbc
+      .query(
+        "SELECT * FROM coach_runs WHERE owner_id=? AND workout_id=? AND automatic AND state='QUEUED' FOR UPDATE",
+        { r, _ -> row(r) },
+        owner,
+        workout,
+      )
+      .forEach(::supersede)
+    jdbc.update(
+      "UPDATE coach_sessions SET evaluated_snapshot=snapshot,evaluated_version=semantic_version WHERE owner_id=? AND workout_id=?",
+      owner,
+      workout,
+    )
+    if (reason == null) return
+    insert(
+      owner,
+      json.valueToTree(
+        mapOf(
+          "requestId" to UUID.randomUUID().toString(),
+          "workoutId" to workout.toString(),
+          "contextVersion" to sessionRow[4],
+          "snapshot" to json.readTree(sessionRow[0]),
+          "message" to reason,
+          "history" to emptyList<Any>(),
+          "model" to sessionModel(owner, workout),
+          "automatic" to true,
+        )
+      ),
+    )
+  }
 
   companion object {
     private val ACTIVE = setOf("QUEUED", "RUNNING")

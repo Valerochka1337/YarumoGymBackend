@@ -1013,6 +1013,66 @@
         }
       }
     },
+    "/v1/coach/sessions/{workoutId}/messages": {
+      "post": {
+        "tags": ["coach-run-controller"],
+        "operationId": "submitCoachSessionMessage",
+        "parameters": [
+          { "name": "workoutId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CoachSessionMessageRequest" } } }
+        },
+        "responses": {
+          "202": {
+            "description": "Session snapshot and user run accepted",
+            "headers": {
+              "Location": { "schema": { "type": "string" } },
+              "Retry-After": { "schema": { "type": "string" } }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CoachRunResponse" } } }
+          }
+        }
+      }
+    },
+    "/v1/coach/sessions/{workoutId}/events": {
+      "get": {
+        "tags": ["coach-run-controller"],
+        "operationId": "coachSessionEvents",
+        "parameters": [
+          { "name": "workoutId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "after", "in": "query", "schema": { "type": "integer", "format": "int64", "default": 0 } },
+          { "name": "Last-Event-ID", "in": "header", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Continuous owner/workout SSE stream; the larger of after and Last-Event-ID is used",
+            "headers": {
+              "Cache-Control": { "schema": { "type": "string" } },
+              "X-Accel-Buffering": { "schema": { "type": "string" } }
+            },
+            "content": { "text/event-stream": { "schema": { "type": "string" } } }
+          }
+        }
+      }
+    },
+    "/v1/coach/model-check": {
+      "post": {
+        "tags": ["coach-run-controller"],
+        "operationId": "checkCoachModel",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CoachModelCheckRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Isolated synthetic model and tool-host check",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CoachModelCheckResponse" } } }
+          }
+        }
+      }
+    },
     "/admin/api/users/{id}/revoke-sessions": {
       "post": {
         "tags": [
@@ -3124,9 +3184,10 @@
       "CoachRunResponse": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["runId", "ordinal", "requestId", "workoutId", "contextVersion", "state", "stage", "lastEventSequence", "result", "errorCode", "applicationStatus"],
+        "required": ["runId", "origin", "ordinal", "requestId", "workoutId", "contextVersion", "state", "stage", "lastEventSequence", "result", "errorCode", "applicationStatus"],
         "properties": {
           "runId": { "type": "string", "format": "uuid" },
+          "origin": { "type": "string", "enum": ["USER", "COACH"] },
           "ordinal": { "type": "integer", "format": "int64" },
           "requestId": { "type": "string", "format": "uuid" },
           "workoutId": { "type": "string", "format": "uuid" },
@@ -3159,7 +3220,8 @@
           "contextVersion": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
           "snapshot": { "$ref": "#/components/schemas/CoachWorkoutSnapshot" },
           "initiativeEnabled": { "type": "boolean" },
-          "active": { "type": "boolean" }
+          "active": { "type": "boolean" },
+          "model": { "type": ["string", "null"], "maxLength": 200 }
         }
       },
       "CoachSessionUpdateResponse": {
@@ -3169,6 +3231,33 @@
         "properties": {
           "accepted": { "type": "boolean" },
           "sequence": { "type": "integer", "format": "int64" }
+        }
+      },
+      "CoachSessionMessageRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["requestId", "message", "state"],
+        "properties": {
+          "requestId": { "$ref": "#/components/schemas/CanonicalUuid" },
+          "message": { "type": "string", "minLength": 1, "maxLength": 4000 },
+          "model": { "type": ["string", "null"], "maxLength": 200 },
+          "state": { "$ref": "#/components/schemas/CoachSessionUpdateRequest" }
+        }
+      },
+      "CoachModelCheckRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "model": { "type": ["string", "null"], "maxLength": 200 }
+        }
+      },
+      "CoachModelCheckResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["success", "message"],
+        "properties": {
+          "success": { "type": "boolean" },
+          "message": { "type": "string" }
         }
       },
       "AdminPage": {

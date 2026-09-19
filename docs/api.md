@@ -496,3 +496,54 @@ is independent from SSE delivery; execution has bounded request/tool/retry and w
 budgets. Prompts and tools are server-owned. Start/stop of HTTP delivery does not control
 the worker. Deploy migration 021 and this backend before distributing the new Android app;
 older coach-turn endpoints remain available for older clients.
+
+## Server-owned Live Coach sessions (Android Room 35)
+
+New clients use the following contract; run and stateless turn endpoints remain compatible.
+
+- `POST /v1/coach/sessions/{workoutId}/messages`: `{requestId,message,model?,state}`.
+  `state` is the complete PUT envelope below. Admission of the snapshot and durable USER task
+  is one transaction. Replaying identical bytes returns the existing task; conflicting reuse
+  returns 409. Clients do not supply history or automatic origin. The selected model is saved
+  in the session for subsequent initiative. Server history combines retained tasks with older
+  journal messages and excludes duplicate journal copies and invisible `no_change` replies.
+- `PUT /v1/coach/sessions/{workoutId}`: `{eventId,sequence,contextVersion,snapshot,
+  initiativeEnabled,active,model?}`. `sequence` increases for both PUT and message snapshots.
+  Duplicate admission returns the original acknowledgement. An older sequence cannot overwrite
+  or refresh the current session. Server semantic comparison canonicalizes object keys and
+  excludes pulse, observation/elapsed clocks, rest countdown and available-time countdown when
+  an absolute deadline exists. `contextVersion` remains the client proposal fingerprint.
+- `GET /v1/coach/sessions/{workoutId}/events?after=N`: continuous SSE, also accepting
+  `Last-Event-ID` (the larger cursor wins). Event IDs are contiguous per owner/workout, independently
+  of legacy per-run IDs. `created`, `progress`, `text`, `completed` contain `sequence`, `runId`,
+  `origin: USER|COACH`, `stage`, `text` and a run status. The stream works without any active task,
+  remains open after completion, emits heartbeat comments every 10 seconds, and rechecks the login
+  while idle. Disconnecting only stops delivery. Revocation closes the stream.
+- `POST /v1/coach/runs/{id}/receipt`: adds optional `reason` and full `snapshot` at the decision.
+  Accepted, rejected and stale decisions are stored per proposal, with affected sections and
+  completed-set evidence. Legacy snapshot `decisions` migrate with `ON CONFLICT DO NOTHING`;
+  repeated imports cannot replace an authoritative receipt. Reusing a receipt with changed
+  contents returns 409. Receipts do not apply workout changes on the server.
+- `POST /v1/coach/model-check`: `{model?}` → `{success,message}`. A bounded, isolated synthetic
+  tool host checks reading state followed by the expected add-set operation; it cannot access
+  or mutate the account's workout records.
+
+Initiative evaluates meaningful snapshots and deferred changes on the existing server timer.
+Queued automatic checks coalesce. Active user tasks and proposals awaiting a decision block
+initiative. Disabled/inactive sessions suppress it. Sessions older than 120 seconds cannot start
+or publish automatic work. Every automatic checkpoint/publication also checks current semantic
+state and blockers; obsolete tasks finish as `SUPERSEDED`. Accepted USER work survives disconnects.
+
+Android coalesces ordinary saved changes within a one-second delivery window, sends user messages,
+receipts, disable/finish/delete signals promptly, and refreshes an unchanged active session every
+60 seconds. It retries immutable persisted request bytes and preserves newer dirty generations.
+State delivery and SSE reading run independently. Room commits the workout cursor with imported
+results, USER draft text and stage. Only pending USER runs drive input/status; COACH shows only a
+successful, still-current answer or proposal. Polling is for background delivery or SSE recovery,
+with exponential delay, jitter and `Retry-After`; the continuous stream discovers initiative.
+
+Migration 022 adds the workout event journal, backfills existing run events, preserves all runs and
+receipts, and adds session evaluation/model and decision memory. Migration 023 adds persisted snapshot
+acknowledgements and upgrades both development variants of 022 without replaying the event backfill. Android migration 34→35 preserves
+exact queued payloads, conversation and proposal rows. Release the compatible backend first, then
+Android 1.3.74 (82). Deployment/publication are separate from this implementation.
