@@ -35,7 +35,8 @@ class HttpOpenAiChatCompletionsProvider(
       }
       val body =
         mapOf(
-          "model" to if (input.vision) settings.visionModel else settings.textModel,
+          "model" to
+            (input.model ?: if (input.vision) settings.visionModel else settings.textModel),
           "store" to false,
           "stream" to false,
           "n" to 1,
@@ -146,13 +147,13 @@ class HttpOpenAiChatCompletionsProvider(
       }
       val body =
         mapOf(
-          "model" to settings.textModel,
+          "model" to (input.model ?: settings.textModel),
           "store" to false,
           "stream" to false,
           "n" to 1,
           "max_completion_tokens" to 2048,
           "messages" to messages,
-          "tools" to plannerTools(),
+          "tools" to plannerTools(input.schema),
           "tool_choice" to "auto",
           // A model may choose tools on intermediate turns, but its stop turn is still constrained
           // to the exact calendar draft schema before server-side projection validation.
@@ -198,14 +199,15 @@ class HttpOpenAiChatCompletionsProvider(
     }
   }
 
-  private fun plannerTools(): List<Map<String, Any>> =
+  private fun plannerTools(planSchema: JsonNode): List<Map<String, Any>> =
     listOf(
       tool(
         "get_strength_skeleton",
         mapOf(
           "type" to "object",
           "additionalProperties" to false,
-          "properties" to emptyMap<String, Any>(),
+          "required" to listOf("patternId"),
+          "properties" to mapOf("patternId" to mapOf("type" to "string")),
         ),
       ),
       tool("get_candidate_details_and_history", candidateToolParameters()),
@@ -215,7 +217,7 @@ class HttpOpenAiChatCompletionsProvider(
           "type" to "object",
           "additionalProperties" to false,
           "required" to listOf("plan"),
-          "properties" to mapOf("plan" to mapOf("type" to "object")),
+          "properties" to mapOf("plan" to planSchema),
         ),
       ),
     )
@@ -312,7 +314,12 @@ class HttpOpenAiChatCompletionsProvider(
     val ids =
       when (name) {
         "get_strength_skeleton" -> {
-          if (args.size() != 0) throw aiError("ai_invalid_response")
+          if (
+            args.properties().map { it.key }.toSet() != setOf("patternId") ||
+              args["patternId"]?.isString != true ||
+              !args["patternId"].asString().matches(Regex("[a-zA-Z0-9_-]{1,80}"))
+          )
+            throw aiError("ai_invalid_response")
           emptyList<String>()
         }
         "get_candidate_details_and_history" -> {
@@ -340,6 +347,7 @@ class HttpOpenAiChatCompletionsProvider(
       ids,
       bytes,
       if (name == "validate_and_finalize_plan") args["plan"] else null,
+      patternId = if (name == "get_strength_skeleton") args["patternId"].asString() else null,
     )
   }
 }

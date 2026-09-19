@@ -1,6 +1,9 @@
 package tech.valerochkagym.service.ai
 
-/** Fixed v2 plan frame. Provider output may fill only these slots. */
+/**
+ * Compatibility projection for v2 clients. It describes the accepted draft after validation; it is
+ * not a server-imposed exercise frame.
+ */
 internal data class StrengthPlannerSkeleton(
   val focusExerciseId: String,
   val slots: List<Slot>,
@@ -16,16 +19,24 @@ internal data class StrengthPlannerSkeleton(
 
   companion object {
     fun create(
-      focusExerciseId: String,
+      finalizedExerciseIds: List<String>,
       candidateIds: List<String>,
       minutes: Int,
     ): StrengthPlannerSkeleton {
+      require(finalizedExerciseIds.isNotEmpty()) { "A finalized planner draft needs an exercise" }
       val maximum = minutes * 60
       val minimum = PlannerDuration.minimumSeconds(minutes).toInt()
-      val accessories = candidateIds.filterNot { it == focusExerciseId }
+      val focusExerciseId = finalizedExerciseIds.first()
+      val allowedCandidates = candidateIds.distinct().sorted()
+      require(focusExerciseId in allowedCandidates) {
+        "Finalized focus must be an allowed candidate"
+      }
+      // Android v2 verifies these legacy slot names. They are a post-validation compatibility
+      // projection, not a pattern constraint: the finalized first exercise supplies focus and
+      // every eligible candidate remains an allowed accessory alternative.
       val slots = buildList {
-        add(Slot("focus", listOf(focusExerciseId), 180, maximum))
-        if (accessories.isNotEmpty()) add(Slot("accessory", accessories, 120, maximum))
+        add(Slot("focus", listOf(focusExerciseId), 0, maximum))
+        if (finalizedExerciseIds.size > 1) add(Slot("accessory", allowedCandidates, 0, maximum))
       }
       return StrengthPlannerSkeleton(focusExerciseId, slots, minimum, maximum)
     }

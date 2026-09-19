@@ -54,7 +54,7 @@ class AiIntegrationTest {
     }
   }
 
-  class FakeProvider : AiProvider {
+  class FakeProvider : PlannerToolCallingProvider {
     override var available = true
     var calls = 0
     var handler: (AiProviderInput) -> JsonNode = { error("test handler absent") }
@@ -63,6 +63,9 @@ class AiIntegrationTest {
       calls++
       return handler(input)
     }
+
+    override fun generatePlannerTurn(input: AiProviderInput) =
+      TestPlannerTurns.turn(input, ::generate)
   }
 
   class FakeCoachProvider : CoachTurnProvider {
@@ -229,7 +232,7 @@ class AiIntegrationTest {
     )
     provider.handler = {
       json.readTree(
-        "{\"result\":{\"name\":\"AI Press\",\"exercises\":[{\"exerciseId\":\"$exercise\",\"restSeconds\":90,\"plannedSets\":[{\"reps\":8,\"durationSec\":null}]}]}}"
+        "{\"result\":{\"name\":\"AI Press\",\"exercises\":[{\"exerciseId\":\"$exercise\",\"restSeconds\":240,\"plannedSets\":[${List(10) { "{\"reps\":8,\"durationSec\":null}" }.joinToString(",")}]}]}}"
       )
     }
     val body =

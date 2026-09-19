@@ -7,6 +7,34 @@ internal object StrengthPlannerFacts {
   const val candidateLimit = 24
   private const val overdueDaysCap = 28
   private const val sevenDayCoverageCap = 40
+  private val allMuscles =
+    sortedSetOf(
+      "UPPER_CHEST",
+      "LOWER_CHEST",
+      "FRONT_DELTS",
+      "SIDE_DELTS",
+      "REAR_DELTS",
+      "ROTATOR_CUFF",
+      "SERRATUS_ANTERIOR",
+      "BICEPS",
+      "TRICEPS",
+      "FOREARMS",
+      "ABS",
+      "OBLIQUES",
+      "HIP_FLEXORS",
+      "ADDUCTORS",
+      "QUADS",
+      "TIBIALIS_ANTERIOR",
+      "CALVES",
+      "HAMSTRINGS",
+      "GLUTES",
+      "HIP_ABDUCTORS",
+      "LOWER_BACK",
+      "LATS",
+      "UPPER_BACK",
+      "TRAPS",
+      "NECK",
+    )
 
   /**
    * Canonical legacy seed UUIDs, derived from Android's built-in exercise identity contract. This
@@ -41,6 +69,7 @@ internal object StrengthPlannerFacts {
     val weightKg: Double?,
     val repsSource: String,
     val reps: Double?,
+    val lastTrainedAtMillis: Long? = null,
   )
 
   data class MovementUnit(
@@ -48,12 +77,24 @@ internal object StrengthPlannerFacts {
     val workoutFrequency: Int,
     val completedSetCount: Int,
     val actualVolume: Double,
+    val lastTrainedAtMillis: Long? = null,
   )
 
   data class MuscleAggregate(
     val muscle: String,
     val workoutFrequency: Int,
     val completedSetCount: Int,
+    val directWorkingSetCount: Int = 0,
+    val indirectWorkingSetCount: Int = 0,
+    val lastTrainedAtMillis: Long? = null,
+    val exerciseIds: List<String> = emptyList(),
+    val mappingCompleteness: String = "COMPLETE",
+  )
+
+  data class WeeklyMuscleTrend(
+    val startAtMillis: Long,
+    val endAtMillisExclusive: Long,
+    val muscles: List<MuscleAggregate>,
   )
 
   data class Effort(val workoutId: String, val effort: String?)
@@ -65,6 +106,7 @@ internal object StrengthPlannerFacts {
     val musclesLast7Days: List<MuscleAggregate>,
     val musclesLast28Days: List<MuscleAggregate>,
     val efforts: List<Effort>,
+    val weekly: List<WeeklyMuscleTrend> = emptyList(),
   )
 
   fun select(
@@ -124,7 +166,10 @@ internal object StrengthPlannerFacts {
           else -> 0
         }
       val compound = if (candidate.exerciseId in compoundSeedIds) 20 else 0
-      val repeat = if (candidate.exerciseId in lastIds) 120 else 0
+      // A recorded high-priority focus lift is continuity, not a reason to erase it from the
+      // next agentic pool. Other recently used exercises remain lower-ranked so accessories can
+      // vary when suitable alternatives exist.
+      val repeat = if (candidate.exerciseId in lastIds && priority != "HIGH") 20 else 0
       return RankResult(
         candidate.exerciseId,
         key + overdue + compound - repeat - coverage(candidate),
@@ -133,7 +178,6 @@ internal object StrengthPlannerFacts {
     }
     val ranked =
       candidates
-        .filter { it.type == "STRENGTH" }
         .map(::rank)
         .sortedWith(
           compareByDescending<RankResult> { it.score }
@@ -142,16 +186,9 @@ internal object StrengthPlannerFacts {
             }
             .thenBy { it.exerciseId }
         )
-    val requiredAlternatives = minOf(6, maxOf(3, durationMinutes / 10))
-    val nonRecent = ranked.filter { it.exerciseId !in lastIds }
-    val selected =
-      if (lastIds.isNotEmpty() && nonRecent.size >= requiredAlternatives) nonRecent else ranked
+    val selected = ranked
     require(selected.isNotEmpty()) { "No eligible strength candidates" }
-    return Selection(
-      selected.take(candidateLimit),
-      selected.first().exerciseId,
-      if (selected === ranked && lastIds.isNotEmpty()) "STRENGTH_RECENT_FALLBACK" else "NONE",
-    )
+    return Selection(selected.take(candidateLimit), selected.first().exerciseId, "NONE")
   }
 
   fun compact(
@@ -172,7 +209,7 @@ internal object StrengthPlannerFacts {
           .filter {
             it.exerciseId == exerciseId &&
               it.factTimeMillis <= capturedAtMillis &&
-              it.setType in setOf(null, "WORK")
+              it.setType == "WORK"
           }
           .sortedWith(
             compareByDescending<CalendarFact> {
@@ -199,6 +236,7 @@ internal object StrengthPlannerFacts {
           else -> "ACTUAL"
         },
         fact?.takeIf { "reps" !in it.legacyFields }?.results?.get("reps"),
+        fact?.factTimeMillis,
       )
     }
     fun movement(days: Long): List<MovementUnit> =
@@ -206,6 +244,7 @@ internal object StrengthPlannerFacts {
         .asSequence()
         .filter {
           it.exerciseId in selectedExerciseIds &&
+            it.setType == "WORK" &&
             it.factTimeMillis in
               (capturedAtMillis - Duration.ofDays(days).toMillis())..capturedAtMillis
         }
@@ -221,33 +260,16 @@ internal object StrengthPlannerFacts {
                 row.actualWeightKg?.times(row.results["reps"] ?: 0.0) ?: 0.0
               else 0.0
             },
+            rows.maxOfOrNull { it.factTimeMillis },
           )
         }
-    fun muscles(days: Long): List<MuscleAggregate> {
-      val rows =
-        facts.filter {
-          it.exerciseId in selectedExerciseIds &&
-            it.factTimeMillis in
-              (capturedAtMillis - Duration.ofDays(days).toMillis())..capturedAtMillis
-        }
-      return rows
-        .flatMap { fact ->
-          musclesByExercise[fact.exerciseId]
-            .orEmpty()
-            .filterValues { it > 0 }
-            .keys
-            .map { it to fact }
-        }
-        .groupBy { it.first }
-        .toSortedMap()
-        .map { (muscle, entries) ->
-          MuscleAggregate(
-            muscle,
-            entries.mapTo(mutableSetOf()) { it.second.workoutId }.size,
-            entries.size,
-          )
-        }
-    }
+    fun muscles(days: Long) =
+      muscleCoverage(
+        facts,
+        musclesByExercise,
+        capturedAtMillis - Duration.ofDays(days).toMillis(),
+        capturedAtMillis + 1,
+      )
     return CompactFacts(
       ids.map(::latest),
       movement(7),
@@ -266,6 +288,67 @@ internal object StrengthPlannerFacts {
             }
             .thenBy { it.workoutId }
         ),
+      (0..3).map { week ->
+        val endExclusive = capturedAtMillis - Duration.ofDays(week * 7L).toMillis() + 1
+        val start = endExclusive - Duration.ofDays(7).toMillis()
+        WeeklyMuscleTrend(
+          start,
+          endExclusive,
+          muscleCoverage(facts, musclesByExercise, start, endExclusive),
+        )
+      },
     )
+  }
+
+  /**
+   * Mapping contribution is the only available classification signal: >=50 is direct, 1..49 is
+   * indirect. It is a catalog-mapping heuristic, never a physiological dose or recovery claim.
+   */
+  fun muscleCoverage(
+    facts: List<CalendarFact>,
+    musclesByExercise: Map<String, Map<String, Int>>,
+    startInclusive: Long,
+    endExclusive: Long,
+  ): List<MuscleAggregate> {
+    // Completed legacy rows may omit the kind, and future/invalid kinds must not be silently
+    // represented as a complete no-load window. Only WORK contributes to this aggregate and
+    // WARMUP is intentionally excluded; every other/null kind makes completeness partial.
+    val unknownSetTypes =
+      facts.any {
+        it.factTimeMillis in startInclusive until endExclusive &&
+          it.setType !in setOf("WORK", "WARMUP")
+      }
+    val work =
+      facts.filter {
+        it.setType == "WORK" && it.factTimeMillis in startInclusive until endExclusive
+      }
+    val missingMappings =
+      work.any { musclesByExercise[it.exerciseId].orEmpty().none { (_, value) -> value > 0 } }
+    return allMuscles.map { muscle ->
+      val entries =
+        work.filter { fact ->
+          musclesByExercise[fact.exerciseId]?.get(muscle)?.let { it > 0 } == true
+        }
+      MuscleAggregate(
+        muscle,
+        entries.mapTo(mutableSetOf()) { it.workoutId }.size,
+        entries.size,
+        entries.count { fact ->
+          musclesByExercise[fact.exerciseId]?.get(muscle)?.let { it >= 50 } == true
+        },
+        entries.count { fact ->
+          musclesByExercise[fact.exerciseId]?.get(muscle)?.let { it in 1..49 } == true
+        },
+        entries.maxOfOrNull { it.factTimeMillis },
+        entries.map { it.exerciseId }.distinct().sorted(),
+        when {
+          entries.isEmpty() && missingMappings -> "PARTIAL_MISSING_MAPPINGS"
+          unknownSetTypes -> "PARTIAL_UNKNOWN_SET_TYPES"
+          entries.isEmpty() -> "NO_WORKING_SETS"
+          missingMappings -> "PARTIAL_MISSING_MAPPINGS"
+          else -> "COMPLETE"
+        },
+      )
+    }
   }
 }

@@ -15,6 +15,8 @@ data class AiProviderInput(
    * Private planner conversation only. It is translated to OpenAI tool messages by the provider.
    */
   val plannerTranscript: List<PlannerToolExchange> = emptyList(),
+  /** Server-owned model captured when planning starts; never provided by the Android caller. */
+  val model: String? = null,
 )
 
 interface AiProvider {

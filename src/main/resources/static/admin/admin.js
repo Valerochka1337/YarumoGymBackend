@@ -3,6 +3,7 @@ const EQUIPMENT_LABELS = {"barbell": "Штанга", "dumbbells": "Гантел�
 
 const $ = id => document.getElementById(id);
 const names = {ai:'ИИ · Провайдер и модели',overview:'Обзор',users:'Пользователи',exercise:'Упражнения',gym:'Залы',routine:'Программы',workout:'Тренировки',measurement:'Замеры',schedule:'Расписание',audit:'Журнал изменений'};
+names.planner = 'ИИ · Паттерны тренировок';
 Object.assign(names, {'standard:exercise':'Стандартный каталог · Упражнения','standard:gym':'Стандартные залы','standard:routine':'Стандартные шаблоны','standard:equipment':'Оборудование'});
 const isStandard = () => view.startsWith('standard:');
 const singular = {exercise:'Упражнение',gym:'Зал',routine:'Программа',workout:'Тренировка',measurement:'Замер',schedule:'Событие',equipment:'Оборудование'};
@@ -94,9 +95,10 @@ async function load() {
   const version=++requestVersion;
   $('page-title').textContent=names[view];
   $('page-description').textContent=view==='ai' ? 'Подключение OpenAI-совместимого провайдера. Изменения применяются сразу после сохранения.' : isStandard() ? 'Общие объекты доступны всем, включая офлайн. Архив сохраняет содержимое и ссылки.' : view==='overview' ? 'Пользователи, данные и последние действия — всё в одном месте.' : view==='audit' ? 'Кто, что и зачем изменил. История сохраняется вместе с версиями записей.' : view==='users' ? 'Аккаунты, способы входа и данные пользователей.' : 'Данные пользователей приложения. Правки появятся на устройствах при синхронизации.';
+  if(view==='planner') $('page-description').textContent='Коллекции заготовок, модель и параметры серверного планировщика. Запуск тренировок доступен только в приложении.';
   for(const nav of $('navigation').querySelectorAll('button')) { if(nav.dataset.view===view) nav.setAttribute('aria-current','page'); else nav.removeAttribute('aria-current'); }
-  $('overview').hidden=view!=='overview'; $('listing').hidden=['overview','ai'].includes(view); $('ai-settings').hidden=view!=='ai'; if(view!=='ai') $('ai-settings').replaceChildren();
-  $('owner-banner').hidden=isStandard() || !owner || ['users','overview','ai'].includes(view);
+  $('overview').hidden=view!=='overview'; $('listing').hidden=['overview','ai','planner'].includes(view); $('ai-settings').hidden=!['ai','planner'].includes(view); if(!['ai','planner'].includes(view)) $('ai-settings').replaceChildren();
+  $('owner-banner').hidden=isStandard() || !owner || ['users','overview','ai','planner'].includes(view);
   $('owner-name').textContent=owner ? 'Данные: ' + owner.email : '';
   $('create').hidden=!isStandard() && !['gym','exercise'].includes(view);
   $('deleted-label').hidden=['overview','users','audit'].includes(view);
@@ -105,6 +107,7 @@ async function load() {
   $('refresh').disabled=true; $('table-wrap').setAttribute('aria-busy','true');
   try {
     if(view==='ai') { $('ai-settings').replaceChildren(); const data=await api('/ai-settings'); if(version===requestVersion) renderAiSettings(data); return; }
+    if(view==='planner') { $('ai-settings').replaceChildren(); const data=await api('/planner-settings'); if(version===requestVersion) renderPlannerSettings(data); return; }
     if(isStandard()) { await loadStandard(version); return; }
     if(view==='overview') { const data=await api('/summary'); if(version===requestVersion) renderOverview(data); return; }
     $('table-wrap').replaceChildren(el('p',{class:'empty'},'Загружаем данные…'));
@@ -423,6 +426,113 @@ function renderAiSettings(data) {
       if(version===requestVersion) {renderAiSettings(result);notice('Настройки ИИ сохранены');}
     } catch(e) {if(version===requestVersion) error.textContent=e.message;}
     finally {submit.disabled=false;}
+  });
+  $('ai-settings').replaceChildren(form);
+}
+
+function renderPlannerSettings(source) {
+  const data=structuredClone(source);
+  const form=el('form',{class:'planner-settings'});
+  form.append(el('p',{class:'muted'},'Серверные настройки. Сохранение применяется к новым запросам из приложения. Каждый запрос использует свой снимок настроек.'));
+  const settings=el('fieldset',{},el('legend',{},'Планировщик'));
+  function field(parent,target,key,label,type='text',attrs={}) {
+    const input=el(type==='textarea'?'textarea':'input',{...(type==='textarea'?{rows:3}:{type}),...attrs});
+    input.value=target[key] ?? '';
+    input.addEventListener('input',()=>{target[key]=type==='number'?Number(input.value):input.value;});
+    parent.append(el('label',{},label,input));
+    return input;
+  }
+  function select(parent,target,key,label,options) {
+    const input=el('select');
+    for(const [value,title] of options) input.append(el('option',{value},title));
+    input.value=target[key]; input.addEventListener('change',()=>target[key]=input.value);
+    parent.append(el('label',{},label,input)); return input;
+  }
+  field(settings,data,'model','Модель (пусто — текущая модель текста)','text',{maxlength:200});
+  field(settings,data,'instructions','Методические инструкции','textarea',{maxlength:8000});
+  const numbers=el('div',{class:'planner-grid'});
+  for(const [key,label,min,max,step] of [
+    ['historyDays','История, дней (до 28)',7,28,1],['detailDays','Подробно, дней (до 7)',1,7,1],
+    ['maxRounds','Максимум раундов',3,10,1],['maxToolCalls','Максимум инструментов',2,24,1],
+    ['timeoutSeconds','Таймаут, секунд',15,120,1],['weightStepKg','Шаг веса по умолчанию, кг',0.25,20,0.25],
+  ]) field(numbers,data,key,label,'number',{min,max,step,required:true});
+  settings.append(numbers); form.append(settings);
+  const collections=el('div'); form.append(collections);
+  const goalOptions=[['STRENGTH','Сила'],['MUSCLE_GAIN','Набор мышц'],['FAT_LOSS','Похудение'],['GENERAL_FITNESS','Общая форма'],['ENDURANCE','Выносливость'],['OTHER','Другое']];
+  const focusOptions=[['FULL_BODY','Всё тело'],['UPPER','Верх'],['LOWER','Низ'],['PUSH','Жим'],['PULL','Тяга'],['CARDIO','Кардио'],['MIXED','Смешанная']];
+  const newId=prefix=>prefix+'-'+crypto.randomUUID().slice(0,8);
+  const slot=()=>({role:'ACCESSORY',movement:'',exerciseType:'STRENGTH',exerciseCount:1,sets:3,repsMin:6,repsMax:12,restSeconds:120,durationSeconds:0});
+  function draw() {
+    collections.replaceChildren();
+    data.collections.forEach(collection=>{
+      const box=el('details',{class:'planner-collection'},el('summary',{},collection.name));
+      const body=el('div',{class:'planner-fields'}); box.append(body);
+      field(body,collection,'name','Название коллекции','text',{required:true,maxlength:120});
+      select(body,collection,'goal','Цель',goalOptions);
+      body.append(el('p',{class:'muted'},'Паттерны — редактируемые заготовки. AI может менять упражнения и параметры.'));
+      const sequence=el('div');
+      function drawSequence() {
+        sequence.replaceChildren(el('strong',{},'Рекомендуемая последовательность'));
+        collection.sequence.forEach((id,index)=>{
+          const row=el('div',{class:'planner-sequence'});
+          const picker=el('select',{'aria-label':'Тренировка '+(index+1)});
+          collection.patterns.forEach(p=>picker.append(el('option',{value:p.id},p.name)));
+          picker.value=id; picker.onchange=()=>collection.sequence[index]=picker.value;
+          row.append(picker,button('↑',()=>{if(index>0){[collection.sequence[index-1],collection.sequence[index]]=[collection.sequence[index],collection.sequence[index-1]];drawSequence();}}),button('Убрать',()=>{collection.sequence.splice(index,1);drawSequence();}));
+          sequence.append(row);
+        });
+        sequence.append(button('Добавить в последовательность',()=>{if(collection.patterns.length){collection.sequence.push(collection.patterns[0].id);drawSequence();}}));
+      }
+      drawSequence(); body.append(sequence);
+      collection.patterns.forEach(pattern=>{
+        const details=el('details',{class:'planner-pattern'},el('summary',{},pattern.name));
+        const editor=el('div',{class:'planner-fields'}); details.append(editor);
+        const title=field(editor,pattern,'name','Название паттерна','text',{required:true,maxlength:120});
+        title.addEventListener('change',()=>{details.querySelector('summary').textContent=pattern.name;drawSequence();});
+        select(editor,pattern,'focus','Акцент',focusOptions);
+        field(editor,pattern,'description','Назначение и рекомендации','textarea',{maxlength:2000});
+        const slots=el('div'); editor.append(slots);
+        function drawSlots() {
+          slots.replaceChildren();
+          pattern.slots.forEach((item,index)=>{
+            const group=el('fieldset',{},el('legend',{},'Слот '+(index+1)));
+            field(group,item,'role','Роль','text',{required:true,maxlength:80});
+            field(group,item,'movement','Движение / упражнение','text',{required:true,maxlength:300});
+            select(group,item,'exerciseType','Тип',Object.entries(types));
+            const grid=el('div',{class:'planner-grid'});
+            for(const [key,label,min,max] of [['exerciseCount','Упражнений',1,4],['sets','Подходов',1,8],['repsMin','Повторы от',1,50],['repsMax','Повторы до',1,50],['restSeconds','Отдых, сек',0,600],['durationSeconds','Длительность подхода, сек',0,7200]])
+              field(grid,item,key,label,'number',{min,max,step:1,required:true});
+            group.append(grid,button('Удалить слот',()=>{pattern.slots.splice(index,1);drawSlots();})); slots.append(group);
+          });
+        }
+        drawSlots();
+        editor.append(button('Добавить слот',()=>{pattern.slots.push(slot());drawSlots();}),button('Удалить паттерн',()=>{
+          collection.patterns=collection.patterns.filter(p=>p.id!==pattern.id);
+          collection.sequence=collection.sequence.filter(id=>id!==pattern.id);draw();
+        }));
+        body.append(details);
+      });
+      body.append(button('Добавить паттерн',()=>{
+        collection.patterns.push({id:newId(collection.id),name:'Новая тренировка',focus:'FULL_BODY',description:'',slots:[slot()]});draw();
+      }),button('Удалить коллекцию',()=>{data.collections=data.collections.filter(c=>c.id!==collection.id);draw();}));
+      collections.append(box);
+    });
+  }
+  draw();
+  form.append(button('Добавить коллекцию',()=>{
+    const available=goalOptions.find(([goal])=>!data.collections.some(c=>c.goal===goal));
+    if(!available){notice('Для всех целей уже есть коллекции',true);return;}
+    const id=newId('collection'); const pattern={id:newId(id),name:'Новая тренировка',focus:'FULL_BODY',description:'',slots:[slot()]};
+    data.collections.push({id,name:available[1],goal:available[0],patterns:[pattern],sequence:[pattern.id]});draw();
+  }));
+  const submit=el('button',{type:'submit',class:'primary'},'Сохранить настройки планировщика');
+  const error=el('p',{class:'error',role:'alert'}); form.append(submit,error);
+  form.addEventListener('submit',async event=>{
+    event.preventDefault(); if(!form.reportValidity()) return;
+    const version=requestVersion; submit.disabled=true; error.textContent='';
+    try {const saved=await api('/planner-settings','PUT',data);if(version===requestVersion){renderPlannerSettings(saved);notice('Настройки планировщика сохранены');}}
+    catch(e){if(version===requestVersion) error.textContent=e.message;}
+    finally{submit.disabled=false;}
   });
   $('ai-settings').replaceChildren(form);
 }

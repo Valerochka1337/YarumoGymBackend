@@ -186,7 +186,7 @@ class CalendarPlannerContextTest {
           )
         )
       )
-    assertEquals(1, p["history"]["recentWorkouts"][0]["completedSetsOutsideWindow"].asInt())
+    assertTrue(p["history"]["recentWorkouts"].isEmpty)
     assertEquals(
       0,
       p["history"]["remainingWindowWeeks"].sumOf { it["totals"]["completedSets"].asInt() },
@@ -241,9 +241,26 @@ class CalendarPlannerContextTest {
   }
 
   @Test
-  fun `agentic context removes mass health and notes for every training goal`() {
+  fun `agentic context redacts private values and emits the all goal coverage catalog`() {
+    val indirect =
+      source(2, type = "CARDIO")
+        .copy(
+          payload =
+            json.valueToTree(
+              mapOf(
+                "name" to "Кардио 2",
+                "type" to "CARDIO",
+                "equipmentIds" to listOf("bike"),
+                "equipmentRequirementState" to "KNOWN",
+                "muscles" to listOf(mapOf("muscle" to "QUADS", "contribution" to 25)),
+              )
+            )
+        )
     val captured =
-      capture(listOf(source(1)))
+      capture(
+          listOf(source(1), indirect),
+          listOf(fact(1, 100, now - 86_400_000L), fact(2, 101, now - 2 * 86_400_000L)),
+        )
         .copy(
           mass = mapOf("kg" to 77.0, "healthSecret" to "must-not-leak"),
           notes = listOf(mapOf("kind" to "WORKOUT_NOTE", "text" to "private note")),
@@ -256,11 +273,72 @@ class CalendarPlannerContextTest {
         captured.facts,
         "MUSCLE_GAIN",
       )
+    val pattern =
+      PlannerPattern(
+        "full-body",
+        "Full body",
+        "FULL_BODY",
+        "Soft pattern",
+        listOf(PlannerPatternSlot("PRIMARY", "squat")),
+      )
+    val collection =
+      PlannerPatternCollection(
+        "general",
+        "GENERAL_FITNESS",
+        "General",
+        listOf(pattern),
+        listOf(pattern.id),
+      )
+    val adaptive =
+      AdaptivePlannerContext(
+        PlannerConfiguration(collections = listOf(collection)),
+        collection,
+        eligible.map { it.getValue("exerciseId") as String },
+      )
     val payload =
-      CalendarPlannerContext.serializeAgentic(json, captured, request(), eligible, eligible.size)
+      CalendarPlannerContext.serializeAgentic(
+        json,
+        captured,
+        request(),
+        eligible,
+        eligible.size,
+        adaptive = adaptive,
+      )
     assertFalse(payload.contains("healthSecret"))
     assertFalse(payload.contains("private note"))
     assertFalse(payload.contains("\"mass\""))
+    assertFalse(payload.contains("weight", ignoreCase = true))
+    assertFalse(payload.contains("actualVolume"))
+    val context = json.readTree(payload)
+    val coverage = context["completedMuscleCoverage"]
+    assertEquals(
+      "DIRECT_CONTRIBUTION_AT_LEAST_50_INDIRECT_1_TO_49",
+      coverage["directIndirectRule"].asString(),
+    )
+    assertEquals(25, coverage["last7Days"].size())
+    val quads = coverage["last7Days"].single { it["muscle"].asString() == "QUADS" }
+    assertEquals(1, quads["directWorkingSetCount"].asInt())
+    assertEquals(1, quads["indirectWorkingSetCount"].asInt())
+    assertEquals(
+      "NO_WORKING_SETS",
+      coverage["last7Days"]
+        .single { it["muscle"].asString() == "ABS" }["mappingCompleteness"]
+        .asString(),
+    )
+    assertEquals(captured.windowStartMillis, coverage["capturedHistory"]["startAtMillis"].asLong())
+    assertEquals(
+      captured.capturedAtMillis + 1,
+      coverage["capturedHistory"]["endAtMillisExclusive"].asLong(),
+    )
+    val weekly = coverage["weeklyTrends"].toList()
+    assertEquals(4, weekly.size)
+    assertTrue(
+      weekly.zipWithNext().all { (newer, older) ->
+        older["endAtMillisExclusive"].asLong() == newer["startAtMillis"].asLong()
+      }
+    )
+    assertEquals("full-body", context["plannerPatternCatalog"]["recommendedPatternId"].asString())
+    assertEquals("full-body", context["plannerPatternCatalog"]["patterns"][0]["id"].asString())
   }
 
   @Test
@@ -331,70 +409,36 @@ class CalendarPlannerContextTest {
   }
 
   @Test
-  fun `strength context matches pinned compact fixture without raw workout identifiers`() {
-    val bytes =
-      Files.readAllBytes(Path.of("src/test/resources/strength-planner-context-contract.json"))
-    val hash =
-      java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") {
-        "%02x".format(it)
-      }
-    assertEquals("f4e3e6713c40a9df161b5b58714b031edb57e93951358e5cbf002f93f6568da1", hash)
-    val first = fact(1, 100, now - 2 * 86_400_000L)
-    val facts =
-      listOf(
-        first,
-        first.copy(setIndex = 1),
-        first.copy(setIndex = 2, legacyFields = listOf("reps")),
-        fact(1, 101, now - 10 * 86_400_000L, 60.0).copy(results = mapOf("reps" to 5.0)),
-      )
-    val captured =
-      capture(listOf(source(1)), facts)
+  fun `agentic context checks the byte budget after coverage enrichment`() {
+    val captured = capture(emptyList())
+    val baseline = CalendarPlannerContext.serialize(json, captured, request(), emptyList(), 0)
+    val paddedRequest =
+      request()
         .copy(
-          notes =
-            listOf(
-              mapOf(
-                "kind" to "WORKOUT_NOTE",
-                "canonicalId" to "private-workout-id",
-                "text" to "explicit opt-in note",
-              )
-            )
+          preferences =
+            "x".repeat(CalendarPlannerContext.MAX_BYTES - baseline.toByteArray().size - 2048)
         )
-    val selected =
-      CalendarCandidateSelector.eligible(
-        captured.candidates,
-        emptyList(),
-        request(),
-        facts,
-        "STRENGTH",
-      )
-    val compact =
-      StrengthPlannerFacts.compact(
-        facts,
-        setOf(id(1)),
-        emptySet(),
-        now,
-        mapOf(id(1) to mapOf("QUADS" to 100)),
-        listOf(StrengthPlannerFacts.Effort(id(100), "HARD")),
-      )
-    val selection =
-      StrengthPlannerFacts.Selection(
-        listOf(StrengthPlannerFacts.RankResult(id(1), 1, "HIGH")),
-        id(1),
-        "STRENGTH_RECENT_FALLBACK",
-      )
-    val context =
-      json.readTree(
-        CalendarPlannerContext.serialize(json, captured, request(), selected, 1, selection, compact)
-      )
-    assertEquals(json.readTree(bytes)["expectedFacts"], context["strengthFacts"])
-    assertEquals(id(1), context["selection"]["focusExerciseId"].asString())
-    assertFalse(context["strengthFacts"].toString().contains(id(100)))
-    assertFalse(context.toString().contains("private-workout-id"))
-    assertEquals("explicit opt-in note", context["notes"][0]["text"].asString())
-    assertFalse(context.toString().contains("STRENGTH_RECENT_FALLBACK"))
-    val legacy =
-      json.readTree(CalendarPlannerContext.serialize(json, captured, request(), selected, 1))
-    assertFalse(legacy.has("strengthFacts"))
-    assertFalse(legacy["selection"].has("focusExerciseId"))
+    val padded = CalendarPlannerContext.serialize(json, captured, paddedRequest, emptyList(), 0)
+    assertTrue(padded.toByteArray().size <= CalendarPlannerContext.MAX_BYTES)
+    assertEquals(
+      "ai_context_too_large",
+      assertThrows<ApiException> {
+          CalendarPlannerContext.serializeAgentic(json, captured, paddedRequest, emptyList(), 0)
+        }
+        .code,
+    )
+  }
+
+  @Test
+  fun `compatibility projection gives Android focus and accessory slots after validation`() {
+    val focus = id(1)
+    val accessory = id(2)
+    val skeleton =
+      StrengthPlannerSkeleton.create(listOf(focus, accessory), listOf(accessory, focus), 60)
+    assertEquals(focus, skeleton.focusExerciseId)
+    assertEquals(listOf("focus", "accessory"), skeleton.slots.map { it.slotId })
+    assertEquals(listOf(focus), skeleton.slots.first().allowedExerciseIds)
+    assertEquals(listOf(focus, accessory), skeleton.slots[1].allowedExerciseIds)
+    assertEquals(PlannerDuration.minimumSeconds(60).toInt(), skeleton.minDurationSec)
   }
 }

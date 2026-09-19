@@ -319,6 +319,7 @@ class CalendarDraftJobService(
       calendar.create(
         identity,
         json.writeValueAsBytes(executionRequest),
+        agentic = true,
         publicationGuard = {
           val current = read(claimed.owner, claimed.id) ?: unauthorized()
           if (!current.current || current.state != "RUNNING" || current.token != claimed.token)
