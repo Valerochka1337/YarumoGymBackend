@@ -81,6 +81,15 @@ class AiActionService(
     calendar.create(identity, raw)
   }
 
+  fun calendarV2(identity: Identity, raw: ByteArray): CalendarDraftV2Response = admitted {
+    calendar.createV2(identity, raw)
+  }
+
+  fun refineCalendar(identity: Identity, proposalId: UUID, raw: ByteArray): ProposalResponse =
+    admitted {
+      calendar.refine(identity, proposalId, raw)
+    }
+
   fun cancelCalendar(identity: Identity, raw: ByteArray) = calendar.cancel(identity, raw)
 
   private fun check(id: String, revision: Long, catalogRevision: Long) {

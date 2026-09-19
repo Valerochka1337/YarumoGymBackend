@@ -1,5 +1,6 @@
 package tech.valerochkagym.controller.ai
 
+import java.util.UUID
 import java.util.concurrent.FutureTask
 import org.springframework.security.core.annotation.AuthenticationPrincipal
 import org.springframework.web.bind.annotation.*
@@ -35,8 +36,21 @@ class AiController(private val service: AiActionService) {
   ): DeferredResult<CalendarDraftResponse> =
     asyncCalendar(identity, raw) { service.calendar(identity, raw) }
 
-  private fun async(action: () -> AiDraftResponse): DeferredResult<AiDraftResponse> {
-    val result = DeferredResult<AiDraftResponse>(45000)
+  @PostMapping("/calendar-drafts-v2", consumes = ["application/json"])
+  fun calendarV2(
+    @AuthenticationPrincipal identity: Identity,
+    @RequestBody raw: ByteArray,
+  ): DeferredResult<CalendarDraftV2Response> = async { service.calendarV2(identity, raw) }
+
+  @PostMapping("/calendar-drafts/{proposalId}/refinements")
+  fun refineCalendar(
+    @AuthenticationPrincipal identity: Identity,
+    @PathVariable proposalId: UUID,
+    @RequestBody raw: ByteArray,
+  ): DeferredResult<ProposalResponse> = async { service.refineCalendar(identity, proposalId, raw) }
+
+  private fun <T : Any> async(action: () -> T): DeferredResult<T> {
+    val result = DeferredResult<T>(45000)
     val task = FutureTask {
       try {
         result.setResult(action())

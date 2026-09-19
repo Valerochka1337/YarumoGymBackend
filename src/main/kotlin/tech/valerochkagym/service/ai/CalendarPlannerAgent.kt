@@ -1,0 +1,39 @@
+package tech.valerochkagym.service.ai
+
+/** Pure bounded loop used by the provider adapter; results are rejected before exceeding budget. */
+internal class CalendarPlannerAgent(
+  private val turn: (List<PlannerToolExchange>) -> PlannerTurn,
+  private val tool: (PlannerToolProtocol.Call) -> ByteArray,
+  private val maxAttemptBytes: Int = PlannerToolProtocol.maxAttemptBytes,
+) {
+  fun run(candidateIds: Set<String>, deadlineMillis: () -> Long): tools.jackson.databind.JsonNode {
+    val transcript = mutableListOf<PlannerToolExchange>()
+    var calls = 0
+    var bytes = 0
+    repeat(PlannerToolProtocol.maxRounds) {
+      if (deadlineMillis() <= 0) throw aiError("ai_timeout")
+      val next = turn(transcript.toList())
+      if (deadlineMillis() <= 0) throw aiError("ai_timeout")
+      next.final?.let { final ->
+        if (next.calls.isNotEmpty()) throw aiError("ai_invalid_response")
+        return final
+      }
+      if (next.calls.isEmpty()) throw aiError("ai_invalid_response")
+      if (next.calls.map { it.id }.distinct().size != next.calls.size)
+        throw aiError("ai_invalid_response")
+      next.calls.forEach { call ->
+        if (++calls > PlannerToolProtocol.maxCalls) throw aiError("ai_invalid_response")
+        PlannerToolProtocol.validate(call, candidateIds)
+        if (deadlineMillis() <= 0) throw aiError("ai_timeout")
+        val result = tool(call)
+        if (deadlineMillis() <= 0) throw aiError("ai_timeout")
+        // The aggregate is checked before retaining either half of the exchange.
+        if (result.size !in 1..16_384 || bytes + call.bytes.size + result.size > maxAttemptBytes)
+          throw aiError("ai_invalid_response")
+        bytes += call.bytes.size + result.size
+        transcript += PlannerToolExchange(call, result)
+      }
+    }
+    throw aiError("ai_invalid_response")
+  }
+}

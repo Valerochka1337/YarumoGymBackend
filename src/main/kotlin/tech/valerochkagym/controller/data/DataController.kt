@@ -27,6 +27,8 @@ class DataController(private val sync: SyncService) {
           "exercise-hint",
           "profile",
           "strength-planner-personalization",
+          "workout-rir-v1",
+          "ai-planner-agentic-v1",
         )
         .intersect(requested)
     response.setHeader("X-Gym-Capabilities", accepted.joinToString(","))
@@ -42,7 +44,7 @@ class DataController(private val sync: SyncService) {
         Header(
           name = "X-Gym-Capabilities",
           description =
-            "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile, strength-planner-personalization; otherwise empty",
+            "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile, strength-planner-personalization, workout-rir-v1, ai-planner-agentic-v1; otherwise empty",
           schema = Schema(type = "string"),
         )
       ],
@@ -64,7 +66,7 @@ class DataController(private val sync: SyncService) {
         Header(
           name = "X-Gym-Capabilities",
           description =
-            "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile, strength-planner-personalization; otherwise empty",
+            "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile, strength-planner-personalization, workout-rir-v1, ai-planner-agentic-v1; otherwise empty",
           schema = Schema(type = "string"),
         )
       ],
@@ -87,7 +89,7 @@ class DataController(private val sync: SyncService) {
         Header(
           name = "X-Gym-Capabilities",
           description =
-            "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile, strength-planner-personalization; otherwise empty",
+            "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile, strength-planner-personalization, workout-rir-v1, ai-planner-agentic-v1; otherwise empty",
           schema = Schema(type = "string"),
         )
       ],
@@ -112,7 +114,7 @@ class DataController(private val sync: SyncService) {
         Header(
           name = "X-Gym-Capabilities",
           description =
-            "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile, strength-planner-personalization; otherwise empty",
+            "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile, strength-planner-personalization, workout-rir-v1, ai-planner-agentic-v1; otherwise empty",
           schema = Schema(type = "string"),
         )
       ],
@@ -146,7 +148,7 @@ class DataController(private val sync: SyncService) {
         Header(
           name = "X-Gym-Capabilities",
           description =
-            "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile, strength-planner-personalization; otherwise empty",
+            "Accepted intersection: calendar-plans, annotated-workout-writes, exercise-hint, profile, strength-planner-personalization, workout-rir-v1, ai-planner-agentic-v1; otherwise empty",
           schema = Schema(type = "string"),
         )
       ],

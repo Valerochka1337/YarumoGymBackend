@@ -5,6 +5,7 @@ import java.time.ZoneId
 import java.time.temporal.ChronoUnit
 import java.util.UUID
 import tech.valerochkagym.controller.model.CalendarDraftRequest
+import tools.jackson.databind.JsonNode
 import tools.jackson.databind.ObjectMapper
 
 /** Calendar-only context. No Coach conversation, health expansion or provider-side arithmetic. */
@@ -258,5 +259,39 @@ internal object CalendarPlannerContext {
     return json.writeValueAsString(providerPayload).also {
       if (it.toByteArray(Charsets.UTF_8).size > MAX_BYTES) throw aiError("ai_context_too_large")
     }
+  }
+
+  /** Agentic tools have a narrower approved egress boundary than legacy planner output. */
+  fun serializeAgentic(
+    json: ObjectMapper,
+    captured: CalendarCapturedContext,
+    request: CalendarDraftRequest,
+    selected: List<Map<String, Any>>,
+    eligibleCount: Int,
+    strengthSelection: StrengthPlannerFacts.Selection? = null,
+    strengthFacts: StrengthPlannerFacts.CompactFacts? = null,
+  ): String {
+    val root =
+      json.readTree(
+        serialize(
+          json,
+          captured,
+          request,
+          selected,
+          eligibleCount,
+          strengthSelection,
+          strengthFacts,
+        )
+      )
+    fun redact(node: JsonNode) {
+      if (node.isObject) {
+        val objectNode = node as tools.jackson.databind.node.ObjectNode
+        listOf("mass", "measurement", "measurements", "health", "inBody", "notes")
+          .forEach(objectNode::remove)
+        objectNode.properties().forEach { redact(it.value) }
+      } else if (node.isArray) node.forEach(::redact)
+    }
+    redact(root)
+    return json.writeValueAsString(root)
   }
 }

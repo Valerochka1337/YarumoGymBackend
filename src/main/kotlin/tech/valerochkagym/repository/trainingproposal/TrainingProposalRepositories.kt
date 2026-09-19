@@ -28,3 +28,12 @@ interface TrainingProposalReceiptRepository :
 
 interface TrainingProposalOperationRepository :
   JpaRepository<TrainingProposalOperationEntity, TrainingProposalOperationId>
+
+interface CalendarPlannerRefinementRepository :
+  JpaRepository<CalendarPlannerRefinementEntity, CalendarPlannerRefinementId> {
+  @Lock(LockModeType.PESSIMISTIC_WRITE)
+  @Query(
+    "select r from CalendarPlannerRefinementEntity r where r.ownerId = :ownerId and r.requestId = :requestId"
+  )
+  fun writeLock(ownerId: UUID, requestId: UUID): CalendarPlannerRefinementEntity?
+}

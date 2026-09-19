@@ -11,6 +11,10 @@ data class AiProviderInput(
   val imageBase64: String? = null,
   val schemaName: String? = null,
   val timeoutMillis: Long? = null,
+  /**
+   * Private planner conversation only. It is translated to OpenAI tool messages by the provider.
+   */
+  val plannerTranscript: List<PlannerToolExchange> = emptyList(),
 )
 
 interface AiProvider {
@@ -18,6 +22,18 @@ interface AiProvider {
 
   fun generate(input: AiProviderInput): JsonNode
 }
+
+/** Optional v2-only private planner transport. It is never exposed as a client or MCP protocol. */
+interface PlannerToolCallingProvider : AiProvider {
+  fun generatePlannerTurn(input: AiProviderInput): PlannerTurn
+}
+
+data class PlannerTurn(
+  val calls: List<PlannerToolProtocol.Call> = emptyList(),
+  val final: JsonNode? = null,
+)
+
+data class PlannerToolExchange(val call: PlannerToolProtocol.Call, val result: ByteArray)
 
 class UnconfiguredAiProvider : AiProvider {
   override val available = false

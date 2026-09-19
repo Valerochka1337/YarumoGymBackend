@@ -5,6 +5,7 @@ import java.net.InetSocketAddress
 import java.net.URI
 import java.net.http.HttpClient
 import java.time.Duration
+import java.util.UUID
 import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicReference
 import org.junit.jupiter.api.*
@@ -81,6 +82,9 @@ class HttpOpenAiChatCompletionsProviderTest {
       schemaName = "calendar_draft",
     )
 
+  fun plannerInput(transcript: List<PlannerToolExchange> = emptyList()) =
+    calendarInput().copy(schemaName = "calendar_draft_v2", plannerTranscript = transcript)
+
   fun envelope() =
     json.writeValueAsString(
       mapOf(
@@ -129,6 +133,60 @@ class HttpOpenAiChatCompletionsProviderTest {
     assertEquals(
       "calendar_draft",
       captured.get()["response_format"]["json_schema"]["name"].asString(),
+    )
+  }
+
+  @Test
+  fun `planner turn uses fixed tool framing and preserves only validated transcript fields`() {
+    val id = UUID(0, 1).toString()
+    handler = {
+      respond(
+        it,
+        """{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":"","tool_calls":[{"id":"call-1","type":"function","function":{"name":"get_candidate_details_and_history","arguments":"{\"candidateIds\":[\"$id\"]}"}}]}}]}""",
+      )
+    }
+    val turn = provider().generatePlannerTurn(plannerInput())
+    assertEquals("get_candidate_details_and_history", turn.calls.single().name)
+    assertEquals(listOf(id), turn.calls.single().candidateIds)
+    val body = captured.get()
+    assertTrue(body["response_format"]["json_schema"]["strict"].asBoolean())
+    assertEquals("calendar_draft_v2", body["response_format"]["json_schema"]["name"].asString())
+    assertEquals(3, body["tools"].size())
+    assertEquals("get_strength_skeleton", body["tools"][0]["function"]["name"].asString())
+    assertEquals("auto", body["tool_choice"].asString())
+    assertEquals(2, body["messages"].size())
+  }
+
+  @Test
+  fun `planner parser rejects malformed unknown and duplicate tool calls`() {
+    val bodies =
+      listOf(
+        """{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"call-1","type":"function","function":{"name":"unknown","arguments":"{}"}}]}}]}""",
+        """{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"call-1","type":"function","function":{"name":"get_strength_skeleton","arguments":"[]"}}]}}]}""",
+        """{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"call-1","type":"function","function":{"name":"get_strength_skeleton","arguments":"{}"}},{"id":"call-1","type":"function","function":{"name":"get_strength_skeleton","arguments":"{}"}}]}}]}""",
+      )
+    bodies.forEach { body ->
+      handler = { respond(it, body) }
+      assertEquals(
+        "ai_invalid_response",
+        assertThrows(ApiException::class.java) { provider().generatePlannerTurn(plannerInput()) }
+          .code,
+      )
+    }
+  }
+
+  @Test
+  fun `planner turn observes the remaining attempt deadline`() {
+    handler = {
+      Thread.sleep(300)
+      respond(it, envelope())
+    }
+    assertEquals(
+      "ai_timeout",
+      assertThrows(ApiException::class.java) {
+          provider(1000).generatePlannerTurn(plannerInput().copy(timeoutMillis = 50))
+        }
+        .code,
     )
   }
 
