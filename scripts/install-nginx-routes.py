@@ -33,8 +33,8 @@ def marked_block(source: str) -> str:
     block = textwrap.dedent(source[start:line_end]).rstrip()
     if "location = /.well-known/assetlinks.json" not in block:
         raise ValueError("managed block is missing assetlinks.json")
-    if "location ^~ /r/" not in block:
-        raise ValueError("managed block is missing the routine-share prefix route")
+    if 'location ~ "^/r/' not in block or "X-Yarumo-Route browser-trial" not in block:
+        raise ValueError("managed block is missing the browser-trial route")
     return block
 
 

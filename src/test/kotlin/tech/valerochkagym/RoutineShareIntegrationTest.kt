@@ -223,16 +223,13 @@ class RoutineShareIntegrationTest {
   }
 
   @Test
-  fun `active public link redirects browsers while preserving privacy headers and import`() {
+  fun `active public link keeps an html fallback with privacy headers and import`() {
     val author = actor()
     val source = sourceRoutine(author, "<script>bad()</script>")
     val token = create(author, source.routine, 1)
     val page = request("GET", "/r/$token")
-    assertEquals(302, page.statusCode())
-    assertEquals(
-      "https://app.valerochkagym.tech/r/$token",
-      page.headers().firstValue("Location").orElseThrow(),
-    )
+    assertEquals(200, page.statusCode())
+    assertTrue(page.body().contains("Routine One"))
     assertEquals("no-store", page.headers().firstValue("Cache-Control").orElseThrow())
     assertEquals("no-referrer", page.headers().firstValue("Referrer-Policy").orElseThrow())
     assertTrue(page.headers().firstValue("X-Robots-Tag").orElseThrow().contains("noindex"))

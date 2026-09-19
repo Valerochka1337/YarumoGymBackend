@@ -1988,7 +1988,7 @@
       "get": {
         "tags": ["routine-share-public-controller"], "operationId": "routineShareHtml", "security": [],
         "parameters": [{"name": "token", "in": "path", "required": true, "schema": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"}}],
-        "responses": {"302": {"description": "Active share redirect to the browser trial app", "headers": {"Location": {"description": "https://app.valerochkagym.tech/r/{token}", "schema": {"type": "string", "format": "uri"}}}}, "404": {"description": "Unavailable HTML page"}}
+        "responses": {"200": {"description": "HTML fallback for an active shared routine"}, "404": {"description": "Unavailable HTML page"}}
       }
     },
     "/v1/ai/coach-prompt": {

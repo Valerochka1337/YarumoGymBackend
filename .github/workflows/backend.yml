@@ -87,7 +87,6 @@ jobs:
         run: |
           mkdir -p build/browser-web-release
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 -C browser-web/dist -czf build/browser-web-release/browser-web.tar.gz .
-          cp browser-web/infra/nginx.conf build/browser-web-release/browser-web-nginx.conf
       - name: Formatting, unit and PostgreSQL integration tests, application build
         if: needs.changes.outputs.code == 'true'
         run: ./gradlew --no-daemon check bootJar
@@ -190,7 +189,7 @@ jobs:
           ai_key_payload=$(mktemp)
           cleanup() {
             if [[ -f ~/.ssh/gym-deploy ]]; then
-              ssh -i ~/.ssh/gym-deploy -o BatchMode=yes -o ConnectTimeout=10 valerochka@62.84.122.55 'rm -f /opt/valerochkagym/incoming/smtp.json /opt/valerochkagym/incoming/ai.json /opt/valerochkagym/incoming/ai-encryption.json /opt/valerochkagym/incoming/nginx.conf /opt/valerochkagym/incoming/install-nginx-routes.py /opt/valerochkagym/incoming/browser-web.tar.gz /opt/valerochkagym/incoming/browser-web-nginx.conf /opt/valerochkagym/incoming/install-browser-web.sh' || true
+              ssh -i ~/.ssh/gym-deploy -o BatchMode=yes -o ConnectTimeout=10 valerochka@62.84.122.55 'rm -f /opt/valerochkagym/incoming/smtp.json /opt/valerochkagym/incoming/ai.json /opt/valerochkagym/incoming/ai-encryption.json /opt/valerochkagym/incoming/nginx.conf /opt/valerochkagym/incoming/install-nginx-routes.py /opt/valerochkagym/incoming/browser-web.tar.gz /opt/valerochkagym/incoming/install-browser-web.sh' || true
             fi
             rm -f "$smtp_payload" "$ai_key_payload" ~/.ssh/gym-deploy
           }
@@ -201,7 +200,7 @@ jobs:
           printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/gym-deploy
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
           scp -i ~/.ssh/gym-deploy -o BatchMode=yes infra/compose.production.yaml infra/nginx.conf scripts/deploy.sh scripts/backup.sh scripts/verify-restore.sh scripts/admin-role.sh scripts/admin-password.sh scripts/smtp-config.py scripts/ai-encryption-config.py scripts/install-nginx-routes.py scripts/install-browser-web.sh valerochka@62.84.122.55:/opt/valerochkagym/incoming/
-          scp -i ~/.ssh/gym-deploy -o BatchMode=yes build/browser-web-release/browser-web.tar.gz build/browser-web-release/browser-web-nginx.conf valerochka@62.84.122.55:/opt/valerochkagym/incoming/
+          scp -i ~/.ssh/gym-deploy -o BatchMode=yes build/browser-web-release/browser-web.tar.gz valerochka@62.84.122.55:/opt/valerochkagym/incoming/
           scp -i ~/.ssh/gym-deploy -o BatchMode=yes "$smtp_payload" valerochka@62.84.122.55:/opt/valerochkagym/incoming/smtp.json
           scp -i ~/.ssh/gym-deploy -o BatchMode=yes "$ai_key_payload" valerochka@62.84.122.55:/opt/valerochkagym/incoming/ai-encryption.json
           printf '%s' "$GHCR_TOKEN" | ssh -i ~/.ssh/gym-deploy -o BatchMode=yes valerochka@62.84.122.55 "sudo /opt/valerochkagym/install-and-deploy.sh 'ghcr.io/valerochka1337/valerochkagymbackend@$IMAGE_DIGEST' '$REGISTRY_USER'"

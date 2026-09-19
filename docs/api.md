@@ -16,10 +16,10 @@
 Публичный `GET /v1/routine-shares/preview/{token}` возвращает только
 `{title,estimatedDurationSeconds,exercises}`. У упражнения есть `{exerciseKey,name,type,sets,restSeconds}`;
 подход содержит только nullable `weightKg,reps,durationSec,speedKmh,inclinePct`. Ответ не раскрывает
-автора, исходную программу, зал, заметки, историю или профиль. Для активной ссылки `GET /r/{token}`
-отвечает `302 Location: https://app.valerochkagym.tech/r/{token}`; browser app загружает allowlisted
-preview через `/v1`, проводит локальную пробную тренировку и предлагает сохранить результаты после
-явной авторизации. Недоступная ссылка остаётся на API-origin и получает `404` HTML. Публичные ответы
+автора, исходную программу, зал, заметки, историю или профиль. В production `GET /r/{token}`
+загружает маршрут существующего Yarumo Web на том же `api.valerochkagym.tech`; browser app получает
+allowlisted preview через `/v1`, проводит локальную пробную тренировку и предлагает сохранить
+результаты после явной авторизации. Backend HTML остаётся безопасным fallback вне SPA. Публичные ответы
 имеют `Cache-Control: no-store`, `Referrer-Policy: no-referrer` и
 `X-Robots-Tag: noindex, nofollow`.
 

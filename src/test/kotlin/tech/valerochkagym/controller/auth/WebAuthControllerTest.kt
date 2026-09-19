@@ -22,12 +22,12 @@ class WebAuthControllerTest {
       mock(GoogleVerifier::class.java),
       mock(GoogleIdentity::class.java),
       mock(RateLimiter::class.java),
-      "https://app.valerochkagym.tech",
+      "https://api.valerochkagym.tech",
     )
 
   private fun request() =
     MockHttpServletRequest().also {
-      it.addHeader("Origin", "https://app.valerochkagym.tech")
+      it.addHeader("Origin", "https://api.valerochkagym.tech")
       it.addHeader("X-CSRF-Token", "a".repeat(43))
       it.setCookies(
         Cookie(WebAuthController.CSRF, "a".repeat(43)),

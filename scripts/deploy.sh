@@ -8,10 +8,31 @@ flock -n 9 || { echo 'Deployment already running' >&2; exit 1; }
 umask 077
 env_backup=$(mktemp .env.rollback.XXXXXX)
 cp .env "$env_backup"
+browser_web_root=${GYM_BROWSER_WEB_ROOT:-/srv/yarumo-web}
+browser_current=$browser_web_root/current
+browser_old_current=$(readlink -f "$browser_current" 2>/dev/null || true)
+browser_installed=false
+restore_browser_web() {
+  if [[ "$browser_installed" != true ]]; then return 0; fi
+  if [[ -n "$browser_old_current" ]]; then
+    ln -sfn "$browser_old_current" "$browser_current.rollback"
+    python3 - "$browser_current.rollback" "$browser_current" <<'PY'
+import os
+import sys
+os.replace(sys.argv[1], sys.argv[2])
+PY
+  else
+    rm -f "$browser_current"
+  fi
+  browser_installed=false
+}
 cleanup() {
   local status=$?
-  if [[ "$status" != 0 && -f "$env_backup" ]]; then cp "$env_backup" .env; fi
-  rm -f "$env_backup" incoming/smtp.json incoming/ai.json incoming/ai-encryption.json incoming/nginx.conf incoming/install-nginx-routes.py incoming/browser-web.tar.gz incoming/browser-web-nginx.conf incoming/install-browser-web.sh
+  if [[ "$status" != 0 ]]; then
+    restore_browser_web || true
+    if [[ -f "$env_backup" ]]; then cp "$env_backup" .env; fi
+  fi
+  rm -f "$env_backup" "$browser_current.rollback" incoming/smtp.json incoming/ai.json incoming/ai-encryption.json incoming/nginx.conf incoming/install-nginx-routes.py incoming/browser-web.tar.gz incoming/install-browser-web.sh
 }
 trap cleanup EXIT
 compose=(docker compose --env-file .env -f compose.production.yaml)
@@ -23,13 +44,13 @@ if "${compose[@]}" ps --status running --services | grep -qx postgres; then ./ba
 install_browser_web() {
   local present=0
   [[ -f incoming/browser-web.tar.gz ]] && ((present+=1))
-  [[ -f incoming/browser-web-nginx.conf ]] && ((present+=1))
   [[ -f incoming/install-browser-web.sh ]] && ((present+=1))
   if [[ "$present" == 0 ]]; then return 0; fi
-  [[ "$present" == 3 ]] || { echo 'Browser web deployment files are incomplete' >&2; return 1; }
+  [[ "$present" == 2 ]] || { echo 'Browser web deployment files are incomplete' >&2; return 1; }
   install -m 0755 incoming/install-browser-web.sh install-browser-web.sh
-  ./install-browser-web.sh incoming/browser-web.tar.gz incoming/browser-web-nginx.conf
-  rm -f incoming/browser-web.tar.gz incoming/browser-web-nginx.conf incoming/install-browser-web.sh
+  ./install-browser-web.sh incoming/browser-web.tar.gz
+  browser_installed=true
+  rm -f incoming/browser-web.tar.gz incoming/install-browser-web.sh
 }
 if [[ -f incoming/ai-encryption.json ]]; then
   install -m 0755 incoming/ai-encryption-config.py ai-encryption-config.py
@@ -50,7 +71,7 @@ set_image() {
   mv .env.next .env
 }
 install_nginx_routes() {
-  local target backup candidate headers share_headers body listen_address_file smoke_address
+  local target backup candidate headers share_headers body share_body listen_address_file smoke_address
   local asset_status share_status root_status attempt smoke_ready=false
   local effective_config targets_file config canonical probe strategy selected_strategy
   local managed_count share_location_count marker_count
@@ -109,6 +130,7 @@ install_nginx_routes() {
   headers=$(mktemp nginx.headers.XXXXXX)
   share_headers=$(mktemp nginx.share-headers.XXXXXX)
   body=$(mktemp nginx.body.XXXXXX)
+  share_body=$(mktemp nginx.share-body.XXXXXX)
   listen_address_file=$(mktemp nginx.listen-address.XXXXXX)
   cp "$target" "$backup"
   restore_nginx() {
@@ -124,14 +146,14 @@ install_nginx_routes() {
      ! systemctl reload nginx; then
     echo 'Nginx route installation failed; restoring the previous server block.' >&2
     if ! restore_nginx; then echo 'Nginx rollback also failed' >&2; fi
-    rm -f "$backup" "$candidate" "$headers" "$share_headers" "$body" "$listen_address_file"
+    rm -f "$backup" "$candidate" "$headers" "$share_headers" "$body" "$share_body" "$listen_address_file"
     return 1
   fi
   smoke_address=$(cat "$listen_address_file")
   if [[ ! "$smoke_address" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
     echo 'Nginx route installer returned an invalid listen address; restoring the previous server block.' >&2
     if ! restore_nginx; then echo 'Nginx rollback also failed' >&2; fi
-    rm -f "$backup" "$candidate" "$headers" "$share_headers" "$body" "$listen_address_file"
+    rm -f "$backup" "$candidate" "$headers" "$share_headers" "$body" "$share_body" "$listen_address_file"
     return 1
   fi
   printf 'Checking App Links routes through selected listener: %s:443\n' "$smoke_address"
@@ -148,13 +170,14 @@ install_nginx_routes() {
   # connections for a brief window, so wait until requests observe the new route table.
   for attempt in {1..15}; do
     asset_status=$("${smoke_curl[@]}" --dump-header "$headers" --output "$body" --write-out '%{http_code}' "$origin/.well-known/assetlinks.json" || true)
-    share_status=$("${smoke_curl[@]}" --dump-header "$share_headers" --output /dev/null --write-out '%{http_code}' "$origin/r/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" || true)
+    share_status=$("${smoke_curl[@]}" --dump-header "$share_headers" --output "$share_body" --write-out '%{http_code}' "$origin/r/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" || true)
     root_status=$("${smoke_curl[@]}" --output /dev/null --write-out '%{http_code}' "$origin/" || true)
     if [[ "$asset_status" == 200 && "$root_status" == 200 ]] &&
        grep -Eiq '^content-type:[[:space:]]*application/json' "$headers" &&
        grep -q 'com.valerochka1337.valerochkagym' "$body" &&
        grep -q 'delegate_permission/common.handle_all_urls' "$body" &&
-       grep -Eiq '^x-yarumo-route:[[:space:]]*routine-share' "$share_headers"; then
+       grep -Eiq '^x-yarumo-route:[[:space:]]*browser-trial' "$share_headers" &&
+       grep -Fq '<title>Yarumo coach</title>' "$share_body"; then
       smoke_ready=true
       break
     fi
@@ -168,8 +191,8 @@ install_nginx_routes() {
     effective_config=$(mktemp nginx.failed-effective.XXXXXX)
     if nginx -T > "$effective_config" 2>/dev/null; then
       managed_count=$(grep -Fc '# BEGIN MANAGED ROUTINE SHARE ROUTES' "$effective_config" || true)
-      share_location_count=$(grep -Ec 'location[[:space:]]+\^~[[:space:]]+/r/' "$effective_config" || true)
-      marker_count=$(grep -Fc 'add_header X-Yarumo-Route routine-share always' "$effective_config" || true)
+      share_location_count=$(grep -Ec 'location[[:space:]]+~[[:space:]]+"\^/r/' "$effective_config" || true)
+      marker_count=$(grep -Fc 'add_header X-Yarumo-Route browser-trial always' "$effective_config" || true)
       printf 'Loaded Nginx route counts: managed=%s share_location=%s marker=%s\n' \
         "$managed_count" "$share_location_count" "$marker_count" >&2
     else
@@ -177,11 +200,11 @@ install_nginx_routes() {
     fi
     rm -f "$effective_config"
     if ! restore_nginx; then echo 'Nginx rollback also failed' >&2; fi
-    rm -f "$backup" "$candidate" "$headers" "$share_headers" "$body" "$listen_address_file"
+    rm -f "$backup" "$candidate" "$headers" "$share_headers" "$body" "$share_body" "$listen_address_file"
     return 1
   fi
   install -m 0644 "$target" nginx.conf
-  rm -f "$backup" "$candidate" "$headers" "$share_headers" "$body" "$listen_address_file"
+  rm -f "$backup" "$candidate" "$headers" "$share_headers" "$body" "$share_body" "$listen_address_file"
 }
 install_browser_web
 set_image "$new_image"
@@ -189,6 +212,7 @@ if ! "${compose[@]}" up -d --wait --wait-timeout 180 ||
    ! curl --fail --silent --retry 5 --retry-delay 3 https://api.valerochkagym.tech/health ||
    ! install_nginx_routes; then
   echo 'Deployment failed; restoring the previous application image and environment (database migrations are not reversed).' >&2
+  restore_browser_web
   mv "$env_backup" .env
   if [[ -n "$old_image" ]]; then "${compose[@]}" up -d --wait --wait-timeout 180; fi
   exit 1

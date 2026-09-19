@@ -27,12 +27,12 @@ class InstallNginxRoutesTest(unittest.TestCase):
 
         self.assertLess(merged.index(MODULE.BEGIN), merged.index("location / {"))
         self.assertIn("location = /.well-known/assetlinks.json", merged)
-        self.assertIn("location ^~ /r/", merged)
-        self.assertIn("location = /sw.js", merged)
+        self.assertIn('location ~ "^/r/[A-Za-z0-9_-]{43}$"', merged)
+        self.assertIn("location /r/ { return 404; }", merged)
         self.assertIn("/trial-results", merged)
-        self.assertIn("add_header X-Yarumo-Route routine-share always", merged)
-        self.assertIn("proxy_intercept_errors off", merged)
-        self.assertLess(merged.index("location ^~ /r/"), merged.index("location / {"))
+        self.assertIn("add_header X-Yarumo-Route browser-trial always", merged)
+        self.assertIn("try_files /index.html =404", merged)
+        self.assertLess(merged.index('location ~ "^/r/'), merged.index("location / {"))
         self.assertIn("try_files $uri $uri/ /index.html", merged)
 
     def test_coach_api_and_streams_bypass_spa_and_proxy_buffering(self):
@@ -72,7 +72,7 @@ server {
         self.assertNotIn(MODULE.BEGIN, merged[slice(*http)])
         self.assertIn(MODULE.BEGIN, merged[slice(*https)])
         self.assertLess(
-            merged[slice(*https)].index("location ^~ /r/"),
+            merged[slice(*https)].index('location ~ "^/r/'),
             merged[slice(*https)].index("location ^~ / {"),
         )
 
@@ -178,7 +178,8 @@ server {
         self.assertIn("Nginx smoke: assetlinks=%s share=%s root=%s", deploy)
         self.assertIn("for attempt in {1..15}", deploy)
         self.assertIn('if [[ "$smoke_ready" != true ]]', deploy)
-        self.assertIn("^x-yarumo-route:[[:space:]]*routine-share", deploy)
+        self.assertIn("^x-yarumo-route:[[:space:]]*browser-trial", deploy)
+        self.assertIn("<title>Yarumo coach</title>", deploy)
         self.assertIn('nginx -T > "$effective_config"', deploy)
         self.assertIn("Expected one active IPv4 HTTPS config", deploy)
         self.assertIn("Loaded Nginx route counts", deploy)
