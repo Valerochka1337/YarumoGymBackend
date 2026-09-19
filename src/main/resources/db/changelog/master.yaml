@@ -81,5 +81,8 @@ databaseChangeLog:
       file: 027-calendar-refinement-leases.sql
       relativeToChangelogFile: true
   - include:
-      file: 028-planner-configuration.sql
+      file: 028-routine-share-trial-results.sql
+      relativeToChangelogFile: true
+  - include:
+      file: 029-planner-configuration.sql
       relativeToChangelogFile: true

@@ -223,12 +223,14 @@ class RoutineShareIntegrationTest {
   }
 
   @Test
-  fun `public HTML headers asset links and author deletion leave recipient import intact`() {
+  fun `active public link keeps an html fallback with privacy headers and import`() {
     val author = actor()
     val source = sourceRoutine(author, "<script>bad()</script>")
     val token = create(author, source.routine, 1)
     val page = request("GET", "/r/$token")
     assertEquals(200, page.statusCode())
+    assertTrue(page.body().contains("&lt;script&gt;bad()&lt;/script&gt;"))
+    assertFalse(page.body().contains("<script>bad()</script>"))
     assertEquals("no-store", page.headers().firstValue("Cache-Control").orElseThrow())
     assertEquals("no-referrer", page.headers().firstValue("Referrer-Policy").orElseThrow())
     assertTrue(page.headers().firstValue("X-Robots-Tag").orElseThrow().contains("noindex"))
@@ -239,9 +241,6 @@ class RoutineShareIntegrationTest {
         .orElseThrow()
         .contains("default-src 'none'")
     )
-    assertFalse(page.body().contains("<script>bad()</script>"))
-    assertTrue(page.body().contains("&lt;script&gt;bad()&lt;/script&gt;"))
-    assertTrue(page.body().contains("github.com/Valerochka1337/YarumoGymAndroid/releases/latest"))
     val assetLinks = request("GET", "/.well-known/assetlinks.json")
     assertEquals(200, assetLinks.statusCode())
     assertEquals(
@@ -360,6 +359,94 @@ class RoutineShareIntegrationTest {
     assertEquals(
       0,
       db.queryForObject("SELECT count(*) FROM routine_share_import_receipts", Int::class.java),
+    )
+  }
+
+  @Test
+  fun `trial result creates one portable routine and completed workout then replays its receipt`() {
+    val author = actor()
+    val source = sourceRoutine(author, "Browser trial")
+    val token = create(author, source.routine, 1)
+    val recipient = actor()
+    val operation = UUID.randomUUID().toString()
+    val body =
+      mapOf(
+        "operationId" to operation,
+        "startedAt" to 1_700_000_000_000L,
+        "finishedAt" to 1_700_000_010_000L,
+        "completedSets" to
+          listOf(
+            mapOf(
+              "exerciseIndex" to 0,
+              "setIndex" to 0,
+              "completedAt" to 1_700_000_005_000L,
+              "weightKg" to 25.0,
+              "reps" to 9,
+              "durationSec" to null,
+              "speedKmh" to null,
+              "inclinePct" to null,
+            )
+          ),
+      )
+    val first = request("POST", "/v1/routine-shares/preview/$token/trial-results", body, recipient)
+    assertEquals(200, first.statusCode(), first.body())
+    val receipt = json.readTree(first.body())
+    assertFalse(receipt["alreadySaved"].asBoolean())
+    assertEquals(5, receipt.properties().size)
+    assertEquals(
+      3,
+      db.queryForObject(
+        "SELECT count(*) FROM records WHERE user_id=? AND deleted=false",
+        Int::class.java,
+        recipient.id,
+      ),
+    )
+    assertEquals(
+      3,
+      db.queryForObject(
+        "SELECT min_sync_version FROM sync_heads WHERE user_id=?",
+        Int::class.java,
+        recipient.id,
+      ),
+    )
+    val workout =
+      json.readTree(
+        db.queryForObject(
+          "SELECT payload::text FROM records WHERE user_id=? AND kind='workout'",
+          String::class.java,
+          recipient.id,
+        )
+      )
+    val savedSet = workout["exercises"][0]["sets"][0]
+    assertEquals(20.0, savedSet["originalWeightKg"].asDouble())
+    assertEquals(25.0, savedSet["actualWeightKg"].asDouble())
+    assertTrue(savedSet["syncId"].isTextual)
+    db.update(
+      "UPDATE standard_records SET archived=true WHERE kind='exercise' AND id=?",
+      source.standard,
+    )
+    val replay = request("POST", "/v1/routine-shares/preview/$token/trial-results", body, recipient)
+    assertEquals(200, replay.statusCode(), replay.body())
+    assertTrue(json.readTree(replay.body())["alreadySaved"].asBoolean())
+    assertEquals(
+      1,
+      db.queryForObject("SELECT count(*) FROM routine_share_trial_receipts", Int::class.java),
+    )
+    val changed = body + ("finishedAt" to 1_700_000_010_001L)
+    assertEquals(
+      409,
+      request("POST", "/v1/routine-shares/preview/$token/trial-results", changed, recipient)
+        .statusCode(),
+    )
+    assertEquals(
+      413,
+      requestRaw(
+          "POST",
+          "/v1/routine-shares/preview/$token/trial-results",
+          "x".repeat(64 * 1024 + 1),
+          recipient,
+        )
+        .statusCode(),
     )
   }
 

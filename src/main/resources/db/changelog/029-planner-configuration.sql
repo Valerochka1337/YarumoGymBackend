@@ -1,5 +1,5 @@
 --liquibase formatted sql
---changeset yarumo:028-planner-configuration
+--changeset yarumo:029-planner-configuration
 CREATE TABLE planner_configuration (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     payload TEXT NOT NULL

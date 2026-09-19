@@ -62,6 +62,8 @@ Google идентифицируется по `sub`, совпадение email �
 - Ubuntu 24.04, `valerochka@62.84.122.55`, `/opt/valerochkagym`.
 - Существующий Nginx/Certbot → `127.0.0.1:18080` → backend → закрытый PostgreSQL.
 - Readiness: `https://api.valerochkagym.tech/health`.
+- Browser trial: `https://api.valerochkagym.tech/r/{token}`; тот же production job
+  атомарно устанавливает проверенный web-архив в существующую Yarumo Web PWA и обновляет Nginx.
 - Backend: 768 MB, PostgreSQL: 384 MB; постоянный Docker volume.
 - Backup ежедневно, локальное хранение 14 дней; off-host копия настраивается отдельно.
 - SMTP пока не предоставлен: в production `MAIL_ENABLED=false`. Google Web client ID

@@ -87,6 +87,26 @@ class RoutineShareImportReceiptEntity(
   var importedAt: Instant = Instant.EPOCH,
 )
 
+data class RoutineShareTrialReceiptId(
+  var recipientId: UUID = UUID(0, 0),
+  var operationId: UUID = UUID(0, 0),
+) : Serializable
+
+/** Trial receipt is operation-keyed and share-bound; it never changes import receipt semantics. */
+@Entity
+@Table(name = "routine_share_trial_receipts")
+@IdClass(RoutineShareTrialReceiptId::class)
+class RoutineShareTrialReceiptEntity(
+  @Id var recipientId: UUID = UUID(0, 0),
+  @Id var operationId: UUID = UUID(0, 0),
+  var shareId: UUID = UUID(0, 0),
+  @Column(length = 64) var requestSha256: String = "",
+  var routineId: UUID = UUID(0, 0),
+  var workoutId: UUID = UUID(0, 0),
+  var revision: Long = 0,
+  var savedAt: Instant = Instant.EPOCH,
+)
+
 data class RoutineShareRevokeOperationId(
   var authorId: UUID = UUID(0, 0),
   var operationId: UUID = UUID(0, 0),

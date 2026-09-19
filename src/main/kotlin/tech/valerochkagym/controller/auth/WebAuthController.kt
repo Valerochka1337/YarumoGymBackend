@@ -29,7 +29,8 @@ class WebAuthController(
   private val google: GoogleVerifier,
   private val nonces: GoogleIdentity,
   private val limits: RateLimiter,
-  @Value("\${web.origin:https://app.valerochkagym.tech}") private val origin: String,
+  @Value("\${web.origin:https://api.valerochkagym.tech}") private val origin: String,
+  @Value("\${gym.google-client-id:}") private val googleClientId: String,
 ) {
   companion object {
     const val REFRESH = "__Host-yarumo-refresh"
@@ -190,6 +191,14 @@ class WebAuthController(
   fun nonce(request: HttpServletRequest, response: HttpServletResponse): Map<String, String> {
     guard(request, response)
     return mapOf("nonce" to nonces.nonce())
+  }
+
+  /** The OAuth client id is public configuration; keeping it server-owned prevents build drift. */
+  @GetMapping("/google/config")
+  fun googleConfig(response: HttpServletResponse): Map<String, String> {
+    response.setHeader("Cache-Control", "no-store")
+    return googleClientId.trim().takeIf(String::isNotEmpty)?.let { mapOf("clientId" to it) }
+      ?: emptyMap()
   }
 
   @PostMapping("/google")

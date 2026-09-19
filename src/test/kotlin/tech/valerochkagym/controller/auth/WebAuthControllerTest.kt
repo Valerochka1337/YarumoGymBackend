@@ -22,12 +22,13 @@ class WebAuthControllerTest {
       mock(GoogleVerifier::class.java),
       mock(GoogleIdentity::class.java),
       mock(RateLimiter::class.java),
-      "https://app.valerochkagym.tech",
+      "https://api.valerochkagym.tech",
+      "browser-client.apps.googleusercontent.com",
     )
 
   private fun request() =
     MockHttpServletRequest().also {
-      it.addHeader("Origin", "https://app.valerochkagym.tech")
+      it.addHeader("Origin", "https://api.valerochkagym.tech")
       it.addHeader("X-CSRF-Token", "a".repeat(43))
       it.setCookies(
         Cookie(WebAuthController.CSRF, "a".repeat(43)),
@@ -95,5 +96,15 @@ class WebAuthControllerTest {
     val body = controller.csrf(request(), response)
     assertEquals("a".repeat(43), body["csrfToken"])
     assertTrue(response.getHeader("Set-Cookie")!!.contains("HttpOnly"))
+  }
+
+  @Test
+  fun `google config exposes public browser client id without caching`() {
+    val response = MockHttpServletResponse()
+    assertEquals(
+      "browser-client.apps.googleusercontent.com",
+      controller.googleConfig(response)["clientId"],
+    )
+    assertEquals("no-store", response.getHeader("Cache-Control"))
   }
 }

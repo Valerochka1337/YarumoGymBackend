@@ -52,6 +52,12 @@ jobs:
         run: exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: needs.changes.outputs.code == 'true'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: needs.changes.outputs.code == 'true'
+        with:
+          repository: Valerochka1337/YarumoGymWeb
+          ref: main
+          path: browser-web
       - uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
         if: needs.changes.outputs.code == 'true'
         with:
@@ -67,6 +73,21 @@ jobs:
       - name: Admin interface tests
         if: needs.changes.outputs.code == 'true'
         run: npm ci --ignore-scripts && npm test
+      - name: Browser workout tests and build
+        if: needs.changes.outputs.code == 'true'
+        working-directory: browser-web
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+          npm run build
+          npx playwright install --with-deps chromium firefox webkit
+          npm run test:e2e
+      - name: Package browser workout release
+        if: needs.changes.outputs.code == 'true'
+        run: |
+          mkdir -p build/browser-web-release
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 -C browser-web/dist -czf build/browser-web-release/browser-web.tar.gz .
       - name: Formatting, unit and PostgreSQL integration tests, application build
         if: needs.changes.outputs.code == 'true'
         run: ./gradlew --no-daemon check bootJar
@@ -90,6 +111,12 @@ jobs:
         with:
           name: backend-jar
           path: build/libs/app.jar
+          retention-days: 7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: needs.changes.outputs.code == 'true'
+        with:
+          name: browser-web-release
+          path: build/browser-web-release/
           retention-days: 7
   publish:
     needs: [changes, verify]
@@ -138,6 +165,10 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: browser-web-release
+          path: build/browser-web-release
       - name: Install deployment files and deploy the tested digest
         env:
           DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
@@ -159,7 +190,7 @@ jobs:
           ai_key_payload=$(mktemp)
           cleanup() {
             if [[ -f ~/.ssh/gym-deploy ]]; then
-              ssh -i ~/.ssh/gym-deploy -o BatchMode=yes -o ConnectTimeout=10 valerochka@62.84.122.55 'rm -f /opt/valerochkagym/incoming/smtp.json /opt/valerochkagym/incoming/ai.json /opt/valerochkagym/incoming/ai-encryption.json /opt/valerochkagym/incoming/nginx.conf /opt/valerochkagym/incoming/install-nginx-routes.py' || true
+              ssh -i ~/.ssh/gym-deploy -o BatchMode=yes -o ConnectTimeout=10 valerochka@62.84.122.55 'rm -f /opt/valerochkagym/incoming/smtp.json /opt/valerochkagym/incoming/ai.json /opt/valerochkagym/incoming/ai-encryption.json /opt/valerochkagym/incoming/nginx.conf /opt/valerochkagym/incoming/install-nginx-routes.py /opt/valerochkagym/incoming/browser-web.tar.gz /opt/valerochkagym/incoming/install-browser-web.sh' || true
             fi
             rm -f "$smtp_payload" "$ai_key_payload" ~/.ssh/gym-deploy
           }
@@ -169,7 +200,8 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/gym-deploy
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          scp -i ~/.ssh/gym-deploy -o BatchMode=yes infra/compose.production.yaml infra/nginx.conf scripts/deploy.sh scripts/backup.sh scripts/verify-restore.sh scripts/admin-role.sh scripts/admin-password.sh scripts/smtp-config.py scripts/ai-encryption-config.py scripts/install-nginx-routes.py valerochka@62.84.122.55:/opt/valerochkagym/incoming/
+          scp -i ~/.ssh/gym-deploy -o BatchMode=yes infra/compose.production.yaml infra/nginx.conf scripts/deploy.sh scripts/backup.sh scripts/verify-restore.sh scripts/admin-role.sh scripts/admin-password.sh scripts/smtp-config.py scripts/ai-encryption-config.py scripts/install-nginx-routes.py scripts/install-browser-web.sh valerochka@62.84.122.55:/opt/valerochkagym/incoming/
+          scp -i ~/.ssh/gym-deploy -o BatchMode=yes build/browser-web-release/browser-web.tar.gz valerochka@62.84.122.55:/opt/valerochkagym/incoming/
           scp -i ~/.ssh/gym-deploy -o BatchMode=yes "$smtp_payload" valerochka@62.84.122.55:/opt/valerochkagym/incoming/smtp.json
           scp -i ~/.ssh/gym-deploy -o BatchMode=yes "$ai_key_payload" valerochka@62.84.122.55:/opt/valerochkagym/incoming/ai-encryption.json
           printf '%s' "$GHCR_TOKEN" | ssh -i ~/.ssh/gym-deploy -o BatchMode=yes valerochka@62.84.122.55 "sudo /opt/valerochkagym/install-and-deploy.sh 'ghcr.io/valerochka1337/valerochkagymbackend@$IMAGE_DIGEST' '$REGISTRY_USER'"
