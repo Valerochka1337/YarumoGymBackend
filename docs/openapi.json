@@ -1976,11 +1976,19 @@
         "responses": {"200": {"description": "Imported routine receipt", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RoutineShareImport"}}}}, "404": {"description": "share_unavailable"}}
       }
     },
+    "/v1/routine-shares/preview/{token}/trial-results": {
+      "post": {
+        "tags": ["routine-share-controller"], "operationId": "saveRoutineShareTrial",
+        "parameters": [{"name": "token", "in": "path", "required": true, "schema": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SaveRoutineShareTrialRequest"}}}},
+        "responses": {"200": {"description": "Portable routine and completed workout receipt", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RoutineShareTrialSaved"}}}}, "404": {"description": "share_unavailable"}, "409": {"description": "operation_reused"}}
+      }
+    },
     "/r/{token}": {
       "get": {
         "tags": ["routine-share-public-controller"], "operationId": "routineShareHtml", "security": [],
         "parameters": [{"name": "token", "in": "path", "required": true, "schema": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"}}],
-        "responses": {"200": {"description": "Escaped public HTML preview with Android APK CTA", "content": {"text/html": {"schema": {"type": "string"}}}}, "404": {"description": "Unavailable HTML page"}}
+        "responses": {"302": {"description": "Active share redirect to the browser trial app", "headers": {"Location": {"description": "https://app.valerochkagym.tech/r/{token}", "schema": {"type": "string", "format": "uri"}}}}, "404": {"description": "Unavailable HTML page"}}
       }
     },
     "/v1/ai/coach-prompt": {
@@ -2696,6 +2704,9 @@
       "RoutineSharePreview": {"type": "object", "required": ["title", "estimatedDurationSeconds", "exercises"], "properties": {"title": {"type": "string"}, "estimatedDurationSeconds": {"type": "integer", "format": "int64"}, "exercises": {"type": "array", "items": {"$ref": "#/components/schemas/RoutineSharePreviewExercise"}}}},
       "RoutineSharePreviewExercise": {"type": "object", "properties": {"exerciseKey": {"type": "string", "format": "uuid"}, "name": {"type": "string"}, "type": {"type": "string"}, "sets": {"type": "array", "items": {"$ref": "#/components/schemas/RoutineSharePreviewSet"}}, "restSeconds": {"type": "integer"}}},
       "RoutineSharePreviewSet": {"type": "object", "properties": {"weightKg": {"type": ["number", "null"]}, "reps": {"type": ["integer", "null"]}, "durationSec": {"type": ["integer", "null"]}, "speedKmh": {"type": ["number", "null"]}, "inclinePct": {"type": ["number", "null"]}}},
+      "SaveRoutineShareTrialRequest": {"type": "object", "required": ["operationId", "startedAt", "finishedAt", "completedSets"], "properties": {"operationId": {"type": "string", "format": "uuid"}, "startedAt": {"type": "integer", "format": "int64"}, "finishedAt": {"type": "integer", "format": "int64"}, "completedSets": {"type": "array", "maxItems": 200, "items": {"$ref": "#/components/schemas/RoutineShareTrialSet"}}}},
+      "RoutineShareTrialSet": {"type": "object", "required": ["exerciseIndex", "setIndex", "completedAt", "weightKg", "reps", "durationSec", "speedKmh", "inclinePct"], "properties": {"exerciseIndex": {"type": "integer"}, "setIndex": {"type": "integer"}, "completedAt": {"type": "integer", "format": "int64"}, "weightKg": {"type": ["number", "null"]}, "reps": {"type": ["integer", "null"]}, "durationSec": {"type": ["integer", "null"]}, "speedKmh": {"type": ["number", "null"]}, "inclinePct": {"type": ["number", "null"]}}},
+      "RoutineShareTrialSaved": {"type": "object", "properties": {"routineId": {"type": "string", "format": "uuid"}, "workoutId": {"type": "string", "format": "uuid"}, "revision": {"type": "integer", "format": "int64"}, "savedAt": {"type": "integer", "format": "int64"}, "alreadySaved": {"type": "boolean"}}},
       "CoachPromptResponse": {
         "type": "object",
         "required": [

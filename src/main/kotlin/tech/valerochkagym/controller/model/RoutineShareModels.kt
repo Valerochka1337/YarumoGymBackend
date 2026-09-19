@@ -39,6 +39,33 @@ data class RoutineShareImport(
   val alreadyImported: Boolean,
 )
 
+/** Facts from an immutable public snapshot. Array indices are the public locators. */
+data class SaveRoutineShareTrialRequest(
+  val operationId: String,
+  val startedAt: Long,
+  val finishedAt: Long,
+  val completedSets: List<RoutineShareTrialSet>,
+)
+
+data class RoutineShareTrialSet(
+  val exerciseIndex: Int,
+  val setIndex: Int,
+  val completedAt: Long,
+  val weightKg: Double?,
+  val reps: Int?,
+  val durationSec: Int?,
+  val speedKmh: Double?,
+  val inclinePct: Double?,
+)
+
+data class RoutineShareTrialSaved(
+  val routineId: UUID,
+  val workoutId: UUID,
+  val revision: Long,
+  val savedAt: Long,
+  val alreadySaved: Boolean,
+)
+
 data class RoutineSharePreview(
   val title: String,
   val estimatedDurationSeconds: Long,

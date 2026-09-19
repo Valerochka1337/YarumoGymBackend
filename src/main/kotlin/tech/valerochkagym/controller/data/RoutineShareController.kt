@@ -47,9 +47,21 @@ class RoutineShareController(
   ): RoutineShareImport =
     shares.import(identity, token, strict(raw, ImportRoutineShareRequest::class.java))
 
-  private fun <T> strict(raw: ByteArray, type: Class<T>): T {
-    if (raw.size > maxRequestBytes)
-      throw ApiException(413, "payload_too_large", "Превышен размер запроса")
+  @PostMapping("/preview/{token}/trial-results")
+  fun saveTrial(
+    @AuthenticationPrincipal identity: Identity,
+    @PathVariable token: String,
+    @RequestBody raw: ByteArray,
+  ): RoutineShareTrialSaved {
+    return shares.saveTrial(
+      identity,
+      token,
+      strict(raw, SaveRoutineShareTrialRequest::class.java, maxTrialRequestBytes),
+    )
+  }
+
+  private fun <T> strict(raw: ByteArray, type: Class<T>, maxBytes: Int = maxRequestBytes): T {
+    if (raw.size > maxBytes) throw ApiException(413, "payload_too_large", "Превышен размер запроса")
     val root =
       try {
         json
@@ -81,6 +93,8 @@ class RoutineShareController(
           setOf("operationId", "routineId", "expectedRevision", "catalogRevision")
         RevokeRoutineShareRequest::class.java,
         ImportRoutineShareRequest::class.java -> setOf("operationId")
+        SaveRoutineShareTrialRequest::class.java ->
+          setOf("operationId", "startedAt", "finishedAt", "completedSets")
         else -> error("Unsupported routine-share request")
       }
     if (
@@ -96,9 +110,47 @@ class RoutineShareController(
       )
         bad("Некорректный запрос")
     }
+    if (type == SaveRoutineShareTrialRequest::class.java) {
+      if (
+        !root["startedAt"].isIntegralNumber ||
+          !root["finishedAt"].isIntegralNumber ||
+          !root["completedSets"].isArray ||
+          root["completedSets"].size() !in 1..200
+      )
+        bad("Некорректный запрос")
+      root["completedSets"].forEach { set ->
+        val fields =
+          setOf(
+            "exerciseIndex",
+            "setIndex",
+            "completedAt",
+            "weightKg",
+            "reps",
+            "durationSec",
+            "speedKmh",
+            "inclinePct",
+          )
+        if (
+          !set.isObject || set.properties().any { it.key !in fields } || fields.any { !set.has(it) }
+        )
+          bad("Некорректный запрос")
+        if (
+          !set["exerciseIndex"].isIntegralNumber ||
+            !set["setIndex"].isIntegralNumber ||
+            !set["completedAt"].isIntegralNumber ||
+            (!set["weightKg"].isNull && !set["weightKg"].isNumber) ||
+            (!set["reps"].isNull && !set["reps"].isIntegralNumber) ||
+            (!set["durationSec"].isNull && !set["durationSec"].isIntegralNumber) ||
+            (!set["speedKmh"].isNull && !set["speedKmh"].isNumber) ||
+            (!set["inclinePct"].isNull && !set["inclinePct"].isNumber)
+        )
+          bad("Некорректный запрос")
+      }
+    }
   }
 
   private companion object {
     const val maxRequestBytes = 16 * 1024
+    const val maxTrialRequestBytes = 64 * 1024
   }
 }

@@ -2,6 +2,7 @@ package tech.valerochkagym.controller.publicweb
 
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.servlet.http.HttpServletResponse
+import java.net.URI
 import org.springframework.http.MediaType
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.GetMapping
@@ -38,10 +39,16 @@ class RoutineSharePublicController(
     publicHeaders(response)
     limits.check("routine-share-preview:${request.remoteAddr}", 60)
     val preview = shares.preview(token)
-    return ResponseEntity.status(if (preview == null) 404 else 200)
+    if (preview != null) {
+      return ResponseEntity.status(302)
+        .location(URI.create("$browserOrigin/r/$token"))
+        .headers { publicHeaders(it) }
+        .body("")
+    }
+    return ResponseEntity.status(404)
       .contentType(MediaType.TEXT_HTML)
       .headers { publicHeaders(it) }
-      .body(if (preview == null) RoutineShareHtml.unavailable() else RoutineShareHtml.page(preview))
+      .body(RoutineShareHtml.unavailable())
   }
 
   private fun publicHeaders(response: HttpServletResponse) {
@@ -56,5 +63,9 @@ class RoutineSharePublicController(
     headers.set("Referrer-Policy", "no-referrer")
     headers.set("X-Robots-Tag", "noindex, nofollow")
     headers.set("Content-Security-Policy", RoutineShareHtml.contentSecurityPolicy)
+  }
+
+  private companion object {
+    const val browserOrigin = "https://app.valerochkagym.tech"
   }
 }

@@ -68,3 +68,6 @@ databaseChangeLog:
   - include:
       file: 023-coach-session-acknowledgements.sql
       relativeToChangelogFile: true
+  - include:
+      file: 024-routine-share-trial-results.sql
+      relativeToChangelogFile: true

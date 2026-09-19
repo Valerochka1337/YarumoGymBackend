@@ -16,15 +16,24 @@
 Публичный `GET /v1/routine-shares/preview/{token}` возвращает только
 `{title,estimatedDurationSeconds,exercises}`. У упражнения есть `{exerciseKey,name,type,sets,restSeconds}`;
 подход содержит только nullable `weightKg,reps,durationSec,speedKmh,inclinePct`. Ответ не раскрывает
-автора, исходную программу, зал, заметки, историю или профиль. `GET /r/{token}` выдаёт тот же allowlisted
-снимок как HTML со ссылкой на актуальный Android APK. Оба публичных ответа имеют `Cache-Control: no-store`,
-`Referrer-Policy: no-referrer` и `X-Robots-Tag: noindex, nofollow`.
+автора, исходную программу, зал, заметки, историю или профиль. Для активной ссылки `GET /r/{token}`
+отвечает `302 Location: https://app.valerochkagym.tech/r/{token}`; browser app загружает allowlisted
+preview через `/v1`, проводит локальную пробную тренировку и предлагает сохранить результаты после
+явной авторизации. Недоступная ссылка остаётся на API-origin и получает `404` HTML. Публичные ответы
+имеют `Cache-Control: no-store`, `Referrer-Policy: no-referrer` и
+`X-Robots-Tag: noindex, nofollow`.
 
 Получатель вызывает `POST /v1/routine-shares/preview/{token}/import` с `{operationId}`. Сервер создаёт
 независимую личную программу и возвращает `{routineId,revision,importedAt,alreadyImported}`. Повтор
 возвращает исходный receipt; после отзыва даже повтор импорта получает `404 share_unavailable`, а уже
 сохранённая копия остаётся у получателя. Стандартные упражнения сохраняют canonical UUID. Личное
 упражнение снимка получает отдельный UUID получателя и никогда не объединяется по имени.
+
+Browser trial сохраняет результаты bearer `POST /v1/routine-shares/preview/{token}/trial-results`
+с точной формой `{operationId,startedAt,finishedAt,completedSets}`. Факт подхода содержит только
+`exerciseIndex,setIndex,completedAt,weightKg,reps,durationSec,speedKmh,inclinePct`; индексы относятся
+к неизменяемому preview. Ответ `{routineId,workoutId,revision,savedAt,alreadySaved}` повторяется
+только для того же recipient, token и канонического тела; после отзыва ссылка всегда отвечает 404.
 
 ## Запись и повтор запросов
 
