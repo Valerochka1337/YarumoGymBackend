@@ -58,6 +58,12 @@ class InstallBrowserWebTest(unittest.TestCase):
         self.assertIn("npm run test:e2e", workflow)
         self.assertIn("name: browser-web-release", workflow)
         self.assertIn("browser-web-release/browser-web.tar.gz", workflow)
+        self.assertEqual(
+            2,
+            workflow.count(
+                "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
+            ),
+        )
         self.assertIn("scripts/install-browser-web.sh", workflow)
         self.assertNotIn("browser-web-nginx.conf", workflow)
         self.assertIn("restore_browser_web", deploy)
