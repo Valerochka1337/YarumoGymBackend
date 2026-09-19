@@ -33,7 +33,7 @@ class BearerFilter(
     if (
       request.dispatcherType == jakarta.servlet.DispatcherType.ASYNC &&
         (request.requestURI == "/v1/ai/coach-turn/stream" ||
-          request.requestURI.matches(Regex("/v1/coach/runs/[^/]+/events")))
+          request.requestURI.matches(Regex("/v1/coach/(runs|sessions)/[^/]+/events")))
     ) {
       val identity = request.getAttribute("coach.stream.identity")
       if (identity != null)
@@ -62,7 +62,7 @@ class BearerFilter(
           UsernamePasswordAuthenticationToken(identity, null, emptyList())
         if (
           (request.requestURI == "/v1/ai/coach-turn/stream" ||
-            request.requestURI.matches(Regex("/v1/coach/runs/[^/]+/events")))
+            request.requestURI.matches(Regex("/v1/coach/(runs|sessions)/[^/]+/events")))
         )
           request.setAttribute("coach.stream.identity", identity)
         limits.check("user:${identity.userId}", 300)

@@ -12,7 +12,86 @@ import tools.jackson.databind.JsonNode
 
 @RestController
 @RequestMapping("/v1/coach")
-class CoachRunController(private val runs: CoachRunService) {
+class CoachRunController(
+  private val runs: CoachRunService,
+  private val modelCheck: tech.valerochkagym.service.ai.CoachModelCheckService,
+) {
+  @PostMapping("/model-check")
+  fun modelCheck(@RequestBody raw: ByteArray): Map<String, Any> {
+    val body = runs.parse(raw)
+    val model = body["model"]
+    if (model != null && !model.isNull && !model.isString)
+      tech.valerochkagym.controller.advice.bad("Некорректная модель")
+    return modelCheck.check(model?.takeUnless { it.isNull }?.asString())
+  }
+
+  @PostMapping("/sessions/{workoutId}/messages")
+  fun message(
+    @AuthenticationPrincipal identity: Identity,
+    @PathVariable workoutId: UUID,
+    @RequestBody raw: ByteArray,
+  ): ResponseEntity<JsonNode> {
+    val result = runs.message(identity, workoutId, raw)
+    return ResponseEntity.accepted()
+      .header("Location", "/v1/coach/runs/${result["runId"].asString()}")
+      .header("Retry-After", "2")
+      .body(result)
+  }
+
+  @GetMapping("/sessions/{workoutId}/events", produces = ["text/event-stream"])
+  fun sessionEvents(
+    @AuthenticationPrincipal identity: Identity,
+    @PathVariable workoutId: UUID,
+    @RequestParam(defaultValue = "0") after: Long,
+    @RequestHeader(value = "Last-Event-ID", required = false) last: String?,
+    response: jakarta.servlet.http.HttpServletResponse,
+  ): SseEmitter {
+    runs.workoutEvents(identity, workoutId, after)
+    response.setHeader("Cache-Control", "no-store")
+    response.setHeader("X-Accel-Buffering", "no")
+    val emitter = SseEmitter(0L)
+    val stopped = AtomicBoolean()
+    val sender =
+      Thread.ofVirtual().unstarted {
+        try {
+          var cursor = maxOf(after, last?.toLongOrNull() ?: 0).coerceAtLeast(0)
+          var heartbeat = 0L
+          while (!stopped.get()) {
+            // Every read revalidates the login, including while the workout is idle.
+            val events = runs.workoutEvents(identity, workoutId, cursor)
+            for (event in events) {
+              emitter.send(
+                SseEmitter.event()
+                  .id(event["sequence"].asLong().toString())
+                  .name(event["type"].asString())
+                  .data(event)
+              )
+              cursor = event["sequence"].asLong()
+            }
+            if (System.nanoTime() - heartbeat >= 10_000_000_000L) {
+              emitter.send(SseEmitter.event().comment("heartbeat"))
+              heartbeat = System.nanoTime()
+            }
+            Thread.sleep(500)
+          }
+        } catch (_: Exception) {
+          // Replay is durable and independent of task execution.
+        } finally {
+          stopped.set(true)
+          emitter.complete()
+        }
+      }
+    fun stop() {
+      stopped.set(true)
+      sender.interrupt()
+    }
+    emitter.onCompletion(::stop)
+    emitter.onTimeout(::stop)
+    emitter.onError { stop() }
+    sender.start()
+    return emitter
+  }
+
   @PostMapping("/runs")
   fun submit(
     @AuthenticationPrincipal identity: Identity,
