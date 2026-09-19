@@ -29,7 +29,7 @@ class WebAuthController(
   private val google: GoogleVerifier,
   private val nonces: GoogleIdentity,
   private val limits: RateLimiter,
-  @Value("\${web.origin:https://app.valerochkagym.tech}") private val origin: String,
+  @Value("\${web.origin:https://api.valerochkagym.tech}") private val origin: String,
 ) {
   companion object {
     const val REFRESH = "__Host-yarumo-refresh"

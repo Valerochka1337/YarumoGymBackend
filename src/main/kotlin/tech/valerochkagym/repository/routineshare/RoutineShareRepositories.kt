@@ -51,5 +51,8 @@ interface RoutineShareOperationRepository :
 interface RoutineShareImportReceiptRepository :
   JpaRepository<RoutineShareImportReceiptEntity, RoutineShareImportReceiptId>
 
+interface RoutineShareTrialReceiptRepository :
+  JpaRepository<RoutineShareTrialReceiptEntity, RoutineShareTrialReceiptId>
+
 interface RoutineShareRevokeOperationRepository :
   JpaRepository<RoutineShareRevokeOperationEntity, RoutineShareRevokeOperationId>

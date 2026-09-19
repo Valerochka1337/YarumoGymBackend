@@ -20,6 +20,7 @@ import tech.valerochkagym.repository.routineshare.*
 import tech.valerochkagym.service.ai.PlannerDuration
 import tech.valerochkagym.service.data.RecordValidator
 import tech.valerochkagym.service.model.Identity
+import tech.valerochkagym.service.model.RecordKey
 import tech.valerochkagym.utils.Crypto
 import tools.jackson.databind.JsonNode
 import tools.jackson.databind.ObjectMapper
@@ -38,6 +39,7 @@ class RoutineShareService(
   private val sets: RoutineShareSetRepository,
   private val operations: RoutineShareOperationRepository,
   private val receipts: RoutineShareImportReceiptRepository,
+  private val trialReceipts: RoutineShareTrialReceiptRepository,
   private val revocations: RoutineShareRevokeOperationRepository,
   private val validator: RecordValidator,
   private val tx: TransactionTemplate,
@@ -258,6 +260,124 @@ class RoutineShareService(
     }!!
   }
 
+  /**
+   * Commits only server-reconstructed records. The browser supplies facts and snapshot array
+   * indices; it never supplies an exercise/routine/workout identity or a mutable plan.
+   */
+  fun saveTrial(
+    identity: Identity,
+    rawToken: String,
+    request: SaveRoutineShareTrialRequest,
+  ): RoutineShareTrialSaved {
+    val operation = uuid(request.operationId)
+    if (!rawToken.matches(tokenPattern)) unavailableShare()
+    return tx.execute {
+      catalog.readLock()
+      postgres.ensureHead(identity.userId)
+      val head = heads.writeLock(identity.userId)
+      val share = shares.tokenWriteLock(crypto.sha256(rawToken)) ?: unavailableShare()
+      requireSession(identity)
+      // This deliberately precedes receipt lookup: a revoked share cannot disclose a receipt.
+      if (share.revokedAt != null) unavailableShare()
+      val requestHash = crypto.sha256("${share.id}:${canonicalTrial(operation, request)}")
+      val prior =
+        trialReceipts.findById(RoutineShareTrialReceiptId(identity.userId, operation)).orElse(null)
+      if (prior != null) {
+        if (prior.shareId != share.id || prior.requestSha256 != requestHash)
+          conflict("operation_reused", "Операция уже использована")
+        return@execute prior.saved(true)
+      }
+      validateTrialEnvelope(request)
+      val rows = exercises.findByShareIdOrderByPositionAsc(share.id)
+      val snapshotSets = sets.findByShareIdOrderByExercisePositionAscSetPositionAsc(share.id)
+      validateStandards(rows)
+      val completed = validateTrialFacts(request, rows, snapshotSets)
+
+      val savedAt = now()
+      val revision = head.revision + 1
+      val customIds =
+        rows
+          .filter { it.standardExerciseId == null }
+          .distinctBy { it.exerciseKey }
+          .associate { it.exerciseKey to UUID.randomUUID() }
+      val customRecords =
+        rows
+          .filter { it.standardExerciseId == null }
+          .distinctBy { it.exerciseKey }
+          .map { row ->
+            val payload = customExercisePayload(row, savedAt)
+            validator.validate("exercise", payload)
+            Record("exercise", customIds.getValue(row.exerciseKey), revision, false, payload)
+          }
+      val routineId = UUID.randomUUID()
+      val workoutId = UUID.randomUUID()
+      val routine = trialRoutinePayload(share, rows, snapshotSets, customIds, savedAt)
+      val workout =
+        trialWorkoutPayload(share, rows, snapshotSets, completed, customIds, routineId, request)
+      validator.validate("routine", routine)
+      validator.validate("workout", workout)
+      val generated =
+        customRecords +
+          listOf(
+            Record("routine", routineId, revision, false, routine),
+            Record("workout", workoutId, revision, false, workout),
+          )
+      val existing =
+        records.findByUserIdOrderByKindAscIdAsc(identity.userId).associate {
+          RecordKey(it.kind, it.id) to
+            Record(it.kind, it.id, it.revision, it.deleted, it.payload?.let(json::readTree))
+        }
+      val commonRows = standard.findAllByOrderByKindAscIdAsc()
+      val common =
+        commonRows.associate {
+          RecordKey(it.kind, it.id) to
+            Record(it.kind, it.id, it.revision, false, json.readTree(it.payload))
+        }
+      val next = existing + generated.associateBy { RecordKey(it.kind, it.id) }
+      if (
+        next.size > maxAccountRecords ||
+          next.values.sumOf { it.payload?.toString()?.toByteArray()?.size?.toLong() ?: 0L } >
+            maxAccountBytes
+      )
+        conflict("account_limit", "Превышен лимит аккаунта")
+      val changed = generated.map { RecordKey(it.kind, it.id) }.toSet()
+      validator.references(next + common, changed, existing)
+      validator.archivedReferences(
+        next + common,
+        existing,
+        commonRows.filter { it.archived }.map { RecordKey(it.kind, it.id) }.toSet(),
+      )
+      generated.forEach {
+        records.save(
+          RecordEntity(
+            identity.userId,
+            it.kind,
+            it.id,
+            revision,
+            false,
+            json.writeValueAsString(it.payload),
+          )
+        )
+      }
+      head.revision = revision
+      // Trial sets always receive syncId, which requires a v3-capable regular sync client.
+      head.minSyncVersion = maxOf(head.minSyncVersion, 3)
+      val receipt =
+        RoutineShareTrialReceiptEntity(
+          identity.userId,
+          operation,
+          share.id,
+          requestHash,
+          routineId,
+          workoutId,
+          revision,
+          savedAt,
+        )
+      trialReceipts.save(receipt)
+      receipt.saved(false)
+    }!!
+  }
+
   private fun created(share: RoutineShareEntity, operation: UUID) =
     RoutineShareCreated(
       share.id,
@@ -399,6 +519,200 @@ class RoutineShareService(
     return root
   }
 
+  private fun trialRoutinePayload(
+    share: RoutineShareEntity,
+    rows: List<RoutineShareExerciseEntity>,
+    allSets: List<RoutineShareSetEntity>,
+    customIds: Map<UUID, UUID>,
+    savedAt: Instant,
+  ): JsonNode {
+    val root = JsonNodeFactory.instance.objectNode()
+    root.put("name", share.title)
+    root.put("note", "")
+    root.put("updatedAt", savedAt.toEpochMilli())
+    root.putArray("gymIds")
+    val grouped = allSets.groupBy { it.exercisePosition }
+    val target = root.putArray("exercises")
+    rows.forEach { row ->
+      target.addObject().apply {
+        put(
+          "exerciseId",
+          (row.standardExerciseId ?: customIds.getValue(row.exerciseKey)).toString(),
+        )
+        put("position", row.position)
+        put("restSeconds", row.restSeconds)
+        val plans = putArray("plannedSets")
+        grouped[row.position].orEmpty().forEach { plan ->
+          plans.addObject().apply {
+            nullable("weightKg", plan.weightKg)
+            nullable("reps", plan.reps)
+            nullable("durationSec", plan.durationSec)
+            nullable("speedKmh", plan.speedKmh)
+            nullable("inclinePct", plan.inclinePct)
+          }
+        }
+      }
+    }
+    return root
+  }
+
+  private fun trialWorkoutPayload(
+    share: RoutineShareEntity,
+    rows: List<RoutineShareExerciseEntity>,
+    allSets: List<RoutineShareSetEntity>,
+    completed: Map<Pair<Int, Int>, RoutineShareTrialSet>,
+    customIds: Map<UUID, UUID>,
+    routineId: UUID,
+    request: SaveRoutineShareTrialRequest,
+  ): JsonNode {
+    val root = JsonNodeFactory.instance.objectNode()
+    root.put("name", share.title)
+    root.put("note", "")
+    root.put("routineId", routineId.toString())
+    root.put("startedAt", request.startedAt)
+    root.put("finishedAt", request.finishedAt)
+    root.putArray("gymIds")
+    root.put("coachRevision", 0)
+    val sections = root.putArray("exercises")
+    rows.forEach { row ->
+      val facts =
+        allSets
+          .filter { it.exercisePosition == row.position }
+          .mapNotNull { plan -> completed[row.position to plan.setPosition]?.let { plan to it } }
+      if (facts.isNotEmpty()) {
+        sections.addObject().apply {
+          put("sectionId", UUID.randomUUID().toString())
+          put(
+            "exerciseId",
+            (row.standardExerciseId ?: customIds.getValue(row.exerciseKey)).toString(),
+          )
+          put("position", row.position)
+          val setNodes = putArray("sets")
+          facts.forEach { (plan, fact) ->
+            setNodes.addObject().apply {
+              nullable("weightKg", fact.weightKg)
+              nullable("reps", fact.reps)
+              nullable("durationSec", fact.durationSec)
+              nullable("speedKmh", fact.speedKmh)
+              nullable("inclinePct", fact.inclinePct)
+              put("setIndex", plan.setPosition)
+              put("isCompleted", true)
+              put("completedAt", fact.completedAt)
+              put("note", "")
+              put("syncId", UUID.randomUUID().toString())
+              nullable("originalWeightKg", plan.weightKg)
+              nullable("originalReps", plan.reps)
+              nullable("originalDurationSec", plan.durationSec)
+              nullable("originalSpeedKmh", plan.speedKmh)
+              nullable("originalInclinePct", plan.inclinePct)
+              nullable("targetWeightKg", plan.weightKg)
+              nullable("targetReps", plan.reps)
+              nullable("targetDurationSec", plan.durationSec)
+              nullable("targetSpeedKmh", plan.speedKmh)
+              nullable("targetInclinePct", plan.inclinePct)
+              nullable("actualWeightKg", fact.weightKg)
+              nullable("actualReps", fact.reps)
+              nullable("actualDurationSec", fact.durationSec)
+              nullable("actualSpeedKmh", fact.speedKmh)
+              nullable("actualInclinePct", fact.inclinePct)
+              put(
+                "setType",
+                when (row.type) {
+                  "STRENGTH" -> "WORK"
+                  else -> row.type
+                },
+              )
+              put("reportedFeelingsJson", "[]")
+              putNull("restSnapshotJson")
+              put("coachMutationRevision", 0)
+            }
+          }
+        }
+      }
+    }
+    return root
+  }
+
+  private fun validateTrialEnvelope(request: SaveRoutineShareTrialRequest) {
+    if (request.startedAt < 0 || request.finishedAt < request.startedAt) bad("Некорректное время")
+    if (request.completedSets.size !in 1..maxTrialSets) bad("Некорректные результаты")
+  }
+
+  private fun validateTrialFacts(
+    request: SaveRoutineShareTrialRequest,
+    rows: List<RoutineShareExerciseEntity>,
+    snapshotSets: List<RoutineShareSetEntity>,
+  ): Map<Pair<Int, Int>, RoutineShareTrialSet> {
+    val rowByPosition = rows.associateBy { it.position }
+    val plans = snapshotSets.associateBy { it.exercisePosition to it.setPosition }
+    if (rows.map { it.position } != rows.indices.toList()) unavailableShare()
+    val result = linkedMapOf<Pair<Int, Int>, RoutineShareTrialSet>()
+    request.completedSets.forEach { fact ->
+      val key = fact.exerciseIndex to fact.setIndex
+      val row = rowByPosition[fact.exerciseIndex] ?: bad("Подход отсутствует в программе")
+      if (plans[key] == null || result.put(key, fact) != null) bad("Некорректный подход")
+      if (fact.completedAt !in request.startedAt..request.finishedAt) bad("Некорректное время")
+      validateTrialNumbers(row.type, fact)
+    }
+    return result
+  }
+
+  private fun validateTrialNumbers(type: String, fact: RoutineShareTrialSet) {
+    fun valid(value: Double?, min: Double = 0.0) =
+      value != null && value.isFinite() && value in min..1_000_000.0
+    fun integer(value: Int?) = value != null && value in 0..1_000_000
+    val validType =
+      when (type) {
+        "STRENGTH" ->
+          valid(fact.weightKg) &&
+            integer(fact.reps) &&
+            fact.durationSec == null &&
+            fact.speedKmh == null &&
+            fact.inclinePct == null
+        "TIMED" ->
+          integer(fact.durationSec) &&
+            fact.weightKg == null &&
+            fact.reps == null &&
+            fact.speedKmh == null &&
+            fact.inclinePct == null
+        "CARDIO" ->
+          integer(fact.durationSec) &&
+            fact.weightKg == null &&
+            fact.reps == null &&
+            (fact.speedKmh == null || valid(fact.speedKmh)) &&
+            (fact.inclinePct == null || valid(fact.inclinePct, -100.0))
+        else -> false
+      }
+    if (!validType) bad("Некорректные фактические значения")
+  }
+
+  private fun canonicalTrial(operation: UUID, request: SaveRoutineShareTrialRequest): String =
+    json.writeValueAsString(
+      linkedMapOf(
+        "operationId" to operation.toString(),
+        "startedAt" to request.startedAt,
+        "finishedAt" to request.finishedAt,
+        "completedSets" to
+          request.completedSets
+            .sortedWith(compareBy<RoutineShareTrialSet> { it.exerciseIndex }.thenBy { it.setIndex })
+            .map {
+              linkedMapOf(
+                "exerciseIndex" to it.exerciseIndex,
+                "setIndex" to it.setIndex,
+                "completedAt" to it.completedAt,
+                "weightKg" to it.weightKg,
+                "reps" to it.reps,
+                "durationSec" to it.durationSec,
+                "speedKmh" to it.speedKmh,
+                "inclinePct" to it.inclinePct,
+              )
+            },
+      )
+    )
+
+  private fun RoutineShareTrialReceiptEntity.saved(alreadySaved: Boolean) =
+    RoutineShareTrialSaved(routineId, workoutId, revision, savedAt.toEpochMilli(), alreadySaved)
+
   private fun customExercisePayload(
     row: RoutineShareExerciseEntity,
     importedAt: Instant,
@@ -484,6 +798,9 @@ class RoutineShareService(
 
   private companion object {
     const val maxActiveShares = 50
+    const val maxTrialSets = 200
+    const val maxAccountRecords = 20_000
+    const val maxAccountBytes = 16L * 1024 * 1024
     const val publicOrigin = "https://api.valerochkagym.tech"
     val tokenPattern = Regex("[A-Za-z0-9_-]{43}")
     val muscleGroups =
