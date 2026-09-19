@@ -11,6 +11,8 @@ interface CalendarAiExecutionHooks {
   fun beforeFinalLock() = Unit
 
   fun beforeProposalInsert() = Unit
+
+  fun beforeRefinementCommit() = Unit
 }
 
 @Component class NoopCalendarAiExecutionHooks : CalendarAiExecutionHooks

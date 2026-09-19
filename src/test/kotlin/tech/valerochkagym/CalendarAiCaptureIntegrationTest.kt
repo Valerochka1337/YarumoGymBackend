@@ -8,6 +8,7 @@ import java.time.Instant
 import java.time.ZoneOffset
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
 import org.junit.jupiter.api.AfterEach
@@ -84,6 +85,7 @@ class CalendarAiCaptureIntegrationTest {
     var finalLock: Gate? = null
     var proposalInsert: Gate? = null
     var failProposalInsert = false
+    var beforeRefinementCommit: (() -> Unit)? = null
 
     override fun afterReserve() {
       afterReserve?.invoke()
@@ -100,6 +102,10 @@ class CalendarAiCaptureIntegrationTest {
     override fun beforeProposalInsert() {
       if (failProposalInsert) error("database barrier failure")
       proposalInsert?.await()
+    }
+
+    override fun beforeRefinementCommit() {
+      beforeRefinementCommit?.invoke()
     }
   }
 
@@ -159,6 +165,7 @@ class CalendarAiCaptureIntegrationTest {
     hooks.finalLock = null
     hooks.proposalInsert = null
     hooks.failProposalInsert = false
+    hooks.beforeRefinementCommit = null
     hooks.afterReserve = null
     hooks.afterCapture = null
   }
@@ -981,6 +988,175 @@ class CalendarAiCaptureIntegrationTest {
     assertEquals(0, db.queryForObject("SELECT count(*) FROM calendar_ai_attempts", Int::class.java))
   }
 
+  @Test
+  fun `concurrent first refinement claim binds one proposal before provider work`() {
+    val owner = owner()
+    val focus = exercise(owner)
+    val accessory = exercise(owner)
+    allowRefinementCandidates(owner, focus, accessory)
+    val first = refinableProposal(owner, focus)
+    val second = refinableProposal(owner, focus)
+    val request = refinementRequest(UUID.randomUUID())
+    val providerGate = Gate()
+    provider.handler = {
+      providerGate.await()
+      refinedProviderResponse(focus, accessory)
+    }
+    val start = CountDownLatch(1)
+    val pool = Executors.newFixedThreadPool(2)
+    try {
+      val outcomes =
+        listOf(first.proposalId, second.proposalId).map { proposalId ->
+          pool.submit<String> {
+            start.await(5, TimeUnit.SECONDS)
+            runCatching { actions.refineCalendar(owner, proposalId, request) }
+              .fold({ "success:${it.proposalId}" }, { "error:${(it as ApiException).code}" })
+          }
+        }
+      start.countDown()
+      assertTrue(providerGate.reached.await(5, TimeUnit.SECONDS))
+      providerGate.open()
+
+      val result = outcomes.map { it.get(10, TimeUnit.SECONDS) }
+      assertEquals(1, result.count { it.startsWith("success:") })
+      assertEquals(1, result.count { it == "error:ai_request_conflict" })
+      assertEquals(1, provider.calls)
+      assertEquals(
+        1,
+        db.queryForObject(
+          "SELECT count(*) FROM calendar_planner_refinements WHERE owner_id=? AND request_id=?",
+          Int::class.java,
+          owner.userId,
+          UUID.fromString(json.readTree(request)["requestId"].asString()),
+        ),
+      )
+    } finally {
+      pool.shutdownNow()
+    }
+  }
+
+  @Test
+  fun `failed refinement keeps raw receipt binding terminal without another provider call`() {
+    val owner = owner()
+    val focus = exercise(owner)
+    allowRefinementCandidates(owner, focus)
+    val proposal = refinableProposal(owner, focus)
+    val request = refinementRequest(UUID.randomUUID())
+    provider.handler = { throw aiError("ai_invalid_response") }
+
+    assertEquals(
+      "ai_invalid_response",
+      assertThrows<ApiException> { actions.refineCalendar(owner, proposal.proposalId, request) }
+        .code,
+    )
+    assertEquals(1, provider.calls)
+    provider.calls = 0
+
+    assertEquals(
+      "ai_interrupted",
+      assertThrows<ApiException> { actions.refineCalendar(owner, proposal.proposalId, request) }
+        .code,
+    )
+    assertEquals(0, provider.calls)
+
+    val rebound = json.readTree(request) as ObjectNode
+    rebound.put("refinement", "Другой текст")
+    assertEquals(
+      "ai_request_conflict",
+      assertThrows<ApiException> {
+          actions.refineCalendar(owner, proposal.proposalId, json.writeValueAsBytes(rebound))
+        }
+        .code,
+    )
+    assertEquals(0, provider.calls)
+    assertEquals(
+      1,
+      db.queryForObject(
+        "SELECT count(*) FROM calendar_planner_refinements WHERE owner_id=? AND request_id=?",
+        Int::class.java,
+        owner.userId,
+        UUID.fromString(json.readTree(request)["requestId"].asString()),
+      ),
+    )
+  }
+
+  @Test
+  fun `refinement provider deadline crossing writes no version or success receipt`() {
+    val owner = owner()
+    val focus = exercise(owner)
+    val accessory = exercise(owner)
+    allowRefinementCandidates(owner, focus, accessory)
+    val proposal = refinableProposal(owner, focus)
+    val request = refinementRequest(UUID.randomUUID())
+    provider.handler = {
+      testClock.currentTime += 45_000
+      refinedProviderResponse(focus, accessory)
+    }
+
+    assertEquals(
+      "ai_timeout",
+      assertThrows<ApiException> { actions.refineCalendar(owner, proposal.proposalId, request) }
+        .code,
+    )
+    assertEquals(1, provider.calls)
+    assertEquals(
+      1,
+      db.queryForObject(
+        "SELECT count(*) FROM training_proposal_versions WHERE proposal_id=?",
+        Int::class.java,
+        proposal.proposalId,
+      ),
+    )
+    assertEquals(
+      0,
+      db.queryForObject(
+        "SELECT count(*) FROM calendar_planner_refinements WHERE receipt IS NOT NULL",
+        Int::class.java,
+      ),
+    )
+    provider.calls = 0
+    assertEquals(
+      "ai_interrupted",
+      assertThrows<ApiException> { actions.refineCalendar(owner, proposal.proposalId, request) }
+        .code,
+    )
+    assertEquals(0, provider.calls)
+  }
+
+  @Test
+  fun `refinement commit fence rejects a lease that expires after provider validation`() {
+    val owner = owner()
+    val focus = exercise(owner)
+    val accessory = exercise(owner)
+    allowRefinementCandidates(owner, focus, accessory)
+    val proposal = refinableProposal(owner, focus)
+    val request = refinementRequest(UUID.randomUUID())
+    provider.handler = { refinedProviderResponse(focus, accessory) }
+    hooks.beforeRefinementCommit = { testClock.currentTime += 45_000 }
+
+    assertEquals(
+      "ai_interrupted",
+      assertThrows<ApiException> { actions.refineCalendar(owner, proposal.proposalId, request) }
+        .code,
+    )
+    assertEquals(1, provider.calls)
+    assertEquals(
+      1,
+      db.queryForObject(
+        "SELECT count(*) FROM training_proposal_versions WHERE proposal_id=?",
+        Int::class.java,
+        proposal.proposalId,
+      ),
+    )
+    assertEquals(
+      0,
+      db.queryForObject(
+        "SELECT count(*) FROM calendar_planner_refinements WHERE receipt IS NOT NULL",
+        Int::class.java,
+      ),
+    )
+  }
+
   private fun owner(): Identity {
     val owner = UUID.randomUUID()
     val session = UUID.randomUUID()
@@ -1151,6 +1327,49 @@ class CalendarAiCaptureIntegrationTest {
       db.queryForObject("SELECT state FROM calendar_ai_attempts", String::class.java),
     )
     assertEquals(0, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
+  }
+
+  @Test
+  fun `v2 replay returns the committed frozen projection without another provider turn`() {
+    val owner = owner()
+    val exercise = exercise(owner)
+    record(
+      owner,
+      "planner_exercise_preferences",
+      UUID.randomUUID(),
+      mapOf(
+        "preferences" to listOf(mapOf("exerciseId" to exercise.toString(), "preference" to "MORE"))
+      ),
+    )
+    val raw = rawRequest()
+    provider.handler = { input ->
+      // The agentic serializer must not reuse v1's measurement/notes-shaped context.
+      assertFalse(input.context.contains("\"mass\""))
+      assertFalse(input.context.contains("\"notes\""))
+      json.valueToTree(
+        mapOf(
+          "result" to
+            mapOf(
+              "name" to "Frozen v2 draft",
+              "exercises" to
+                listOf(
+                  mapOf(
+                    "exerciseId" to exercise.toString(),
+                    "restSeconds" to 240,
+                    "plannedSets" to List(10) { mapOf("reps" to 8, "durationSec" to null) },
+                  )
+                ),
+            )
+        )
+      )
+    }
+    val first = actions.calendarV2(owner, raw)
+    val replay = actions.calendarV2(owner, raw)
+    assertEquals(first, replay)
+    assertEquals(1, provider.calls)
+    val persisted =
+      db.queryForObject("SELECT v2_receipt::text FROM calendar_ai_attempts", String::class.java)!!
+    assertEquals(json.readTree(json.writeValueAsString(first)), json.readTree(persisted))
   }
 
   @Test
@@ -1658,6 +1877,73 @@ class CalendarAiCaptureIntegrationTest {
         "availableDurationMinutes" to 45,
         "currentState" to null,
         "preferences" to null,
+      )
+    )
+
+  private fun refinementRequest(requestId: UUID) =
+    json.writeValueAsBytes(
+      linkedMapOf(
+        "requestId" to requestId.toString(),
+        "expectedRevision" to 17,
+        "expectedCatalogRevision" to 9,
+        "expectedProposalVersion" to 1,
+        "refinement" to "Больше отдыха",
+      )
+    )
+
+  private fun refinableProposal(
+    owner: Identity,
+    focus: UUID,
+  ): tech.valerochkagym.controller.model.ProposalResponse {
+    return proposals.createCalendarInternalAi(
+      owner,
+      17,
+      9,
+      tech.valerochkagym.controller.model.ApprovalDraft(
+        "Original draft",
+        emptyList(),
+        listOf(
+          tech.valerochkagym.controller.model.PlannedExercise(
+            focus.toString(),
+            0,
+            listOf(tech.valerochkagym.controller.model.PlannedSet(null, 8, null, null, null)),
+          )
+        ),
+        capturedAt + 3_600_000,
+        "America/New_York",
+      ),
+    )
+  }
+
+  private fun allowRefinementCandidates(owner: Identity, vararg exercises: UUID) {
+    record(
+      owner,
+      "planner_exercise_preferences",
+      UUID.randomUUID(),
+      mapOf(
+        "preferences" to
+          exercises.map { exerciseId ->
+            mapOf("exerciseId" to exerciseId.toString(), "preference" to "MORE")
+          }
+      ),
+    )
+  }
+
+  private fun refinedProviderResponse(focus: UUID, accessory: UUID) =
+    json.valueToTree<JsonNode>(
+      mapOf(
+        "result" to
+          mapOf(
+            "name" to "Refined draft",
+            "exercises" to
+              listOf(focus, accessory).map { exerciseId ->
+                mapOf(
+                  "exerciseId" to exerciseId.toString(),
+                  "restSeconds" to 800,
+                  "plannedSets" to List(8) { mapOf("reps" to 8, "durationSec" to null) },
+                )
+              },
+          )
       )
     )
 

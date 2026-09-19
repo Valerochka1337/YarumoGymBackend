@@ -69,5 +69,17 @@ databaseChangeLog:
       file: 023-coach-session-acknowledgements.sql
       relativeToChangelogFile: true
   - include:
-      file: 024-routine-share-trial-results.sql
+      file: 024-planner-exercise-preferences.sql
+      relativeToChangelogFile: true
+  - include:
+      file: 025-calendar-planner-refinements.sql
+      relativeToChangelogFile: true
+  - include:
+      file: 026-calendar-ai-v2-receipts.sql
+      relativeToChangelogFile: true
+  - include:
+      file: 027-calendar-refinement-leases.sql
+      relativeToChangelogFile: true
+  - include:
+      file: 028-routine-share-trial-results.sql
       relativeToChangelogFile: true

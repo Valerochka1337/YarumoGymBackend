@@ -1,0 +1,141 @@
+package tech.valerochkagym.service.ai
+
+import java.util.UUID
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Test
+import tools.jackson.databind.json.JsonMapper
+
+class AgenticPlannerPolicyTest {
+  private val json = JsonMapper.builder().build()
+  private val standard = StrengthPlannerFacts.compoundSeedIds.first()
+  private val custom = UUID(0, 2).toString()
+  private val explicit = UUID(0, 3).toString()
+
+  private fun row(id: String) = mapOf<String, Any>("exerciseId" to id, "type" to "STRENGTH")
+
+  @Test
+  fun `only curated canonical IDs are default candidates and never remains absolute`() {
+    val sources =
+      mapOf(
+        standard to CalendarCandidateSource(standard, json.readTree("{}"), curatedCanonical = true),
+        custom to CalendarCandidateSource(custom, json.readTree("{\"isCustom\":true}")),
+        explicit to
+          CalendarCandidateSource(
+            explicit,
+            json.readTree("{\"movementFamily\":\"PLYOMETRIC\"}"),
+            curatedCanonical = true,
+          ),
+      )
+    val selected =
+      AgenticPlannerPolicy.select(
+        listOf(row(standard), row(custom), row(explicit)),
+        emptyMap(),
+        mapOf(custom to "MORE", explicit to "NEVER"),
+        emptyList(),
+        sources,
+      )
+    assertEquals(listOf(custom, standard), selected.map { it.getValue("exerciseId") })
+  }
+
+  @Test
+  fun `explicit only custom and less exercises require a saved signal or history`() {
+    val sources =
+      mapOf(
+        custom to CalendarCandidateSource(custom, json.readTree("{\"isCustom\":true}")),
+        explicit to
+          CalendarCandidateSource(
+            explicit,
+            json.readTree("{\"plannerCategory\":\"EXPLICIT_ONLY\"}"),
+            curatedCanonical = true,
+          ),
+      )
+    assertEquals(
+      emptyList<Map<String, Any>>(),
+      AgenticPlannerPolicy.select(
+        listOf(row(custom), row(explicit)),
+        emptyMap(),
+        mapOf(custom to "LESS"),
+        emptyList(),
+        sources,
+      ),
+    )
+    val history =
+      listOf(
+        CalendarFact(
+          explicit,
+          1,
+          UUID(0, 9).toString(),
+          UUID(0, 10).toString(),
+          0,
+          false,
+          null,
+          null,
+        )
+      )
+    assertEquals(
+      listOf(explicit),
+      AgenticPlannerPolicy.select(
+          listOf(row(custom), row(explicit)),
+          emptyMap(),
+          mapOf(custom to "LESS"),
+          history,
+          sources,
+        )
+        .map { it.getValue("exerciseId") },
+    )
+  }
+
+  @Test
+  fun `less does not fill a sufficient skeleton pool but is admitted as the only fallback`() {
+    val fallback = UUID(0, 4).toString()
+    val sources =
+      mapOf(
+        standard to CalendarCandidateSource(standard, json.readTree("{}"), curatedCanonical = true),
+        fallback to CalendarCandidateSource(fallback, json.readTree("{\"isCustom\":true}")),
+      )
+    assertEquals(
+      listOf(standard),
+      AgenticPlannerPolicy.select(
+          listOf(row(standard), row(fallback)),
+          emptyMap(),
+          mapOf(fallback to "LESS"),
+          listOf(
+            CalendarFact(
+              fallback,
+              1,
+              UUID(0, 9).toString(),
+              UUID(0, 10).toString(),
+              0,
+              false,
+              null,
+              null,
+            )
+          ),
+          sources,
+        )
+        .map { it.getValue("exerciseId") },
+    )
+    assertEquals(
+      listOf(fallback),
+      AgenticPlannerPolicy.select(
+          listOf(row(fallback)),
+          emptyMap(),
+          mapOf(fallback to "LESS"),
+          listOf(
+            CalendarFact(
+              fallback,
+              1,
+              UUID(0, 9).toString(),
+              UUID(0, 10).toString(),
+              0,
+              false,
+              null,
+              null,
+            )
+          ),
+          sources,
+        )
+        .map { it.getValue("exerciseId") },
+    )
+  }
+}

@@ -40,4 +40,5 @@ class CalendarAiAttemptEntity(
   var terminalStatus: Int? = null,
   var terminalCode: String? = null,
   @JdbcTypeCode(SqlTypes.JSON) @Column(columnDefinition = "jsonb") var receipt: String? = null,
+  @JdbcTypeCode(SqlTypes.JSON) @Column(columnDefinition = "jsonb") var v2Receipt: String? = null,
 )

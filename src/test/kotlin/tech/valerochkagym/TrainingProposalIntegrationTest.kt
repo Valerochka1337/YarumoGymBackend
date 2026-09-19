@@ -28,6 +28,7 @@ import tech.valerochkagym.service.ai.InternalAiProposalRequest
 import tech.valerochkagym.service.ai.TrainingProposalAiCreator
 import tech.valerochkagym.service.auth.AuthService
 import tech.valerochkagym.service.model.Identity
+import tech.valerochkagym.service.trainingproposal.TrainingProposalService
 import tech.valerochkagym.utils.Crypto
 import tools.jackson.databind.ObjectMapper
 
@@ -59,6 +60,7 @@ class TrainingProposalIntegrationTest {
   @Autowired lateinit var json: ObjectMapper
   @Autowired lateinit var crypto: Crypto
   @Autowired lateinit var ai: TrainingProposalAiCreator
+  @Autowired lateinit var proposals: TrainingProposalService
   @Autowired lateinit var auth: AuthService
   @LocalServerPort var port = 0
   private val client = HttpClient.newHttpClient()
@@ -133,6 +135,206 @@ class TrainingProposalIntegrationTest {
         owner.id,
       ),
     )
+  }
+
+  @Test
+  fun `refinement receipt replays one changed next version and rejects rebound request bytes`() {
+    val owner = owner()
+    val proposal = proposal(owner)
+    val identity = Identity(owner.id, owner.session, "${owner.id}@example.com")
+    val requestId = UUID.randomUUID()
+    val raw = "{\"requestId\":\"$requestId\",\"refinement\":\"Больше отдыха\"}".encodeToByteArray()
+    val changed = draft(owner).copy(name = "План с отдыхом")
+    val first =
+      proposals.refineInternalAi(
+        identity,
+        proposal.proposalId,
+        1,
+        0,
+        0,
+        requestId,
+        raw,
+        sha256(raw),
+        changed,
+      )
+    assertEquals(2, first.currentVersion)
+    assertEquals("План с отдыхом", first.snapshot.draft.name)
+    val replay =
+      proposals.refineInternalAi(
+        identity,
+        proposal.proposalId,
+        1,
+        0,
+        0,
+        requestId,
+        raw,
+        sha256(raw),
+        changed,
+      )
+    assertEquals(first, replay)
+    val rebound = raw + byteArrayOf(0x20)
+    val error =
+      assertThrows<tech.valerochkagym.controller.advice.ApiException> {
+        proposals.refineInternalAi(
+          identity,
+          proposal.proposalId,
+          1,
+          0,
+          0,
+          requestId,
+          rebound,
+          sha256(rebound),
+          changed,
+        )
+      }
+    assertEquals("ai_request_conflict", error.code)
+    assertEquals(
+      2,
+      db.queryForObject(
+        "SELECT current_version FROM training_proposals WHERE id=?",
+        Int::class.java,
+        proposal.proposalId,
+      ),
+    )
+    assertEquals(
+      0,
+      db.queryForObject(
+        "SELECT count(*) FROM records WHERE user_id=? AND kind IN ('routine','calendar_plan')",
+        Int::class.java,
+        owner.id,
+      ),
+    )
+  }
+
+  @Test
+  fun `concurrent refinement versions create exactly one next version`() {
+    val owner = owner()
+    val proposal = proposal(owner)
+    val identity = Identity(owner.id, owner.session, "${owner.id}@example.com")
+    val start = CountDownLatch(1)
+    val pool = Executors.newFixedThreadPool(2)
+    try {
+      val outcomes =
+        (1..2).map { index ->
+          pool.submit<String> {
+            start.await(5, TimeUnit.SECONDS)
+            val requestId = UUID.randomUUID()
+            val raw =
+              "{\"requestId\":\"$requestId\",\"refinement\":\"Вариант $index\"}".encodeToByteArray()
+            runCatching {
+                proposals.refineInternalAi(
+                  identity,
+                  proposal.proposalId,
+                  1,
+                  0,
+                  0,
+                  requestId,
+                  raw,
+                  sha256(raw),
+                  draft(owner).copy(name = "План $index"),
+                )
+              }
+              .fold(
+                { "version:${it.currentVersion}" },
+                { "error:${(it as tech.valerochkagym.controller.advice.ApiException).code}" },
+              )
+          }
+        }
+      start.countDown()
+      val results = outcomes.map { it.get(10, TimeUnit.SECONDS) }.toSet()
+      assertEquals(setOf("version:2", "error:proposal_version_conflict"), results)
+      assertEquals(
+        2,
+        db.queryForObject(
+          "SELECT current_version FROM training_proposals WHERE id=?",
+          Int::class.java,
+          proposal.proposalId,
+        ),
+      )
+      assertEquals(
+        2,
+        db.queryForObject(
+          "SELECT count(*) FROM training_proposal_versions WHERE proposal_id=?",
+          Int::class.java,
+          proposal.proposalId,
+        ),
+      )
+      assertEquals(
+        0,
+        db.queryForObject(
+          "SELECT count(*) FROM records WHERE user_id=? AND kind IN ('routine','calendar_plan')",
+          Int::class.java,
+          owner.id,
+        ),
+      )
+    } finally {
+      pool.shutdownNow()
+    }
+  }
+
+  @Test
+  fun `same refinement request cannot bind a different proposal during contention`() {
+    val owner = owner()
+    val first = proposal(owner)
+    val second = proposal(owner)
+    val identity = Identity(owner.id, owner.session, "${owner.id}@example.com")
+    val requestId = UUID.randomUUID()
+    val raw = "{\"requestId\":\"$requestId\",\"refinement\":\"Больше отдыха\"}".encodeToByteArray()
+    val start = CountDownLatch(1)
+    val pool = Executors.newFixedThreadPool(2)
+    try {
+      val outcomes =
+        listOf(first, second).map { target ->
+          pool.submit<String> {
+            start.await(5, TimeUnit.SECONDS)
+            runCatching {
+                proposals.refineInternalAi(
+                  identity,
+                  target.proposalId,
+                  1,
+                  0,
+                  0,
+                  requestId,
+                  raw,
+                  sha256(raw),
+                  draft(owner),
+                )
+              }
+              .fold(
+                { "version:${it.currentVersion}" },
+                { "error:${(it as tech.valerochkagym.controller.advice.ApiException).code}" },
+              )
+          }
+        }
+      start.countDown()
+      assertEquals(
+        setOf("version:2", "error:ai_request_conflict"),
+        outcomes.map { it.get(10, TimeUnit.SECONDS) }.toSet(),
+      )
+      val totalVersions =
+        (db.queryForObject(
+          "SELECT current_version FROM training_proposals WHERE id=?",
+          Int::class.java,
+          first.proposalId,
+        ) ?: 0) +
+          (db.queryForObject(
+            "SELECT current_version FROM training_proposals WHERE id=?",
+            Int::class.java,
+            second.proposalId,
+          ) ?: 0)
+      assertEquals(3, totalVersions)
+      assertEquals(
+        1,
+        db.queryForObject(
+          "SELECT count(*) FROM calendar_planner_refinements WHERE owner_id=? AND request_id=?",
+          Int::class.java,
+          owner.id,
+          requestId,
+        ),
+      )
+    } finally {
+      pool.shutdownNow()
+    }
   }
 
   @Test
@@ -1036,6 +1238,7 @@ class TrainingProposalIntegrationTest {
       exercise,
       json.writeValueAsString(exercise()),
     )
+    db.update("UPDATE catalog_state SET active=true")
     db.update(
       "INSERT INTO records(user_id,kind,id,revision,deleted,payload) VALUES (?,'gym',?,0,false,?::jsonb)",
       id,

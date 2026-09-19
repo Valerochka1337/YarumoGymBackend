@@ -1,6 +1,6 @@
 --liquibase formatted sql
 
---changeset codex:024-routine-share-trial-results
+--changeset codex:028-routine-share-trial-results
 CREATE TABLE routine_share_trial_receipts (
     recipient_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     operation_id UUID NOT NULL,
