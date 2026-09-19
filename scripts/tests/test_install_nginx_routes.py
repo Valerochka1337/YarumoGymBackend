@@ -28,6 +28,8 @@ class InstallNginxRoutesTest(unittest.TestCase):
         self.assertLess(merged.index(MODULE.BEGIN), merged.index("location / {"))
         self.assertIn("location = /.well-known/assetlinks.json", merged)
         self.assertIn("location ^~ /r/", merged)
+        self.assertIn("location = /sw.js", merged)
+        self.assertIn("/trial-results", merged)
         self.assertIn("add_header X-Yarumo-Route routine-share always", merged)
         self.assertIn("proxy_intercept_errors off", merged)
         self.assertLess(merged.index("location ^~ /r/"), merged.index("location / {"))

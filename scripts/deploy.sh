@@ -11,7 +11,7 @@ cp .env "$env_backup"
 cleanup() {
   local status=$?
   if [[ "$status" != 0 && -f "$env_backup" ]]; then cp "$env_backup" .env; fi
-  rm -f "$env_backup" incoming/smtp.json incoming/ai.json incoming/ai-encryption.json incoming/nginx.conf incoming/install-nginx-routes.py
+  rm -f "$env_backup" incoming/smtp.json incoming/ai.json incoming/ai-encryption.json incoming/nginx.conf incoming/install-nginx-routes.py incoming/browser-web.tar.gz incoming/browser-web-nginx.conf incoming/install-browser-web.sh
 }
 trap cleanup EXIT
 compose=(docker compose --env-file .env -f compose.production.yaml)
@@ -20,6 +20,17 @@ docker pull "$new_image"
 if [[ -f incoming/admin-role.sh ]]; then install -m 0755 incoming/admin-role.sh admin-role.sh; fi
 if [[ -f incoming/admin-password.sh ]]; then install -m 0755 incoming/admin-password.sh admin-password.sh; fi
 if "${compose[@]}" ps --status running --services | grep -qx postgres; then ./backup.sh; fi
+install_browser_web() {
+  local present=0
+  [[ -f incoming/browser-web.tar.gz ]] && ((present+=1))
+  [[ -f incoming/browser-web-nginx.conf ]] && ((present+=1))
+  [[ -f incoming/install-browser-web.sh ]] && ((present+=1))
+  if [[ "$present" == 0 ]]; then return 0; fi
+  [[ "$present" == 3 ]] || { echo 'Browser web deployment files are incomplete' >&2; return 1; }
+  install -m 0755 incoming/install-browser-web.sh install-browser-web.sh
+  ./install-browser-web.sh incoming/browser-web.tar.gz incoming/browser-web-nginx.conf
+  rm -f incoming/browser-web.tar.gz incoming/browser-web-nginx.conf incoming/install-browser-web.sh
+}
 if [[ -f incoming/ai-encryption.json ]]; then
   install -m 0755 incoming/ai-encryption-config.py ai-encryption-config.py
   # Database migrations survive an application rollback, so retain a newly installed key too.
@@ -172,6 +183,7 @@ install_nginx_routes() {
   install -m 0644 "$target" nginx.conf
   rm -f "$backup" "$candidate" "$headers" "$share_headers" "$body" "$listen_address_file"
 }
+install_browser_web
 set_image "$new_image"
 if ! "${compose[@]}" up -d --wait --wait-timeout 180 ||
    ! curl --fail --silent --retry 5 --retry-delay 3 https://api.valerochkagym.tech/health ||

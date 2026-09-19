@@ -629,7 +629,7 @@ class BackendIntegrationTest {
         ),
       )
       assertEquals(
-        "25",
+        "26",
         command(
           "psql",
           "-U",
