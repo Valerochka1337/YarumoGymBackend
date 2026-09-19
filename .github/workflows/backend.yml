@@ -81,6 +81,7 @@ jobs:
           npm run typecheck
           npm test
           npm run build
+          npx playwright install --with-deps chromium firefox webkit
           npm run test:e2e
       - name: Package browser workout release
         if: needs.changes.outputs.code == 'true'

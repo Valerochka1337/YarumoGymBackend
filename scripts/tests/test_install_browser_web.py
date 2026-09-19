@@ -52,6 +52,9 @@ class InstallBrowserWebTest(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "backend.yml").read_text()
         deploy = (ROOT / "scripts" / "deploy.sh").read_text()
         self.assertIn("repository: Valerochka1337/YarumoGymWeb", workflow)
+        self.assertIn(
+            "npx playwright install --with-deps chromium firefox webkit", workflow
+        )
         self.assertIn("npm run test:e2e", workflow)
         self.assertIn("name: browser-web-release", workflow)
         self.assertIn("browser-web-release/browser-web.tar.gz", workflow)
