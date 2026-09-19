@@ -1,0 +1,33 @@
+name: Production diagnostics
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 5
+    concurrency:
+      group: backend-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Read sanitized production diagnostics
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          diagnostic_dir=$(mktemp -d)
+          cleanup() { rm -f "$diagnostic_dir/key" "$diagnostic_dir/known_hosts"; rmdir "$diagnostic_dir"; }
+          trap cleanup EXIT
+          printf '%s\n' "$DEPLOY_KEY" > "$diagnostic_dir/key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$diagnostic_dir/known_hosts"
+          ssh -i "$diagnostic_dir/key" -o IdentitiesOnly=yes -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$diagnostic_dir/known_hosts" \
+            -o ConnectTimeout=10 valerochka@62.84.122.55 \
+            'sudo -n python3 -' < .github/diagnostics/production.py

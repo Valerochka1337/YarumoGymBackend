@@ -38,7 +38,7 @@ jobs:
               files = (await github.rest.repos.compareCommitsWithBasehead({...context.repo, basehead: `${before}...${context.sha}`})).data.files || [];
               if (files.length >= 300) { core.setOutput('code', 'true'); return; }
             }
-            const code = /^(package[.-]|src\/|gradle\/|gradlew|build\.gradle\.kts|settings\.gradle\.kts|gradle\.properties|Dockerfile|\.dockerignore|compose\.yaml|infra\/|scripts\/|\.github\/workflows\/)/;
+            const code = /^(package[.-]|src\/|gradle\/|gradlew|build\.gradle\.kts|settings\.gradle\.kts|gradle\.properties|Dockerfile|\.dockerignore|compose\.yaml|infra\/|scripts\/)/;
             core.setOutput('code', String(files.some(f => code.test(f.filename) || code.test(f.previous_filename || ''))));
   verify:
     name: Backend checks
