@@ -36,6 +36,30 @@ import tools.jackson.databind.ObjectMapper
   classes = [Application::class, BackendIntegrationTest.Fakes::class],
 )
 class BackendIntegrationTest {
+  @Test
+  fun `planner settings require admin csrf and preserve edited patterns on read`() {
+    val path = "/api/planner-settings"
+    assertEquals(401, adminCall("GET", path).status)
+    val ordinary = account()
+    assertEquals(401, adminCall("GET", path, bearer = ordinary["accessToken"].asString()).status)
+    val browser = administrator()
+    val initial = adminCall("GET", path, browser = browser)
+    assertEquals(200, initial.status)
+    val config =
+      json.treeToValue(initial.body, tech.valerochkagym.service.ai.PlannerConfiguration::class.java)
+    val edited = config.copy(model = "planner-test", maxRounds = 3)
+    assertEquals(403, adminCall("PUT", path, edited, browser, csrf = null).status)
+    assertEquals(403, adminCall("PUT", path, edited, browser, origin = "https://evil.test").status)
+    assertEquals(400, adminCall("PUT", path, edited.copy(maxRounds = 2), browser).status)
+    assertEquals(200, adminCall("PUT", path, edited, browser).status)
+    assertEquals(
+      "planner-test",
+      adminCall("GET", path, browser = browser).body!!["model"].asString(),
+    )
+    db.update("UPDATE users SET is_admin=false WHERE id=?", browser.userId)
+    assertEquals(401, adminCall("GET", path, browser = browser).status)
+  }
+
   @Autowired lateinit var aiSettings: tech.valerochkagym.service.ai.AiSettingsService
 
   @Test
@@ -629,7 +653,7 @@ class BackendIntegrationTest {
         ),
       )
       assertEquals(
-        "29",
+        "30",
         command(
           "psql",
           "-U",
@@ -2833,7 +2857,7 @@ class BackendIntegrationTest {
 
   @Test
   fun `Liquibase has applied auth sync and admin changesets`() {
-    assertEquals(29, db.queryForObject("SELECT count(*) FROM databasechangelog", Int::class.java))
+    assertEquals(30, db.queryForObject("SELECT count(*) FROM databasechangelog", Int::class.java))
   }
 
   @Test

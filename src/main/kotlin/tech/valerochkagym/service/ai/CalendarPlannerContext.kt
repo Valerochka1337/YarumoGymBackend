@@ -33,6 +33,11 @@ internal object CalendarPlannerContext {
     val recent =
       captured.workouts
         .sortedWith(compareByDescending<CalendarWorkout> { it.finishedAtMillis }.thenBy { it.id })
+        .filter {
+          it.finishedAtMillis >=
+            captured.capturedAtMillis -
+              java.time.Duration.ofDays(captured.detailDays.toLong()).toMillis()
+        }
         .take(3)
     val recentIds = recent.mapTo(mutableSetOf()) { it.id }
     val sources = captured.candidates.associateBy { it.id }
@@ -270,6 +275,7 @@ internal object CalendarPlannerContext {
     eligibleCount: Int,
     strengthSelection: StrengthPlannerFacts.Selection? = null,
     strengthFacts: StrengthPlannerFacts.CompactFacts? = null,
+    adaptive: AdaptivePlannerContext? = null,
   ): String {
     val root =
       json.readTree(
@@ -286,12 +292,101 @@ internal object CalendarPlannerContext {
     fun redact(node: JsonNode) {
       if (node.isObject) {
         val objectNode = node as tools.jackson.databind.node.ObjectNode
-        listOf("mass", "measurement", "measurements", "health", "inBody", "notes")
+        objectNode
+          .properties()
+          .map { it.key }
+          .filter { key ->
+            key in setOf("mass", "measurement", "measurements", "health", "inBody", "notes") ||
+              key.contains("weight", ignoreCase = true) ||
+              key.contains("volume", ignoreCase = true)
+          }
           .forEach(objectNode::remove)
         objectNode.properties().forEach { redact(it.value) }
       } else if (node.isArray) node.forEach(::redact)
     }
     redact(root)
-    return json.writeValueAsString(root)
+    // Agentic turns never receive raw observation tuples; candidate detail remains tool-gated.
+    (root as tools.jackson.databind.node.ObjectNode).remove("history")
+    val musclesByExercise =
+      captured.candidates.associate { source ->
+        source.id to
+          source.payload["muscles"]
+            ?.toList()
+            .orEmpty()
+            .mapNotNull { muscle ->
+              muscle["muscle"]?.asString()?.let { name ->
+                muscle["contribution"]?.asInt()?.let { contribution -> name to contribution }
+              }
+            }
+            .toMap()
+      }
+    val allFacts = captured.facts + captured.olderFacts
+    fun weekly() =
+      (0..3).map { week ->
+        val endExclusive =
+          captured.capturedAtMillis - java.time.Duration.ofDays(week * 7L).toMillis() + 1
+        val start = endExclusive - java.time.Duration.ofDays(7).toMillis()
+        mapOf(
+          "startAtMillis" to start,
+          "endAtMillisExclusive" to endExclusive,
+          "muscles" to
+            StrengthPlannerFacts.muscleCoverage(allFacts, musclesByExercise, start, endExclusive),
+        )
+      }
+    val aggregate =
+      mapOf(
+        "version" to "completed-muscle-coverage-v1",
+        "directIndirectRule" to "DIRECT_CONTRIBUTION_AT_LEAST_50_INDIRECT_1_TO_49",
+        "last7Days" to
+          StrengthPlannerFacts.muscleCoverage(
+            allFacts,
+            musclesByExercise,
+            captured.capturedAtMillis - java.time.Duration.ofDays(7).toMillis(),
+            captured.capturedAtMillis + 1,
+          ),
+        "capturedHistory" to
+          mapOf(
+            "startAtMillis" to captured.windowStartMillis,
+            "endAtMillisExclusive" to captured.capturedAtMillis + 1,
+            "muscles" to
+              StrengthPlannerFacts.muscleCoverage(
+                allFacts,
+                musclesByExercise,
+                captured.windowStartMillis,
+                captured.capturedAtMillis + 1,
+              ),
+          ),
+        "weeklyTrends" to weekly(),
+      )
+    (root as tools.jackson.databind.node.ObjectNode).replace(
+      "completedMuscleCoverage",
+      json.valueToTree(aggregate),
+    )
+    adaptive?.let { planner ->
+      (root as tools.jackson.databind.node.ObjectNode).replace(
+        "plannerPatternCatalog",
+        json.valueToTree(
+          mapOf(
+            "collectionId" to planner.collection.id,
+            "collectionName" to planner.collection.name,
+            "sequence" to planner.collection.sequence,
+            "recommendedPatternId" to
+              planner.recommendedPatternId(captured.workouts, captured.facts + captured.olderFacts),
+            "patterns" to
+              planner.collection.patterns.map {
+                mapOf(
+                  "id" to it.id,
+                  "name" to it.name,
+                  "focus" to it.focus,
+                  "description" to it.description,
+                )
+              },
+          )
+        ),
+      )
+    }
+    return json.writeValueAsString(root).also {
+      if (it.toByteArray(Charsets.UTF_8).size > MAX_BYTES) throw aiError("ai_context_too_large")
+    }
   }
 }

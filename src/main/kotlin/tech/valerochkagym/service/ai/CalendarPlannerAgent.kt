@@ -5,12 +5,19 @@ internal class CalendarPlannerAgent(
   private val turn: (List<PlannerToolExchange>) -> PlannerTurn,
   private val tool: (PlannerToolProtocol.Call) -> ByteArray,
   private val maxAttemptBytes: Int = PlannerToolProtocol.maxAttemptBytes,
+  private val maxRounds: Int = PlannerToolProtocol.defaultMaxRounds,
+  private val maxCalls: Int = PlannerToolProtocol.defaultMaxCalls,
 ) {
-  fun run(candidateIds: Set<String>, deadlineMillis: () -> Long): tools.jackson.databind.JsonNode {
+  fun run(
+    candidateIds: Set<String>,
+    patternIds: Set<String> = emptySet(),
+    deadlineMillis: () -> Long,
+  ): tools.jackson.databind.JsonNode {
     val transcript = mutableListOf<PlannerToolExchange>()
     var calls = 0
     var bytes = 0
-    repeat(PlannerToolProtocol.maxRounds) {
+    require(maxRounds in 1..20 && maxCalls in 1..40)
+    repeat(maxRounds) {
       if (deadlineMillis() <= 0) throw aiError("ai_timeout")
       val next = turn(transcript.toList())
       if (deadlineMillis() <= 0) throw aiError("ai_timeout")
@@ -22,8 +29,8 @@ internal class CalendarPlannerAgent(
       if (next.calls.map { it.id }.distinct().size != next.calls.size)
         throw aiError("ai_invalid_response")
       next.calls.forEach { call ->
-        if (++calls > PlannerToolProtocol.maxCalls) throw aiError("ai_invalid_response")
-        PlannerToolProtocol.validate(call, candidateIds)
+        if (++calls > maxCalls) throw aiError("ai_invalid_response")
+        PlannerToolProtocol.validate(call, candidateIds, patternIds)
         if (deadlineMillis() <= 0) throw aiError("ai_timeout")
         val result = tool(call)
         if (deadlineMillis() <= 0) throw aiError("ai_timeout")

@@ -2,7 +2,6 @@ package tech.valerochkagym.service.ai
 
 import java.time.Instant
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
@@ -16,6 +15,7 @@ class StrengthPlannerFactsTest {
     actual: Boolean = true,
     weight: Double? = 50.0,
     reps: Double? = 8.0,
+    setType: String? = "WORK",
   ) =
     CalendarFact(
       exerciseId,
@@ -28,7 +28,7 @@ class StrengthPlannerFactsTest {
       if (actual) null else weight,
       mapOf("weightKg" to weight, "reps" to reps),
       if (actual) emptyList() else listOf("weightKg", "reps"),
-      "WORK",
+      setType,
     )
 
   private fun candidate(id: String, type: String = "STRENGTH", muscle: String = "QUADS") =
@@ -50,7 +50,7 @@ class StrengthPlannerFactsTest {
   }
 
   @Test
-  fun `ranking applies frozen strength scores and stable UUID order`() {
+  fun `ranking keeps all hard eligible exercise types in the soft pattern pool`() {
     val compound = "00000000-0000-4000-8000-000000000000"
     val high = "10000000-0000-4000-8000-000000000001"
     val normal = "20000000-0000-4000-8000-000000000002"
@@ -71,14 +71,17 @@ class StrengthPlannerFactsTest {
         now,
         compoundSeedIds = setOf(compound),
       )
-    assertEquals(listOf(compound, normal, high, other), result.ranked.map { it.exerciseId })
-    assertEquals(listOf(114, 54, 14, 14), result.ranked.map { it.score })
+    assertEquals(
+      listOf(compound, normal, high, other, "40000000-0000-4000-8000-000000000004"),
+      result.ranked.map { it.exerciseId },
+    )
+    assertEquals(listOf(114, 54, 14, 14, 14), result.ranked.map { it.score })
     assertEquals(compound, result.focusExerciseId)
-    assertFalse(result.ranked.any { it.exerciseId == "40000000-0000-4000-8000-000000000004" })
+    assertTrue(result.ranked.any { it.exerciseId == "40000000-0000-4000-8000-000000000004" })
   }
 
   @Test
-  fun `recent repeats are excluded when alternatives exist and old sessions are not repeats`() {
+  fun `recent high priority focus is retained while non focus exercises remain varied`() {
     val repeated = "10000000-0000-4000-8000-000000000001"
     val alternatives = (2..5).map { "10000000-0000-4000-8000-00000000000$it" }
     val candidates = listOf(candidate(repeated)) + alternatives.map(::candidate)
@@ -91,7 +94,8 @@ class StrengthPlannerFactsTest {
         30,
         now,
       )
-    assertFalse(recent.ranked.any { it.exerciseId == repeated })
+    assertTrue(recent.ranked.any { it.exerciseId == repeated })
+    assertEquals(repeated, recent.focusExerciseId)
     assertEquals("NONE", recent.repeatReasonCode)
     val old =
       StrengthPlannerFacts.select(
@@ -133,7 +137,16 @@ class StrengthPlannerFactsTest {
     assertEquals(575.0, compact.last7Days.single().actualVolume)
     assertEquals(listOf(2), compact.last28Days.map { it.workoutFrequency })
     assertEquals(listOf(3), compact.last28Days.map { it.completedSetCount })
-    assertEquals(listOf(1), compact.musclesLast7Days.map { it.workoutFrequency })
+    assertEquals(25, compact.musclesLast7Days.size)
+    val quads = compact.musclesLast7Days.single { it.muscle == "QUADS" }
+    assertEquals(2, quads.workoutFrequency)
+    assertEquals(3, quads.completedSetCount)
+    assertEquals(3, quads.directWorkingSetCount)
+    assertEquals(0, quads.indirectWorkingSetCount)
+    assertEquals(
+      "NO_WORKING_SETS",
+      compact.musclesLast7Days.single { it.muscle == "ABS" }.mappingCompleteness,
+    )
     assertEquals(listOf("HARD"), compact.efforts.map { it.effort })
     assertTrue(compact.latest.none { it.exerciseId == "w1" })
   }
@@ -185,7 +198,7 @@ class StrengthPlannerFactsTest {
   }
 
   @Test
-  fun `recent fallback retains penalized candidate below alternatives threshold`() {
+  fun `recent high priority exercise remains the focus without a legacy fallback`() {
     val result =
       StrengthPlannerFacts.select(
         listOf(candidate("recent"), candidate("a"), candidate("b")),
@@ -195,9 +208,81 @@ class StrengthPlannerFactsTest {
         30,
         now,
       )
-    assertEquals("STRENGTH_RECENT_FALLBACK", result.repeatReasonCode)
+    assertEquals("NONE", result.repeatReasonCode)
     assertTrue(result.ranked.any { it.exerciseId == "recent" })
-    assertTrue(result.focusExerciseId != "recent")
+    assertEquals("recent", result.focusExerciseId)
     assertEquals(3, result.ranked.size)
+  }
+
+  @Test
+  fun `coverage separates direct indirect zeros missing mappings unknown kinds and warmups`() {
+    val direct = "direct"
+    val indirect = "indirect"
+    val unmapped = "unmapped"
+    val facts =
+      listOf(
+        fact(direct, "direct-workout", 1),
+        fact(indirect, "indirect-workout", 2),
+        fact(unmapped, "unmapped-workout", 3),
+        fact(direct, "warmup", 1, setType = "WARMUP"),
+      )
+    val withMissing =
+      StrengthPlannerFacts.muscleCoverage(
+        facts,
+        mapOf(direct to mapOf("QUADS" to 100), indirect to mapOf("QUADS" to 25)),
+        now - 7 * 86_400_000L,
+        now + 1,
+      )
+    val quads = withMissing.single { it.muscle == "QUADS" }
+    assertEquals(2, quads.completedSetCount)
+    assertEquals(1, quads.directWorkingSetCount)
+    assertEquals(1, quads.indirectWorkingSetCount)
+    assertEquals(listOf(direct, indirect), quads.exerciseIds)
+    assertEquals("PARTIAL_MISSING_MAPPINGS", quads.mappingCompleteness)
+    val zero = withMissing.single { it.muscle == "ABS" }
+    assertEquals(0, zero.directWorkingSetCount)
+    assertEquals(0, zero.indirectWorkingSetCount)
+    assertEquals("PARTIAL_MISSING_MAPPINGS", zero.mappingCompleteness)
+
+    val unknown =
+      StrengthPlannerFacts.muscleCoverage(
+        listOf(
+          fact(direct, "work", 1),
+          fact(direct, "unknown", 1, setType = "UNKNOWN"),
+          fact(direct, "null", 1, setType = null),
+          fact(direct, "warmup", 1, setType = "WARMUP"),
+        ),
+        mapOf(direct to mapOf("QUADS" to 100)),
+        now - 7 * 86_400_000L,
+        now + 1,
+      )
+    assertEquals(1, unknown.single { it.muscle == "QUADS" }.completedSetCount)
+    assertEquals(
+      "PARTIAL_UNKNOWN_SET_TYPES",
+      unknown.single { it.muscle == "QUADS" }.mappingCompleteness,
+    )
+  }
+
+  @Test
+  fun `weekly muscle windows partition an exact seven day boundary`() {
+    val id = "boundary"
+    val compact =
+      StrengthPlannerFacts.compact(
+        listOf(fact(id, "current", 0), fact(id, "previous", 7)),
+        setOf(id),
+        emptySet(),
+        now,
+        mapOf(id to mapOf("QUADS" to 100)),
+        emptyList(),
+      )
+    val weeklyCounts =
+      compact.weekly.map { week -> week.muscles.single { it.muscle == "QUADS" }.completedSetCount }
+    assertEquals(listOf(1, 1, 0, 0), weeklyCounts)
+    assertEquals(2, weeklyCounts.sum())
+    assertTrue(
+      compact.weekly.zipWithNext().all { (newer, older) ->
+        older.endAtMillisExclusive == newer.startAtMillis
+      }
+    )
   }
 }

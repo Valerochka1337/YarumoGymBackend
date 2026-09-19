@@ -35,6 +35,7 @@ data class CalendarCapturedContext(
   val olderFacts: List<CalendarFact> = emptyList(),
   val capturedAtMillis: Long = 0,
   val windowStartMillis: Long = 0,
+  val detailDays: Int = 7,
   val strengthPriorities: Map<String, String> = emptyMap(),
   val plannerPreferences: Map<String, String> = emptyMap(),
 )
@@ -106,6 +107,8 @@ class AiContextReader(
     zoneId: String,
     includeNotes: Boolean,
     requestedGymIds: List<String>,
+    historyDays: Int = 28,
+    detailDays: Int = 7,
   ): CalendarCapturedContext =
     tx.execute {
       val common = catalog.readLock()
@@ -318,14 +321,17 @@ class AiContextReader(
           }
           .orEmpty()
       val capturedAt = now.toEpochMilli()
+      // Planner-admin history may narrow the approved 28-day egress window, never widen it.
+      val effectiveHistoryDays = historyDays.coerceIn(7, 28)
+      val effectiveDetailDays = detailDays.coerceIn(1, minOf(7, effectiveHistoryDays))
       val windowStart =
         if (profile?.trainingGoal == "STRENGTH")
-          capturedAt - java.time.Duration.ofDays(28).toMillis()
+          capturedAt - java.time.Duration.ofDays(effectiveHistoryDays.toLong()).toMillis()
         else
           now
             .atZone(ZoneId.of(zoneId))
             .toLocalDate()
-            .minusDays(27)
+            .minusDays((effectiveHistoryDays - 1).toLong())
             .atStartOfDay(ZoneId.of(zoneId))
             .toInstant()
             .toEpochMilli()
@@ -534,6 +540,7 @@ class AiContextReader(
         olderFacts,
         capturedAt,
         windowStart,
+        effectiveDetailDays,
         strengthPriorities,
         plannerPreferences,
       )

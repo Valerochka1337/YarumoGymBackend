@@ -18,6 +18,7 @@ async function setup(overrides={}, loggedIn=true) {
   w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
   w.HTMLDialogElement.prototype.close=function(){this.open=false;};
   w.confirm=()=>true;
+  w.structuredClone=structuredClone;
   w.fetch=async(path,options={})=>{
     const url=new URL(path,'https://admin.test'),method=options.method||'GET',body=options.body?JSON.parse(options.body):null;
     requests.push({path:url.pathname,query:url.searchParams,method,body,headers:options.headers});
@@ -192,4 +193,37 @@ test('AI settings keep the stored key write-only and save with CSRF and revision
   assert.equal(Object.hasOwn(request.body,'apiKey'),false);
   assert.equal(ui.w.localStorage.length,0);
   await until(()=>ui.w.document.getElementById('notice').textContent==='Настройки ИИ сохранены');
+});
+
+test('planner settings edit drafts and save server configuration without starting a workout',async t=>{
+  const slot={role:'PRIMARY',movement:'Жим',exerciseType:'STRENGTH',exerciseCount:1,sets:3,repsMin:6,repsMax:12,restSeconds:120,durationSeconds:0};
+  const data={model:'text',instructions:'Черновик',historyDays:28,detailDays:7,maxRounds:6,maxToolCalls:12,timeoutSeconds:45,weightStepKg:2.5,collections:[{id:'fitness',goal:'GENERAL_FITNESS',name:'Общая форма',sequence:['fitness-a'],patterns:[{id:'fitness-a',name:'Всё тело',focus:'FULL_BODY',description:'<b>Не HTML</b>',slots:[slot]}]}]};
+  const ui=await setup({
+    'GET /admin/api/planner-settings':()=>({data}),
+    'PUT /admin/api/planner-settings':body=>({data:body}),
+  });
+  t.after(()=>ui.dom.window.close());
+  ui.w.document.querySelector('[data-view=planner]').click();
+  await until(()=>ui.w.document.querySelector('.planner-settings'));
+  const form=ui.w.document.querySelector('.planner-settings');
+  const field=label=>[...form.querySelectorAll('label')].find(x=>x.firstChild?.textContent===label).querySelector('input,select,textarea');
+  const change=(input,value)=>{input.value=value;input.dispatchEvent(new ui.w.Event('input',{bubbles:true}));};
+  change(field('Модель (пусто — текущая модель текста)'),'planner-model');
+  change(field('Подходов'),'4');
+  assert.equal(field('История, дней (до 28)').max,'28');
+  assert.equal(field('Подробно, дней (до 7)').max,'7');
+  assert.equal(form.querySelector('.planner-pattern b'),null);
+  form.dispatchEvent(new ui.w.Event('submit',{bubbles:true,cancelable:true}));
+  await until(()=>ui.requests.some(r=>r.method==='PUT'));
+  const write=ui.requests.find(r=>r.method==='PUT');
+  assert.equal(write.path,'/admin/api/planner-settings');
+  assert.equal(write.headers['X-CSRF-Token'],'test-csrf');
+  assert.equal(write.body.model,'planner-model');
+  assert.equal(write.body.collections[0].patterns[0].slots[0].sets,4);
+  assert.equal(write.body.collections[0].patterns[0].id,'fitness-a');
+  assert.equal(write.body.collections[0].patterns[0].description,'<b>Не HTML</b>');
+  assert.deepEqual(write.body.collections[0].sequence,['fitness-a']);
+  assert.equal(ui.requests.some(r=>/calendar|proposal|generate/.test(r.path)),false);
+  await until(()=>ui.w.document.getElementById('notice').textContent==='Настройки планировщика сохранены');
+  assert.equal(ui.errors.length,0);
 });

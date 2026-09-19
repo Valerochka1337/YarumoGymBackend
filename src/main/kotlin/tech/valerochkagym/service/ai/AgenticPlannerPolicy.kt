@@ -1,9 +1,9 @@
 package tech.valerochkagym.service.ai
 
 /**
- * The v2 selector's trust boundary. User prose never reaches this policy and therefore cannot
- * expand the model-visible pool. Classification is intentionally conservative: an unknown or custom
- * exercise needs an explicit saved signal or completed history.
+ * The v2 selector's trust boundary. Hard availability is decided before this policy. This layer
+ * deliberately applies only a saved NEVER preference: collections are editable and must not be
+ * silently reduced to a legacy strength skeleton or a hand-curated canonical subset.
  */
 internal object AgenticPlannerPolicy {
   const val candidateLimit = 24
@@ -24,75 +24,49 @@ internal object AgenticPlannerPolicy {
     sources: Map<String, CalendarCandidateSource> = emptyMap(),
   ): List<Map<String, Any>> {
     val history = facts.mapTo(mutableSetOf()) { it.exerciseId }
-    val candidates =
-      eligible
-        .map { row ->
-          val id = row.getValue("exerciseId") as String
-          val source = sources[id]?.payload
-          // Missing metadata is never silently promoted to a canonical basic.
-          Candidate(
-            id,
-            row,
-            when {
-              source == null -> "UNKNOWN"
-              source["isCustom"]?.asBoolean() == true -> "CUSTOM"
-              sources[id]?.curatedCanonical == true && id in StrengthPlannerFacts.compoundSeedIds ->
-                "STANDARD"
-              else -> "UNKNOWN"
-            },
-            // Calisthenics, balance and plyometric work is deliberately not a default candidate.
-            source?.get("plannerCategory")?.asString() == "EXPLICIT_ONLY" ||
-              source?.get("movementFamily")?.asString() in
-                setOf("CALISTHENICS", "BALANCE", "PLYOMETRIC"),
-            sources[id]?.curatedCanonical == true,
-          )
-        }
-        .filter { preferences[it.id] != "NEVER" }
-    fun trusted(candidate: Candidate): Boolean {
-      val explicit =
-        candidate.id in keyExercises ||
-          preferences[candidate.id] == "MORE" ||
-          candidate.id in history
-      return when {
-        candidate.explicitOnly -> explicit
-        candidate.origin == "STANDARD" -> true
-        else -> explicit
-      }
-    }
-    val trusted = candidates.filter(::trusted)
-    val nonLess = trusted.filter { preferences[it.id] != "LESS" }
-    // The frozen skeleton has one interchangeable accessory class. A LESS exercise enters only
-    // when that class has no non-LESS trusted candidate; never merely to reach the pool cap.
     val ordered =
-      (if (nonLess.isNotEmpty()) nonLess else trusted)
-        .distinctBy { it.id }
+      eligible
+        .asSequence()
+        .filter { preferences[it.getValue("exerciseId") as String] != "NEVER" }
         .sortedWith(
-          compareBy<Candidate>(
-            { if (preferences[it.id] == "LESS") 1 else 0 },
-            { sourceRank(it, keyExercises, preferences, history) },
-            { it.id },
+          compareBy<Map<String, Any>>(
+            { row ->
+              val id = row.getValue("exerciseId") as String
+              when {
+                id in keyExercises || preferences[id] == "MORE" -> 0
+                id in history -> 1
+                preferences[id] == "LESS" -> 3
+                else -> 2
+              }
+            },
+            { it.getValue("exerciseId") as String },
           )
         )
-    var unfamiliarStandard = 0
-    return ordered
-      .filter { candidate ->
-        val unfamiliar = candidate.origin == "STANDARD" && candidate.id !in history
-        if (unfamiliar && unfamiliarStandard++ >= 1) false else true
-      }
-      .take(candidateLimit)
-      .map { it.row }
-  }
-
-  private fun sourceRank(
-    candidate: Candidate,
-    keys: Map<String, String>,
-    preferences: Map<String, String>,
-    history: Set<String>,
-  ): Int =
-    when {
-      candidate.id in keys || preferences[candidate.id] == "MORE" -> 0
-      candidate.id in history -> 1
-      candidate.origin == "STANDARD" -> 2
-      else -> 3
+        .toList()
+    // Keep a compact pool, but do not let an upper-body/familiarity-heavy sort erase another
+    // valid movement class before the agent can select its configured pattern.
+    val selected = linkedSetOf<String>()
+    fun add(row: Map<String, Any>) {
+      if (selected.size < candidateLimit) selected += row.getValue("exerciseId") as String
     }
+    ordered
+      .groupBy { it.getValue("type") as String }
+      .toSortedMap()
+      .values
+      .forEach { add(it.first()) }
+    ordered
+      .flatMap { row ->
+        @Suppress("UNCHECKED_CAST")
+        (row["muscles"] as? List<Map<String, Any>>)
+          .orEmpty()
+          .filter { (it["contribution"] as? Int ?: 0) > 0 }
+          .map { it.getValue("muscle") as String to row }
+      }
+      .groupBy { it.first }
+      .toSortedMap()
+      .values
+      .forEach { add(it.first().second) }
+    ordered.forEach(::add)
+    return ordered.filter { it.getValue("exerciseId") in selected }
+  }
 }

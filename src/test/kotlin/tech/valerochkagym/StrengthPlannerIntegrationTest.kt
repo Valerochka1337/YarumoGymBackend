@@ -24,8 +24,9 @@ import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.postgresql.PostgreSQLContainer
 import tech.valerochkagym.controller.advice.ApiException
 import tech.valerochkagym.service.ai.AiActionService
-import tech.valerochkagym.service.ai.AiProvider
 import tech.valerochkagym.service.ai.AiProviderInput
+import tech.valerochkagym.service.ai.PlannerToolCallingProvider
+import tech.valerochkagym.service.ai.PlannerTurn
 import tech.valerochkagym.service.model.Identity
 import tools.jackson.databind.JsonNode
 import tools.jackson.databind.ObjectMapper
@@ -57,7 +58,7 @@ class StrengthPlannerIntegrationTest {
     }
   }
 
-  class FakeProvider : AiProvider {
+  class FakeProvider : PlannerToolCallingProvider {
     override val available = true
     var calls = 0
     var handler: (AiProviderInput) -> JsonNode = { error("test handler absent") }
@@ -70,6 +71,9 @@ class StrengthPlannerIntegrationTest {
         throw AssertionError("Synthetic provider fixture failed", error)
       }
     }
+
+    override fun generatePlannerTurn(input: AiProviderInput): PlannerTurn =
+      TestPlannerTurns.turn(input, ::generate)
   }
 
   class FixedClock : Clock() {
@@ -104,7 +108,7 @@ class StrengthPlannerIntegrationTest {
   }
 
   @Test
-  fun `strength context sends compact actual facts chooses high focus and assigns older weight`() {
+  fun `strength context sends all-muscle facts without raw weights and meets minimum duration`() {
     val owner = owner()
     val focus = exercise(owner)
     val current = exercise(owner)
@@ -141,34 +145,26 @@ class StrengthPlannerIntegrationTest {
       assertFalse(context.toString().contains("observationId"))
       assertFalse(context.toString().contains(oldWorkout.toString()))
       assertFalse(context.toString().contains(currentWorkout.toString()))
-      val facts = context["strengthFacts"]
-      assertEquals("strength-compact-v1", facts["version"].asString())
-      val latest = facts["latest"].single { it["exerciseId"].asString() == focus.toString() }
-      assertEquals("ACTUAL", latest["weightSource"].asString())
-      assertEquals(70.0, latest["weightKg"].asDouble())
-      assertEquals("ACTUAL", latest["repsSource"].asString())
-      assertEquals(5.0, latest["reps"].asDouble())
-      val last7 = facts["movementUnits"]["last7Days"].single()
-      assertEquals(current.toString(), last7["exerciseId"].asString())
-      assertEquals(300.0, last7["actualVolume"].asDouble())
-      assertEquals(listOf("HARD"), facts["efforts"].toList().map { it["effort"].asString() })
-      assertFalse(facts.toString().contains(oldWorkout.toString()))
-      assertFalse(facts.toString().contains(currentWorkout.toString()))
+      assertTrue(context.has("completedMuscleCoverage"))
+      assertTrue(context["completedMuscleCoverage"].has("last7Days"))
+      assertTrue(context["completedMuscleCoverage"].has("weeklyTrends"))
+      assertFalse(context.toString().contains("weight", ignoreCase = true))
+      assertFalse(context.toString().contains("volume", ignoreCase = true))
       response(focus)
     }
 
     val result = actions.calendar(owner, request())
     assertEquals(
-      70.0,
+      10,
       json
         .valueToTree<JsonNode>(result)["proposal"]["snapshot"]["draft"]["exercises"][0][
-          "plannedSets"][0]["weightKg"]
-        .asDouble(),
+          "plannedSets"]
+        .size(),
     )
   }
 
   @Test
-  fun `strength focus must be in the provider plan`() {
+  fun `strength planning accepts an eligible nonfocus exercise when a pattern adapts`() {
     val owner = owner()
     val focus = exercise(owner)
     val alternative = exercise(owner)
@@ -176,12 +172,15 @@ class StrengthPlannerIntegrationTest {
     strengthProfile(owner, listOf(focus to "HIGH"))
     provider.handler = { response(alternative) }
 
-    assertEquals(
-      "ai_invalid_response",
-      assertThrows<ApiException> { actions.calendar(owner, request()) }.code,
-    )
+    val result = actions.calendar(owner, request())
     assertEquals(1, provider.calls)
-    assertEquals(0, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
+    assertEquals(
+      alternative.toString(),
+      json
+        .valueToTree<JsonNode>(result)["proposal"]["snapshot"]["draft"]["exercises"][0][
+          "exerciseId"]
+        .asString(),
+    )
   }
 
   @Test
@@ -225,10 +224,8 @@ class StrengthPlannerIntegrationTest {
       val context = json.readTree(input.context)
       assertEquals(live.toString(), context["selection"]["focusExerciseId"].asString())
       assertFalse(context["candidates"].any { it["exerciseId"].asString() == stale.toString() })
-      val latest = context["strengthFacts"]["latest"].single()
-      assertEquals("ACTUAL", latest["weightSource"].asString())
-      assertTrue(latest["weightKg"].isNull)
-      assertTrue(latest["reps"].isNull)
+      assertTrue(context.has("completedMuscleCoverage"))
+      assertFalse(context.toString().contains("weight", ignoreCase = true))
       response(live)
     }
 
@@ -242,7 +239,7 @@ class StrengthPlannerIntegrationTest {
   }
 
   @Test
-  fun `nonstrength planning omits compact facts and keeps legacy weight carryover`() {
+  fun `nonstrength planning omits strength facts and does not carry legacy weight`() {
     val owner = owner()
     val target = exercise(owner)
     profile(owner, "MUSCLE_GAIN")
@@ -259,12 +256,11 @@ class StrengthPlannerIntegrationTest {
     }
 
     val result = actions.calendar(owner, request())
-    assertEquals(
-      63.5,
+    assertTrue(
       json
         .valueToTree<JsonNode>(result)["proposal"]["snapshot"]["draft"]["exercises"][0][
           "plannedSets"][0]["weightKg"]
-        .asDouble(),
+        .isNull
     )
   }
 
@@ -501,7 +497,7 @@ class StrengthPlannerIntegrationTest {
 
   private fun response(exercise: UUID) =
     json.readTree(
-      """{"result":{"name":"Draft","exercises":[{"exerciseId":"$exercise","restSeconds":0,"plannedSets":[{"reps":8,"durationSec":null}]}]}}"""
+      """{"result":{"name":"Draft","exercises":[{"exerciseId":"$exercise","restSeconds":190,"plannedSets":[{"reps":8,"durationSec":null},{"reps":8,"durationSec":null},{"reps":8,"durationSec":null},{"reps":8,"durationSec":null},{"reps":8,"durationSec":null},{"reps":8,"durationSec":null},{"reps":8,"durationSec":null},{"reps":8,"durationSec":null},{"reps":8,"durationSec":null},{"reps":8,"durationSec":null}]}]}}"""
     )
 
   private val day = 86_400_000L

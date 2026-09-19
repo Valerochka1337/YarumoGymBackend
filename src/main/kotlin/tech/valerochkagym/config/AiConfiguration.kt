@@ -55,13 +55,18 @@ class AiConfiguration {
 
   @Bean
   fun aiProvider(settings: AiSettingsService, json: ObjectMapper): AiProvider =
-    object : AiProvider {
+    object : PlannerToolCallingProvider {
       override val available
         get() = settings.current() != null
 
       override fun generate(input: AiProviderInput) =
         settings.current()?.let {
           HttpOpenAiChatCompletionsProvider(it.provider, json, client).generate(input)
+        } ?: throw aiError("ai_unavailable")
+
+      override fun generatePlannerTurn(input: AiProviderInput) =
+        settings.current()?.let {
+          HttpOpenAiChatCompletionsProvider(it.provider, json, client).generatePlannerTurn(input)
         } ?: throw aiError("ai_unavailable")
     }
 }

@@ -38,7 +38,7 @@ class AgenticPlannerPolicyTest {
   }
 
   @Test
-  fun `explicit only custom and less exercises require a saved signal or history`() {
+  fun `soft preferences retain custom and explicit alternatives while never remains absolute`() {
     val sources =
       mapOf(
         custom to CalendarCandidateSource(custom, json.readTree("{\"isCustom\":true}")),
@@ -50,14 +50,15 @@ class AgenticPlannerPolicyTest {
           ),
       )
     assertEquals(
-      emptyList<Map<String, Any>>(),
+      listOf(explicit, custom),
       AgenticPlannerPolicy.select(
-        listOf(row(custom), row(explicit)),
-        emptyMap(),
-        mapOf(custom to "LESS"),
-        emptyList(),
-        sources,
-      ),
+          listOf(row(custom), row(explicit)),
+          emptyMap(),
+          mapOf(custom to "LESS"),
+          emptyList(),
+          sources,
+        )
+        .map { it.getValue("exerciseId") },
     )
     val history =
       listOf(
@@ -73,7 +74,7 @@ class AgenticPlannerPolicyTest {
         )
       )
     assertEquals(
-      listOf(explicit),
+      listOf(explicit, custom),
       AgenticPlannerPolicy.select(
           listOf(row(custom), row(explicit)),
           emptyMap(),
@@ -86,7 +87,7 @@ class AgenticPlannerPolicyTest {
   }
 
   @Test
-  fun `less does not fill a sufficient skeleton pool but is admitted as the only fallback`() {
+  fun `less preference is a soft ordering hint rather than a skeleton exclusion`() {
     val fallback = UUID(0, 4).toString()
     val sources =
       mapOf(
@@ -94,7 +95,7 @@ class AgenticPlannerPolicyTest {
         fallback to CalendarCandidateSource(fallback, json.readTree("{\"isCustom\":true}")),
       )
     assertEquals(
-      listOf(standard),
+      listOf(fallback, standard),
       AgenticPlannerPolicy.select(
           listOf(row(standard), row(fallback)),
           emptyMap(),

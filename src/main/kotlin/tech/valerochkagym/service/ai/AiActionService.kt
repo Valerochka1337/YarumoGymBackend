@@ -78,7 +78,7 @@ class AiActionService(
   }
 
   fun calendar(identity: Identity, raw: ByteArray): CalendarDraftResponse = admitted {
-    calendar.create(identity, raw)
+    calendar.create(identity, raw, agentic = true)
   }
 
   fun calendarV2(identity: Identity, raw: ByteArray): CalendarDraftV2Response = admitted {

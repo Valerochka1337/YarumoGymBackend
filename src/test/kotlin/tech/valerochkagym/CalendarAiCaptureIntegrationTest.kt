@@ -33,9 +33,9 @@ import org.testcontainers.postgresql.PostgreSQLContainer
 import tech.valerochkagym.controller.advice.ApiException
 import tech.valerochkagym.service.ai.AiActionService
 import tech.valerochkagym.service.ai.AiContextReader
-import tech.valerochkagym.service.ai.AiProvider
 import tech.valerochkagym.service.ai.AiProviderInput
 import tech.valerochkagym.service.ai.CalendarAiExecutionHooks
+import tech.valerochkagym.service.ai.PlannerToolCallingProvider
 import tech.valerochkagym.service.ai.aiError
 import tech.valerochkagym.service.model.Identity
 import tools.jackson.databind.JsonNode
@@ -68,15 +68,19 @@ class CalendarAiCaptureIntegrationTest {
     }
   }
 
-  class FakeProvider : AiProvider {
+  class FakeProvider : PlannerToolCallingProvider {
     override val available = true
     var calls = 0
+    var repairRejected = false
     var handler: (AiProviderInput) -> JsonNode = { error("test handler absent") }
 
     override fun generate(input: AiProviderInput): JsonNode {
       calls++
       return handler(input)
     }
+
+    override fun generatePlannerTurn(input: AiProviderInput) =
+      TestPlannerTurns.turn(input, ::generate, repairRejected)
   }
 
   class BarrierHooks : CalendarAiExecutionHooks {
@@ -161,6 +165,7 @@ class CalendarAiCaptureIntegrationTest {
     )
     db.update("UPDATE catalog_state SET revision=9,active=false")
     provider.calls = 0
+    provider.repairRejected = false
     provider.handler = { error("test handler absent") }
     hooks.finalLock = null
     hooks.proposalInsert = null
@@ -262,7 +267,7 @@ class CalendarAiCaptureIntegrationTest {
       capturedAt - 1,
       sets(fallbackTarget, 1, actualPresent = false, legacy = 63.5),
     )
-    assertEquals(63.5, projectedWeight(fallbackOwner, fallbackTarget))
+    assertNull(projectedWeight(fallbackOwner, fallbackTarget))
 
     reset()
     val tupleOwner = owner()
@@ -273,14 +278,14 @@ class CalendarAiCaptureIntegrationTest {
       UUID.fromString("00000000-0000-4000-8000-000000000010"),
       capturedAt - 100,
       capturedAt - 1,
-      sets(tupleTarget, 1, completedAt = factTime, actual = 10.0),
+      sets(tupleTarget, 1, completedAt = factTime, actual = 10.0, actualReps = 8),
     )
     workout(
       tupleOwner,
       UUID.fromString("00000000-0000-4000-8000-000000000001"),
       capturedAt - 100,
       capturedAt - 1,
-      sets(tupleTarget, 1, completedAt = factTime, actual = 20.0),
+      sets(tupleTarget, 1, completedAt = factTime, actual = 20.0, actualReps = 8),
     )
     assertEquals(20.0, projectedWeight(tupleOwner, tupleTarget))
   }
@@ -463,7 +468,7 @@ class CalendarAiCaptureIntegrationTest {
   }
 
   @Test
-  fun `latest mass at capture is included without health or inbody context`() {
+  fun `agentic provider context excludes mass health and inbody details`() {
     val owner = owner()
     exercise(owner)
     record(
@@ -480,8 +485,7 @@ class CalendarAiCaptureIntegrationTest {
     )
 
     val context = providerContext(owner)
-    assertEquals(72.5, context["mass"]["kg"].asDouble())
-    assertEquals(capturedAt - 5, context["mass"]["measuredAtMillis"].asLong())
+    assertFalse(context.has("mass"))
     assertFalse(context.has("health"))
     assertFalse(context.toString().contains("inbody", ignoreCase = true))
   }
@@ -556,7 +560,12 @@ class CalendarAiCaptureIntegrationTest {
     val context =
       providerContext(boundedOwner, priority = allMuscles().map { it["muscle"] as String })
     assertEquals(2500, context["candidates"][0]["priority"].asInt())
-    assertEquals(8192, context["history"]["recentWorkouts"][0]["completedSetsInWindow"].asInt())
+    assertEquals(
+      8192,
+      context["completedMuscleCoverage"]["last7Days"]
+        .single { it["muscle"].asString() == "UPPER_CHEST" }["completedSetCount"]
+        .asInt(),
+    )
 
     repeat(500) { offset ->
       workout(
@@ -826,6 +835,22 @@ class CalendarAiCaptureIntegrationTest {
   }
 
   @Test
+  fun `agentic planner rejects a tiny sixty minute plan before persistence`() {
+    val owner = owner()
+    val exercise = exercise(owner)
+    val request = json.readTree(rawRequest()) as ObjectNode
+    request.put("availableDurationMinutes", 60)
+    provider.handler = { shortProviderResponse(exercise) }
+
+    assertEquals(
+      "ai_invalid_response",
+      assertThrows<ApiException> { actions.calendar(owner, json.writeValueAsBytes(request)) }.code,
+    )
+    assertEquals(1, provider.calls)
+    assertEquals(0, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
+  }
+
+  @Test
   fun `provider strict shape rejects malformed rows and accepts exact timed fit`() {
     val owner = owner()
     val strength = exercise(owner)
@@ -869,7 +894,7 @@ class CalendarAiCaptureIntegrationTest {
   }
 
   @Test
-  fun `provider notes retain only selected candidate hints`() {
+  fun `agentic provider context excludes notes even when the caller opts in`() {
     val owner = owner()
     val selected = exercise(owner)
     val excluded = exercise(owner)
@@ -885,10 +910,7 @@ class CalendarAiCaptureIntegrationTest {
       "ai_invalid_response",
       assertThrows<ApiException> { actions.calendar(owner, raw) }.code,
     )
-    assertEquals(
-      listOf("keep"),
-      requireNotNull(context)["notes"].toList().map { it["text"].asString() },
-    )
+    assertFalse(requireNotNull(context).has("notes"))
   }
 
   @Test
@@ -933,9 +955,7 @@ class CalendarAiCaptureIntegrationTest {
     val request = rawRequest()
     provider.handler = {
       actions.cancelCalendar(owner, request)
-      json.readTree(
-        """{"result":{"name":"Draft","exercises":[{"exerciseId":"$exercise","restSeconds":0,"plannedSets":[{"reps":8,"durationSec":null}]}]}}"""
-      )
+      providerResponse(exercise)
     }
 
     assertEquals("ai_timeout", assertThrows<ApiException> { actions.calendar(owner, request) }.code)
@@ -1239,6 +1259,7 @@ class CalendarAiCaptureIntegrationTest {
     actual: Double? = null,
     legacy: Double? = null,
     note: String? = null,
+    actualReps: Int? = null,
   ): List<Map<String, Any>> =
     listOf(
       buildMap {
@@ -1249,6 +1270,8 @@ class CalendarAiCaptureIntegrationTest {
           List(count) {
             buildMap {
               put("isCompleted", true)
+              put("setType", "WORK")
+              actualReps?.let { put("actualReps", it) }
               completedAt?.let { put("completedAt", it) }
               if (actualPresent) put("actualWeightKg", actual)
               else actual?.let { put("actualWeightKg", it) }
@@ -1686,10 +1709,11 @@ class CalendarAiCaptureIntegrationTest {
     assertEquals(6, context.olderFacts.size)
     assertTrue(context.notes.isEmpty())
     assertNull(projectedWeight(owner, target))
-    val history = providerContext(owner)["history"]
-    assertEquals(40, history["localDaysSinceLastFinished"].asInt())
-    assertEquals(0, history["remainingWindowWeeks"].sumOf { it["totals"]["completedSets"].asInt() })
-    assertEquals(6, history["recentWorkouts"].sumOf { it["completedSetsOutsideWindow"].asInt() })
+    val providerContext = providerContext(owner)
+    assertFalse(providerContext.has("history"))
+    val coverage = providerContext["completedMuscleCoverage"]
+    assertEquals(25, coverage["capturedHistory"]["muscles"].size())
+    assertEquals(4, coverage["weeklyTrends"].size())
   }
 
   @Test
@@ -1748,7 +1772,7 @@ class CalendarAiCaptureIntegrationTest {
   }
 
   @Test
-  fun `contradictory obsolete rationale does not reject plan or override factual explanation`() {
+  fun `agentic context keeps completed coverage while explanations ignore invented rationale`() {
     val owner = owner()
     val first = exercise(owner)
     val second = exercise(owner)
@@ -1758,46 +1782,26 @@ class CalendarAiCaptureIntegrationTest {
     raw.put("availableDurationMinutes", 60)
     provider.handler = { input ->
       val context = json.readTree(input.context)
-      val history = context["history"]
-      assertEquals(
-        3,
-        history["lastLoadSummaryNotAdditionalVolume"]["totals"]["completedSets"].asInt(),
-      )
-      assertEquals(
-        3,
-        history["recentWorkouts"].sumOf {
-          it["observations"].sumOf { o -> o["completedSets"].asInt() }
-        },
-      )
-      assertEquals(
-        0,
-        history["remainingWindowWeeks"].sumOf { it["totals"]["completedSets"].asInt() },
-      )
-      assertEquals(
-        history["lastFinishedLocalTime"],
-        history["lastLoadSummaryNotAdditionalVolume"]["finishedLocalTime"],
-      )
+      assertFalse(context.has("history"))
+      assertEquals(25, context["completedMuscleCoverage"]["last7Days"].size())
       assertEquals(60, context["intent"]["desiredDurationMinutes"].asInt())
       json.readTree(
         """{"result":{"name":"Synthetic session","exercises":[
-        {"exerciseId":"$first","restSeconds":90,"plannedSets":[{"reps":12,"durationSec":null},{"reps":10,"durationSec":null},{"reps":8,"durationSec":null},{"reps":6,"durationSec":null}]},
-        {"exerciseId":"$second","restSeconds":90,"plannedSets":[{"reps":12,"durationSec":null},{"reps":10,"durationSec":null},{"reps":8,"durationSec":null},{"reps":6,"durationSec":null}]}],
+        {"exerciseId":"$first","restSeconds":120,"plannedSets":[{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null}]},
+        {"exerciseId":"$second","restSeconds":120,"plannedSets":[{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null}]}],
         "rationale":{"selection":"invented","repeat":"NONE","shortfall":"NONE"}}}"""
       )
     }
     val response = actions.calendar(owner, json.writeValueAsBytes(raw))
     val explanation = explanations.read(owner, response.proposal.proposalId)
-    assertEquals(990L, explanation.estimatedSeconds)
+    assertEquals(3150L, explanation.estimatedSeconds)
     assertEquals(2880L, explanation.minimumSeconds)
     assertEquals(listOf(first.toString()), explanation.repeatedExerciseIds)
     assertEquals(capturedAt - 1000, explanation.lastFinishedAtMillis)
     assertEquals("UNSPECIFIED", explanation.selectionReason)
     assertEquals("UNSPECIFIED", explanation.repeatReason)
-    assertEquals("UNSPECIFIED", explanation.shortfallReason)
-    assertEquals(
-      42.0,
-      response.proposal.snapshot.draft.exercises.first().plannedSets.first().weightKg,
-    )
+    assertEquals("NONE", explanation.shortfallReason)
+    assertNull(response.proposal.snapshot.draft.exercises.first().plannedSets.first().weightKg)
     assertEquals(1, provider.calls)
     assertEquals(response, actions.calendar(owner, json.writeValueAsBytes(raw)))
     assertEquals(1, db.queryForObject("SELECT count(*) FROM planner_explanations", Int::class.java))
@@ -1809,27 +1813,33 @@ class CalendarAiCaptureIntegrationTest {
   }
 
   @Test
-  fun `AI answers without rationale succeed through one correction and preserve factual shortfall`() {
+  fun `agentic planner repairs a short plan through the validation tool`() {
     val owner = owner()
     val exercises = (1..6).map { exercise(owner) }
-    provider.handler = { providerResponse(exercises.first()) }
+    provider.repairRejected = true
+    provider.handler = {
+      if (provider.calls == 1) shortProviderResponse(exercises.first())
+      else providerResponse(exercises.first())
+    }
     val response = actions.calendar(owner, rawRequest())
     assertEquals(2, provider.calls)
-    assertEquals(
-      "UNSPECIFIED",
-      explanations.read(owner, response.proposal.proposalId).shortfallReason,
-    )
+    assertEquals("NONE", explanations.read(owner, response.proposal.proposalId).shortfallReason)
     assertEquals(1, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
   }
 
   @Test
-  fun `one correction can meet desired time with unchanged history capture`() {
+  fun `agentic validation repair can meet desired time with unchanged history capture`() {
     val owner = owner()
     val exercises = (1..6).map { exercise(owner) }
+    provider.repairRejected = true
     provider.handler = { input ->
-      if (provider.calls == 1) providerResponse(exercises.first())
+      if (provider.calls == 1) shortProviderResponse(exercises.first())
       else {
-        assertTrue(input.context.contains("CORRECTION:"))
+        assertEquals(
+          1,
+          input.plannerTranscript.count { it.call.name == "validate_and_finalize_plan" },
+        )
+        assertFalse(json.readTree(input.plannerTranscript.last().result)["valid"].asBoolean())
         json.valueToTree(
           mapOf(
             "result" to
@@ -1962,7 +1972,12 @@ class CalendarAiCaptureIntegrationTest {
 
   private fun providerResponse(exercise: UUID) =
     json.readTree(
-      """{"result":{"name":"Draft","exercises":[{"exerciseId":"$exercise","restSeconds":0,"plannedSets":[{"reps":8,"durationSec":null}]}]}}"""
+      """{"result":{"name":"Draft","exercises":[{"exerciseId":"$exercise","restSeconds":240,"plannedSets":[{"reps":8,"durationSec":null},{"reps":8,"durationSec":null},{"reps":8,"durationSec":null},{"reps":8,"durationSec":null},{"reps":8,"durationSec":null},{"reps":8,"durationSec":null},{"reps":8,"durationSec":null},{"reps":8,"durationSec":null},{"reps":8,"durationSec":null},{"reps":8,"durationSec":null}]}]}}"""
+    )
+
+  private fun shortProviderResponse(exercise: UUID) =
+    json.readTree(
+      """{"result":{"name":"Short draft","exercises":[{"exerciseId":"$exercise","restSeconds":0,"plannedSets":[{"reps":8,"durationSec":null}]}]}}"""
     )
 
   private fun providerContext(
@@ -1987,11 +2002,7 @@ class CalendarAiCaptureIntegrationTest {
   }
 
   private fun projectedWeight(owner: Identity, exercise: UUID): Double? {
-    provider.handler = {
-      json.readTree(
-        """{"result":{"name":"Draft","exercises":[{"exerciseId":"$exercise","restSeconds":0,"plannedSets":[{"reps":8,"durationSec":null}]}]}}"""
-      )
-    }
+    provider.handler = { providerResponse(exercise) }
     val response = actions.calendar(owner, rawRequest())
     return json
       .valueToTree<JsonNode>(response)["proposal"]["snapshot"]["draft"]["exercises"][0][

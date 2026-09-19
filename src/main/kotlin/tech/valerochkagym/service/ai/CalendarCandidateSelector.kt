@@ -78,7 +78,6 @@ internal object CalendarCandidateSelector {
           "muscles" to muscles,
         )
       }
-      .filter { (it["muscles"] as List<*>).isNotEmpty() }
       .sortedWith(
         compareByDescending<Map<String, Any>> { it["goalGroup"] as Int }
           .thenByDescending { it["priority"] as Int }
