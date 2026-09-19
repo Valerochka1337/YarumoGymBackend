@@ -1238,6 +1238,7 @@ class TrainingProposalIntegrationTest {
       exercise,
       json.writeValueAsString(exercise()),
     )
+    db.update("UPDATE catalog_state SET active=true")
     db.update(
       "INSERT INTO records(user_id,kind,id,revision,deleted,payload) VALUES (?,'gym',?,0,false,?::jsonb)",
       id,

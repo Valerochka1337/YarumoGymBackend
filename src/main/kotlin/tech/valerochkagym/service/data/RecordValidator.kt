@@ -245,7 +245,10 @@ class RecordValidator(
       if (n.has("note")) annotation(n, "note", true)
       n["syncId"]?.let(::uuid)
       coachSetFields
-        .filter { it.startsWith("original") || it.startsWith("target") || it.startsWith("actual") }
+        .filter {
+          (it.startsWith("original") || it.startsWith("target") || it.startsWith("actual")) &&
+            it != "actualRirAtLeastFour"
+        }
         .forEach {
           number(
             n,
