@@ -93,6 +93,16 @@ class CoachRunController(
     return emitter
   }
 
+  @GetMapping("/sessions/{workoutId}/event-page")
+  fun eventPage(
+    @AuthenticationPrincipal identity: Identity,
+    @PathVariable workoutId: UUID,
+    @RequestParam(defaultValue = "0") after: Long,
+  ) =
+    ResponseEntity.ok()
+      .header("Cache-Control", "no-store")
+      .body(runs.workoutEvents(identity, workoutId, after))
+
   @PostMapping("/runs")
   fun submit(
     @AuthenticationPrincipal identity: Identity,

@@ -824,6 +824,28 @@ class CoachRunService(
       }
     val hooks =
       object : CoachRunHooks {
+        override fun refreshState(): Pair<JsonNode, String>? {
+          var value: Pair<JsonNode, String>? = null
+          fenced(run) {
+            value =
+              jdbc
+                .query(
+                  "SELECT snapshot::text,context_version FROM coach_sessions WHERE owner_id=? AND workout_id=?",
+                  { r, _ ->
+                    interventions.planningSnapshot(
+                      run.owner,
+                      run.workout,
+                      json.readTree(r.getString(1)),
+                    ) to r.getString(2)
+                  },
+                  run.owner,
+                  run.workout,
+                )
+                .firstOrNull()
+          }
+          return value
+        }
+
         override fun observe(callId: String, args: JsonNode): JsonNode {
           require(run.input["automatic"]?.asBoolean() != true)
           var observed: JsonNode? = null
@@ -929,7 +951,7 @@ class CoachRunService(
     val legacy =
       jdbc
         .query(
-          "SELECT id,payload::text FROM coach_journal WHERE user_id=? AND workout_id=? AND NOT deleted AND payload->>'role' IN ('user','assistant') AND created_at < (SELECT (extract(epoch FROM min(created_at))*1000)::bigint FROM coach_runs WHERE owner_id=? AND workout_id=?) ORDER BY created_at DESC,id LIMIT 40",
+          "SELECT id,payload::text FROM coach_journal WHERE user_id=? AND workout_id=? AND NOT deleted AND payload->>'role' IN ('user','assistant') AND created_at < (SELECT (extract(epoch FROM min(created_at))*1000)::bigint FROM coach_runs WHERE owner_id=? AND workout_id=?) ORDER BY created_at DESC,id",
           { r, _ -> r.getObject(1, UUID::class.java) to json.readTree(r.getString(2)) },
           run.owner,
           run.workout,
@@ -945,7 +967,7 @@ class CoachRunService(
             ?.take(16000)
             ?.let { mapOf("role" to payload["role"].asString(), "text" to it) }
         }
-    val history = (legacy + dialogue.history(run.owner, run.workout, run.id)).takeLast(40)
+    val history = (legacy + dialogue.history(run.owner, run.workout, run.id))
     return (run.input.deepCopy() as tools.jackson.databind.node.ObjectNode).apply {
       set("history", json.valueToTree<JsonNode>(history))
       if (run.input["model"] == null || run.input["model"].isNull) {

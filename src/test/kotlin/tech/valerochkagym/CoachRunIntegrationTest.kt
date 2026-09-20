@@ -169,7 +169,7 @@ class CoachRunIntegrationTest {
     dialogue.runNext()
     runs.session(user, workout, sessionBody(workout, 2, snapshot = snapshot))
     dialogue.runNext()
-    assertTrue(provider.calls > 0)
+    assertEquals(0, provider.calls)
     assertEquals(0, db.queryForObject("SELECT count(*) FROM coach_runs", Int::class.java))
     val events = runs.workoutEvents(user, workout, 0)
     assertEquals(1, events.size)
@@ -253,6 +253,50 @@ class CoachRunIntegrationTest {
     runs.runNext()
     assertEquals("SUCCEEDED", runs.status(user, manual)["state"].asString())
     assertEquals(1, provider.calls)
+  }
+
+  @Test
+  fun `pain is delivered immediately even when narration is leased and provider is unavailable`() {
+    val user = owner()
+    val workout = UUID.randomUUID()
+    val snapshot = interventionSnapshot(workout) as tools.jackson.databind.node.ObjectNode
+    runs.session(user, workout, sessionBody(workout, 1, false, snapshot))
+    db.update(
+      "INSERT INTO coach_presentations(id,owner_id,workout_id,event_type,payload,context_version,lease_until) VALUES (?,?,?,'intervention','{}','context',now()+interval '10 minutes')",
+      UUID.randomUUID(),
+      user.userId,
+      workout,
+    )
+    provider.onCall = { error("provider unavailable") }
+    snapshot.set("reported_feelings", json.valueToTree<JsonNode>(listOf("PAIN")))
+    runs.session(user, workout, sessionBody(workout, 2, false, snapshot))
+    val concern = runs.workoutEvents(user, workout, 0).single { it["type"].asString() == "concern" }
+    assertTrue(concern["text"].asString().startsWith("Останови движение"))
+    assertEquals(0, provider.calls)
+    runs.session(user, workout, sessionBody(workout, 3, false, snapshot))
+    assertEquals(
+      1,
+      runs.workoutEvents(user, workout, 0).count { it["type"].asString() == "concern" },
+    )
+  }
+
+  @Test
+  fun `early priorities remain visible after more than twenty dialogue turns`() {
+    val user = owner()
+    val workout = UUID.randomUUID()
+    val priority = "Последнее упражнение обязательно оставь"
+    repeat(25) { index ->
+      runs.submit(
+        user,
+        request(workout = workout, message = if (index == 0) priority else "Уточнение $index"),
+      )
+      runs.runNext()
+    }
+    assertTrue(
+      provider.inputs.last().messages.any {
+        it["role"].asString() == "user" && it["content"].asString() == priority
+      }
+    )
   }
 
   private fun interventionSnapshot(workout: UUID): JsonNode =
@@ -363,7 +407,7 @@ class CoachRunIntegrationTest {
   }
 
   @Test
-  fun `structured time conflict proposes once without a question or provider`() {
+  fun `time conflict goes through conversational judgement before any proposal`() {
     val user = owner()
     val workout = UUID.randomUUID()
     val snapshot = interventionSnapshot(workout) as tools.jackson.databind.node.ObjectNode
@@ -376,12 +420,12 @@ class CoachRunIntegrationTest {
     runs.session(user, workout, sessionBody(workout, 3, true, snapshot))
     dialogue.runNext()
     assertEquals(
-      1,
+      0,
       db.queryForObject("SELECT count(*) FROM coach_intervention_proposals", Int::class.java),
     )
     assertEquals(0, db.queryForObject("SELECT count(*) FROM coach_questions", Int::class.java))
-    assertEquals(0, db.queryForObject("SELECT count(*) FROM coach_runs", Int::class.java))
-    assertTrue(provider.calls > 0)
+    assertEquals(1, db.queryForObject("SELECT count(*) FROM coach_runs", Int::class.java))
+    assertEquals(0, provider.calls)
   }
 
   @Test
@@ -667,7 +711,10 @@ class CoachRunIntegrationTest {
     val user = owner()
     val workout = UUID.randomUUID()
     val snapshot = interventionSnapshot(workout) as tools.jackson.databind.node.ObjectNode
-    snapshot.put("available_time_minutes", 0)
+    (snapshot["exercises"][0]["sets"][1] as tools.jackson.databind.node.ObjectNode).set(
+      "reported_feelings",
+      json.valueToTree<JsonNode>(listOf("HARDER_THAN_EXPECTED")),
+    )
     runs.session(user, workout, sessionBody(workout, 1, false, snapshot))
     db.update("UPDATE coach_sessions SET behavior_mode='ENFORCE' WHERE owner_id=?", user.userId)
     runs.session(user, workout, sessionBody(workout, 2, true, snapshot))

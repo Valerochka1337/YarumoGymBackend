@@ -102,6 +102,9 @@ class CoachRunExecutorTest {
     val texts = mutableListOf<String>()
     var checks = 0
     var reject = false
+    var fresh: Pair<JsonNode, String>? = null
+
+    override fun refreshState() = fresh
 
     override fun checkpoint(value: JsonNode) {
       saved = value
@@ -156,6 +159,62 @@ class CoachRunExecutorTest {
       json,
       clock,
     )
+
+  @Test
+  fun `state read refreshes the snapshot and checkpoints its context version`() {
+    val provider = Provider()
+    val hooks = Hooks()
+    val fresh = snapshot().deepCopy() as tools.jackson.databind.node.ObjectNode
+    fresh.put("revision", 8)
+    hooks.fresh = fresh to "ctx-8"
+    val messages =
+      listOf(
+        tree(
+          mapOf(
+            "role" to "assistant",
+            "tool_calls" to listOf(call("get_workout_state", emptyMap<String, String>())),
+          )
+        )
+      )
+    executor(provider).execute(owner, input(), checkpoint(messages), hooks)
+    val output =
+      json.readTree(
+        provider.received!!.messages.first { it["role"].asString() == "tool" }["content"].asString()
+      )
+    assertEquals(8, output["revision"].asInt())
+    assertEquals("ctx-8", hooks.saved!!["contextVersion"].asString())
+  }
+
+  @Test
+  fun `pending proposal blocks a second change but still permits an answer`() {
+    val provider = Provider()
+    val hooks = Hooks()
+    val fresh = snapshot().deepCopy() as tools.jackson.databind.node.ObjectNode
+    fresh.set("pending_proposals", tree(listOf(mapOf("proposalId" to "pending"))))
+    hooks.fresh = fresh to "ctx-7"
+    val args =
+      mapOf(
+        "base_revision" to 7,
+        "operations" to
+          listOf(
+            mapOf("action" to "edit_set", "set_id" to next, "values" to mapOf("weight_kg" to 95))
+          ),
+      )
+    val messages =
+      listOf(
+        tree(
+          mapOf("role" to "assistant", "tool_calls" to listOf(call("submit_workout_changes", args)))
+        )
+      )
+    val result = executor(provider).execute(owner, input(), checkpoint(messages), hooks)
+    assertEquals("answer", result["kind"].asString())
+    assertFalse(result.has("proposal"))
+    val output =
+      json.readTree(
+        provider.received!!.messages.first { it["role"].asString() == "tool" }["content"].asString()
+      )
+    assertEquals("invalid_tool_arguments", output["error"].asString())
+  }
 
   @Test
   fun `resuming a completed read tool never dispatches it twice`() {

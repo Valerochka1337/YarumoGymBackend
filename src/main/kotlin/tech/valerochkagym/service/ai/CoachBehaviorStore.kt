@@ -72,10 +72,13 @@ class CoachBehaviorStore(
           "schemaVersion" to 1,
           "eventId" to eventId,
           "stateVersion" to version,
-          "text" to CoachBehaviorPolicy.CONCERN_TEXT,
+          "text" to
+            if ((input.concerns - previous.seenConcerns).any { it.endsWith(":PAIN") })
+              "Останови движение, которое вызывает боль."
+            else "Прерви подход, в котором нарушается техника.",
           "decision" to decision,
         )
-      dialogue.enqueue(owner, workout, "concern", json.valueToTree(payload))
+      dialogue.emit(owner, workout, "concern", json.valueToTree(payload))
     }
     return decision
   }

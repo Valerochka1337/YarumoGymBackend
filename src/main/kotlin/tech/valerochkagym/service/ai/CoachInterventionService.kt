@@ -56,6 +56,7 @@ class CoachInterventionService(
         "behavior_facts",
         "coach_questions",
         "open_concerns",
+        "pending_proposals",
       )
       .forEach { copy.remove(it) }
     if (copy.has("available_time_ends_at_millis")) copy.remove("available_time_minutes")
@@ -183,8 +184,7 @@ class CoachInterventionService(
     if (!behavior.enforce(owner, workout)) return false
     val decision = assessment(owner, planningSnapshot(owner, workout, snapshot))
     when (decision["reason_code"].asString()) {
-      "confirmed_harder_adjustment",
-      "time_capacity" -> {
+      "confirmed_harder_adjustment" -> {
         publish(owner, workout, snapshot, context, decision)
         return true
       }
@@ -342,7 +342,8 @@ class CoachInterventionService(
           !stale &&
             !expired &&
             answer == "HARDER_THAN_EXPECTED" &&
-            decision["kind"].asString() == "ADJUST"
+            decision["kind"].asString() == "ADJUST" &&
+            decision["reason_code"].asString() != "time_capacity"
         )
           publish(identity.userId, workout, derived, context, decision, derived)
         else
@@ -518,6 +519,32 @@ class CoachInterventionService(
     return (snapshot.deepCopy() as ObjectNode).apply {
       set("behavior_facts", facts)
       set(
+        "decisions",
+        tree(
+          jdbc.query(
+            "SELECT payload::text FROM coach_decisions WHERE owner_id=? AND workout_id=? ORDER BY created_at,proposal_id",
+            { r, _ -> json.readTree(r.getString(1)) },
+            owner,
+            workout,
+          )
+        ),
+      )
+      set(
+        "pending_proposals",
+        tree(
+          jdbc.query(
+            "SELECT payload->'proposal' FROM coach_intervention_proposals WHERE owner_id=? AND workout_id=? AND status='PRESENTED' AND expires_at>? UNION ALL SELECT result->'proposal' FROM coach_runs r WHERE owner_id=? AND workout_id=? AND state='SUCCEEDED' AND result->>'kind'='proposal' AND (result->'proposal'->>'expiresAtMillis')::bigint>? AND NOT EXISTS (SELECT 1 FROM coach_run_receipts p WHERE p.owner_id=r.owner_id AND p.request_id=r.request_id)",
+            { r, _ -> json.readTree(r.getString(1)) },
+            owner,
+            workout,
+            clock.millis(),
+            owner,
+            workout,
+            clock.millis(),
+          )
+        ),
+      )
+      set(
         "coach_questions",
         tree(
           jdbc.query(
@@ -603,7 +630,7 @@ class CoachInterventionService(
   fun answeredFacts(owner: UUID, workout: UUID): JsonNode =
     tree(
       jdbc.query(
-        "SELECT set_id,payload->>'answer',question_id,payload::text FROM coach_questions WHERE owner_id=? AND workout_id=? AND status='ANSWERED' ORDER BY expires_at DESC LIMIT 30",
+        "SELECT set_id,payload->>'answer',question_id,payload::text FROM coach_questions WHERE owner_id=? AND workout_id=? AND status='ANSWERED' ORDER BY expires_at DESC",
         { r, _ ->
           mapOf(
             "setId" to r.getObject(1).toString(),
