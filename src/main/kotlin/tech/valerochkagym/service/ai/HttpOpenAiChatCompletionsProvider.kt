@@ -235,6 +235,9 @@ class HttpOpenAiChatCompletionsProvider(
           "additionalProperties" to false,
           "required" to listOf("plan"),
           "properties" to mapOf("plan" to planSchema),
+          // References in planSchema are rooted at #/$defs. Once the schema is embedded as a
+          // tool argument, its definitions must therefore be available at the tool root too.
+          "\u0024defs" to planSchema["\u0024defs"],
         ),
       ),
     )
