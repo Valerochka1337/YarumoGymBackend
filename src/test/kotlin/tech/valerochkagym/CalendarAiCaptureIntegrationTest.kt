@@ -69,7 +69,7 @@ class CalendarAiCaptureIntegrationTest {
   }
 
   class FakeProvider : PlannerToolCallingProvider {
-    override val available = true
+    override var available = true
     var calls = 0
     var repairRejected = false
     var handler: (AiProviderInput) -> JsonNode = { error("test handler absent") }
@@ -152,6 +152,7 @@ class CalendarAiCaptureIntegrationTest {
   @Autowired lateinit var explanations: tech.valerochkagym.service.ai.PlannerExplanationStore
   @Autowired lateinit var contexts: AiContextReader
   @Autowired lateinit var provider: FakeProvider
+  @Autowired lateinit var diagnostics: tech.valerochkagym.service.ai.AiDiagnostics
   @Autowired lateinit var hooks: BarrierHooks
   @Autowired lateinit var db: JdbcTemplate
   @Autowired lateinit var json: ObjectMapper
@@ -165,6 +166,7 @@ class CalendarAiCaptureIntegrationTest {
     )
     db.update("UPDATE catalog_state SET revision=9,active=false")
     provider.calls = 0
+    provider.available = true
     provider.repairRejected = false
     provider.handler = { error("test handler absent") }
     hooks.finalLock = null
@@ -1553,6 +1555,7 @@ class CalendarAiCaptureIntegrationTest {
   fun `invalid provider output persists only fixed error code`() {
     val owner = owner()
     exercise(owner)
+    val previous = diagnostics.snapshot().map { it.id }.toSet()
     provider.handler = { throw IllegalStateException("secret raw content") }
     val job = jobs.submit(owner, rawRequest())
     jobs.runNext()
@@ -1560,6 +1563,41 @@ class CalendarAiCaptureIntegrationTest {
     assertEquals("FAILED", failed.state)
     assertEquals("ai_invalid_response", failed.errorCode)
     assertNull(failed.result)
+    val run = diagnostics.snapshot().single { it.id !in previous }
+    assertEquals(
+      tech.valerochkagym.service.ai.AiDiagnosticFailureCategory.INTERNAL,
+      run.failureCategory,
+    )
+    assertFalse(json.writeValueAsString(run).contains("secret raw content"))
+  }
+
+  @Test
+  fun `job diagnostics capture unavailable provider before calendar execution without private data`() {
+    val owner = owner()
+    exercise(owner)
+    val previous = diagnostics.snapshot().map { it.id }.toSet()
+    val job = jobs.submit(owner, rawRequest())
+    provider.available = false
+    jobs.runNext()
+    val failed = jobs.status(owner, UUID.fromString(job.requestId))
+    assertEquals("FAILED", failed.state)
+    assertEquals("ai_unavailable", failed.errorCode)
+    assertEquals(0, provider.calls)
+    val run = diagnostics.snapshot().single { it.id !in previous }
+    assertEquals(tech.valerochkagym.service.ai.AiDiagnosticOutcome.FAILURE, run.outcome)
+    assertEquals(
+      tech.valerochkagym.service.ai.AiDiagnosticFailureCategory.PROVIDER_UNCONFIGURED,
+      run.failureCategory,
+    )
+    assertEquals(
+      listOf(tech.valerochkagym.service.ai.AiDiagnosticStage.CALENDAR_JOB),
+      run.stages.map { it.stage },
+    )
+    val encoded = json.writeValueAsString(run)
+    assertFalse(encoded.contains(owner.userId.toString()))
+    assertFalse(encoded.contains(owner.sessionId.toString()))
+    assertFalse(encoded.contains(job.requestId))
+    assertEquals(0, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
   }
 
   @Test

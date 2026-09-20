@@ -7,6 +7,7 @@ internal class CalendarPlannerAgent(
   private val maxAttemptBytes: Int = PlannerToolProtocol.maxAttemptBytes,
   private val maxRounds: Int = PlannerToolProtocol.defaultMaxRounds,
   private val maxCalls: Int = PlannerToolProtocol.defaultMaxCalls,
+  private val diagnostics: AiDiagnostics? = null,
 ) {
   fun run(
     candidateIds: Set<String>,
@@ -19,7 +20,10 @@ internal class CalendarPlannerAgent(
     require(maxRounds in 1..20 && maxCalls in 1..40)
     repeat(maxRounds) {
       if (deadlineMillis() <= 0) throw aiError("ai_timeout")
-      val next = turn(transcript.toList())
+      diagnostics?.recordRound()
+      val next =
+        diagnostics?.observe(AiDiagnosticStage.PLANNER_TURN) { turn(transcript.toList()) }
+          ?: turn(transcript.toList())
       if (deadlineMillis() <= 0) throw aiError("ai_timeout")
       next.final?.let { final ->
         if (next.calls.isNotEmpty()) throw aiError("ai_invalid_response")
@@ -32,7 +36,9 @@ internal class CalendarPlannerAgent(
         if (++calls > maxCalls) throw aiError("ai_invalid_response")
         PlannerToolProtocol.validate(call, candidateIds, patternIds)
         if (deadlineMillis() <= 0) throw aiError("ai_timeout")
-        val result = tool(call)
+        diagnostics?.recordToolCall()
+        val result =
+          diagnostics?.observe(AiDiagnosticStage.PLANNER_TOOL) { tool(call) } ?: tool(call)
         if (deadlineMillis() <= 0) throw aiError("ai_timeout")
         // The aggregate is checked before retaining either half of the exchange.
         if (result.size !in 1..16_384 || bytes + call.bytes.size + result.size > maxAttemptBytes)

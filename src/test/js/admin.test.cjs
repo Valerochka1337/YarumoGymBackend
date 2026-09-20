@@ -227,3 +227,40 @@ test('planner settings edit drafts and save server configuration without startin
   await until(()=>ui.w.document.getElementById('notice').textContent==='Настройки планировщика сохранены');
   assert.equal(ui.errors.length,0);
 });
+
+test('AI diagnostics renders only sanitized fields, filters locally, and copies without writes',async t=>{
+  const attack='<img src=x onerror="window.compromised=true">';
+  const diagnostics={
+    generatedAt:'2026-09-20T10:00:00Z',
+    retention:{maxRuns:200,maxAgeHours:24,processLocal:true,lostOnRestart:true},
+    database:{status:'OK'},calendarQueue:{status:'ERROR',queued:null,running:null,failed:null,ready:null},
+    runs:[
+      {id:'00000000-0000-4000-8000-000000000001',startedAt:'2026-09-20T09:59:00Z',durationMs:12,outcome:'FAILURE',failureCategory:'UPSTREAM_REJECTED',model:attack,httpStatus:400,upstreamCode:'<script>secret</script>',upstreamType:'invalid_request_error',upstreamParam:'tools',rounds:1,toolCalls:2,stages:[{stage:'PLANNER_TOOL',outcome:'FAILURE',durationMs:2}],ownerId:'must-not-copy'},
+      {id:'00000000-0000-4000-8000-000000000002',startedAt:'2026-09-20T09:58:00Z',durationMs:4,outcome:'SUCCESS',failureCategory:'NONE',model:null,httpStatus:null,upstreamCode:null,upstreamType:null,upstreamParam:null,rounds:0,toolCalls:0,stages:[]},
+    ],
+  };
+  const ui=await setup({'GET /admin/api/ai-diagnostics':()=>({data:diagnostics})});
+  t.after(()=>ui.dom.window.close());
+  let copied='';Object.defineProperty(ui.w.navigator,'clipboard',{value:{writeText:async value=>{copied=value;}}});
+  ui.click('ИИ · Диагностика');
+  await until(()=>ui.w.document.getElementById('ai-diagnostics').textContent.includes('Ограничения диагностики'));
+  const root=ui.w.document.getElementById('ai-diagnostics');
+  assert.equal(root.querySelector('img'),null);assert.equal(ui.w.compromised,undefined);
+  assert.equal(root.textContent.includes('<script>secret</script>'),false);
+  const outcome=root.querySelector('select[aria-label="Исход попытки"]');outcome.value='FAILURE';outcome.dispatchEvent(new ui.w.Event('change'));
+  await until(()=>root.textContent.includes('00000000'));
+  assert.equal(root.textContent.includes('000000000002'),false);
+  [...root.querySelectorAll('button')].find(x=>x.textContent==='Скопировать отчёт').click();await until(()=>copied);
+  assert.equal(copied.includes('must-not-copy'),false);assert.equal(copied.includes('<script>secret</script>'),false);
+  assert.equal(copied.includes('PLANNER_TOOL'),true);
+  assert.ok(ui.requests.every(request=>request.method==='GET'));
+  assert.equal(root.textContent.includes('После перезапуска данные теряются'),true);
+  assert.equal(ui.errors.length,0);
+});
+
+test('AI diagnostics shows an explicit empty state',async t=>{
+  const ui=await setup({'GET /admin/api/ai-diagnostics':()=>({data:{generatedAt:'2026-09-20T10:00:00Z',retention:{maxRuns:200,maxAgeHours:24,processLocal:true,lostOnRestart:true},database:{status:'OK'},calendarQueue:{status:'OK',queued:0,running:0,failed:0,ready:0},runs:[]}})});
+  t.after(()=>ui.dom.window.close());ui.click('ИИ · Диагностика');
+  await until(()=>ui.w.document.getElementById('ai-diagnostics').textContent.includes('Нет диагностических запусков'));
+  assert.equal(ui.requests.filter(request=>request.path.endsWith('/ai-diagnostics')).every(request=>request.method==='GET'),true);
+});

@@ -19,10 +19,16 @@ class HttpOpenAiChatCompletionsProvider(
       .followRedirects(HttpClient.Redirect.NEVER)
       .build(),
   private val deadlineMillis: Long = 45000,
+  private val diagnostics: AiDiagnostics = AiDiagnostics(),
 ) : PlannerToolCallingProvider {
   override val available = true
 
-  override fun generate(input: AiProviderInput): JsonNode {
+  override fun generate(input: AiProviderInput): JsonNode =
+    diagnostics.observe(AiDiagnosticStage.PROVIDER_HTTP, input.model ?: settings.textModel) {
+      generateHttp(input)
+    }
+
+  private fun generateHttp(input: AiProviderInput): JsonNode {
     val requestDeadlineMillis = minOf(deadlineMillis, input.timeoutMillis ?: deadlineMillis)
     if (requestDeadlineMillis <= 0) throw aiError("ai_timeout")
     var pending: CompletableFuture<HttpResponse<ByteArray>>? = null
@@ -70,7 +76,10 @@ class HttpOpenAiChatCompletionsProvider(
           .build()
       pending = client.sendAsync(request) { BoundedAiBodySubscriber(256 * 1024) }
       val response = pending.get(requestDeadlineMillis, TimeUnit.MILLISECONDS)
-      if (response.statusCode() != 200) throw aiError("ai_unavailable")
+      if (response.statusCode() != 200) {
+        recordNonSuccess(response.statusCode(), response.body())
+        throw aiError("ai_unavailable")
+      }
       val root = json.readTree(response.body())
       val choices = root["choices"]
       if (choices?.isArray != true || choices.size() != 1) throw aiError("ai_invalid_response")
@@ -110,7 +119,12 @@ class HttpOpenAiChatCompletionsProvider(
    * already bounded/redacted candidate/history context; no account, credential, health or
    * unconsented note data is introduced by these messages.
    */
-  override fun generatePlannerTurn(input: AiProviderInput): PlannerTurn {
+  override fun generatePlannerTurn(input: AiProviderInput): PlannerTurn =
+    diagnostics.observe(AiDiagnosticStage.PROVIDER_HTTP, input.model ?: settings.textModel) {
+      generatePlannerTurnHttp(input)
+    }
+
+  private fun generatePlannerTurnHttp(input: AiProviderInput): PlannerTurn {
     val requestDeadlineMillis = minOf(deadlineMillis, input.timeoutMillis ?: deadlineMillis)
     if (requestDeadlineMillis <= 0) throw aiError("ai_timeout")
     var pending: CompletableFuture<HttpResponse<ByteArray>>? = null
@@ -177,7 +191,10 @@ class HttpOpenAiChatCompletionsProvider(
           .build()
       pending = client.sendAsync(request) { BoundedAiBodySubscriber(256 * 1024) }
       val response = pending.get(requestDeadlineMillis, TimeUnit.MILLISECONDS)
-      if (response.statusCode() != 200) throw aiError("ai_unavailable")
+      if (response.statusCode() != 200) {
+        recordNonSuccess(response.statusCode(), response.body())
+        throw aiError("ai_unavailable")
+      }
       return parsePlannerTurn(json.readTree(response.body()))
     } catch (e: InterruptedException) {
       Thread.currentThread().interrupt()
@@ -221,6 +238,20 @@ class HttpOpenAiChatCompletionsProvider(
         ),
       ),
     )
+
+  private fun recordNonSuccess(status: Int, body: ByteArray) {
+    try {
+      val error = json.readTree(body)?.get("error")
+      diagnostics.recordHttp(
+        status,
+        error?.get("code")?.asText(),
+        error?.get("type")?.asText(),
+        error?.get("param")?.asText(),
+      )
+    } catch (_: Exception) {
+      diagnostics.recordHttp(status)
+    }
+  }
 
   private fun candidateToolParameters(): Map<String, Any> =
     mapOf(

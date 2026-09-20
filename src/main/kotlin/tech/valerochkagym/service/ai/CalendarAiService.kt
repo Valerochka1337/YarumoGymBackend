@@ -47,6 +47,7 @@ class CalendarAiService(
   private val jdbc: JdbcTemplate,
   private val plannerConfiguration: PlannerConfigurationService,
   private val aiSettings: AiSettingsService,
+  private val diagnostics: AiDiagnostics = AiDiagnostics(),
 ) {
   /**
    * V2 is additive: the existing durable attempt/45s receipt owns generation. Projection is built
@@ -97,7 +98,16 @@ class CalendarAiService(
     )
   }
 
-  fun refine(identity: Identity, proposalId: UUID, raw: ByteArray): ProposalResponse {
+  fun refine(identity: Identity, proposalId: UUID, raw: ByteArray): ProposalResponse =
+    diagnostics.observe(AiDiagnosticStage.CALENDAR_REFINE) {
+      refineUnobserved(identity, proposalId, raw)
+    }
+
+  private fun refineUnobserved(
+    identity: Identity,
+    proposalId: UUID,
+    raw: ByteArray,
+  ): ProposalResponse {
     val request = parseRefinement(raw)
     if (
       !canonicalUuid(request.requestId) ||
@@ -313,6 +323,7 @@ class CalendarAiService(
             },
             maxRounds = runtime.maxRounds,
             maxCalls = runtime.maxToolCalls,
+            diagnostics = diagnostics,
           )
           .run(candidateIds.toSet(), adaptive.patterns.keys) {
             remainingRefinementMillis(deadlineAt)
@@ -494,6 +505,18 @@ class CalendarAiService(
   }
 
   internal fun create(
+    identity: Identity,
+    raw: ByteArray,
+    agentic: Boolean = false,
+    projectionCaptured: ((List<String>, StrengthPlannerSkeleton) -> Unit)? = null,
+    publicationGuard: () -> Unit = {},
+    publish: (CalendarDraftResponse) -> Unit = {},
+  ): CalendarDraftResponse =
+    diagnostics.observe(AiDiagnosticStage.CALENDAR_CREATE) {
+      createUnobserved(identity, raw, agentic, projectionCaptured, publicationGuard, publish)
+    }
+
+  private fun createUnobserved(
     identity: Identity,
     raw: ByteArray,
     agentic: Boolean = false,
@@ -768,6 +791,7 @@ class CalendarAiService(
               },
               maxRounds = runtime.maxRounds,
               maxCalls = runtime.maxToolCalls,
+              diagnostics = diagnostics,
             )
             .run(
               candidates.mapTo(mutableSetOf()) { it["exerciseId"] as String },
@@ -947,7 +971,8 @@ class CalendarAiService(
       requireNotNull(final.response)
     } catch (e: ApiException) {
       terminalFailure(identity, request.requestId, e)
-    } catch (_: Exception) {
+    } catch (error: Exception) {
+      diagnostics.recordLocalFailure(error)
       terminalFailure(identity, request.requestId, aiError("ai_invalid_response"))
     }
   }

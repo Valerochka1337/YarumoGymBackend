@@ -42,6 +42,7 @@ class CalendarDraftJobService(
   private val json: ObjectMapper,
   private val clock: Clock,
   @Value("\${gym.calendar-jobs.enabled:true}") private val enabled: Boolean,
+  private val diagnostics: AiDiagnostics = AiDiagnostics(),
 ) {
   private val active = AtomicBoolean(false)
 
@@ -304,9 +305,22 @@ class CalendarDraftJobService(
           )
         if (changed == 0) null else read(candidate.owner, candidate.id)
       } ?: return
+    val diagnosticScope =
+      try {
+        diagnostics.open(AiDiagnosticStage.CALENDAR_JOB)
+      } catch (_: Exception) {
+        null
+      }
     try {
       if (claimed.executions > 3) throw aiError("ai_interrupted")
-      if (!provider.available) throw aiError("ai_unavailable")
+      if (!provider.available) {
+        try {
+          diagnostics.recordFailure(AiDiagnosticFailureCategory.PROVIDER_UNCONFIGURED)
+        } catch (_: Exception) {
+          // Diagnostics must not alter job handling.
+        }
+        throw aiError("ai_unavailable")
+      }
       val intent = json.readValue(claimed.intent, CalendarDraftRequest::class.java)
       if (intent.startsAtMillis <= clock.millis()) {
         finish(claimed, "EXPIRED", null)
@@ -339,6 +353,12 @@ class CalendarDraftJobService(
         },
       )
     } catch (e: Exception) {
+      try {
+        diagnostics.recordLocalFailure(e)
+        diagnosticScope?.fail(e)
+      } catch (_: Exception) {
+        // Diagnostics must not alter job handling.
+      }
       val code = (e as? ApiException)?.code
       val safe =
         code?.takeIf {
@@ -361,6 +381,8 @@ class CalendarDraftJobService(
         if (expired) "EXPIRED" else if (safe == "ai_context_stale") "STALE" else "FAILED",
         if (expired) null else safe,
       )
+    } finally {
+      diagnosticScope?.close()
     }
   }
 
