@@ -267,7 +267,6 @@ class HttpOpenAiChatCompletionsProvider(
             mapOf(
               "type" to "array",
               "maxItems" to PlannerToolProtocol.maxCandidateIds,
-              "uniqueItems" to true,
               "items" to mapOf("type" to "string", "format" to "uuid"),
             )
         ),

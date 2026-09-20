@@ -154,6 +154,9 @@ class HttpOpenAiChatCompletionsProviderTest {
     assertEquals("calendar_draft_v2", body["response_format"]["json_schema"]["name"].asString())
     assertEquals(3, body["tools"].size())
     assertEquals("get_strength_skeleton", body["tools"][0]["function"]["name"].asString())
+    assertFalse(
+      body["tools"][1]["function"]["parameters"]["properties"]["candidateIds"].has("uniqueItems")
+    )
     val finalizeParameters = body["tools"][2]["function"]["parameters"]
     assertTrue(finalizeParameters["\u0024defs"].has("ProviderOutput"))
     assertEquals(
