@@ -20,7 +20,12 @@ internal object TestPlannerTurns {
     if (last == null) {
       val context = json.readTree(input.context)
       val planning = context["planningContext"] ?: context
-      val id = planning["plannerPatternCatalog"]["recommendedPatternId"].asString()
+      val id =
+        planning["plannerPatternCatalog"]["collections"]
+          .flatMap { it["patterns"].toList() }
+          .map { it["id"].asString() }
+          .sorted()
+          .first()
       return PlannerTurn(
         calls =
           listOf(

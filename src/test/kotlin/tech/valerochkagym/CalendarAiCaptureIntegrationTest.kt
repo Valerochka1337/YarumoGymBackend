@@ -72,6 +72,7 @@ class CalendarAiCaptureIntegrationTest {
     override var available = true
     var calls = 0
     var repairRejected = false
+    var historyCandidateIds = emptyList<String>()
     var handler: (AiProviderInput) -> JsonNode = { error("test handler absent") }
 
     override fun generate(input: AiProviderInput): JsonNode {
@@ -79,8 +80,30 @@ class CalendarAiCaptureIntegrationTest {
       return handler(input)
     }
 
-    override fun generatePlannerTurn(input: AiProviderInput) =
-      TestPlannerTurns.turn(input, ::generate, repairRejected)
+    override fun generatePlannerTurn(
+      input: AiProviderInput
+    ): tech.valerochkagym.service.ai.PlannerTurn {
+      if (
+        historyCandidateIds.isNotEmpty() &&
+          input.plannerTranscript.isNotEmpty() &&
+          input.plannerTranscript.none { it.call.name == "get_candidate_details_and_history" }
+      ) {
+        return tech.valerochkagym.service.ai.PlannerTurn(
+          calls =
+            listOf(
+              tech.valerochkagym.service.ai.PlannerToolProtocol.Call(
+                "history",
+                "get_candidate_details_and_history",
+                historyCandidateIds,
+                tools.jackson.databind.json.JsonMapper.builder()
+                  .build()
+                  .writeValueAsBytes(mapOf("candidateIds" to historyCandidateIds)),
+              )
+            )
+        )
+      }
+      return TestPlannerTurns.turn(input, ::generate, repairRejected)
+    }
   }
 
   class BarrierHooks : CalendarAiExecutionHooks {
@@ -168,6 +191,7 @@ class CalendarAiCaptureIntegrationTest {
     provider.calls = 0
     provider.available = true
     provider.repairRejected = false
+    provider.historyCandidateIds = emptyList()
     provider.handler = { error("test handler absent") }
     hooks.finalLock = null
     hooks.proposalInsert = null
@@ -289,7 +313,12 @@ class CalendarAiCaptureIntegrationTest {
       capturedAt - 1,
       sets(tupleTarget, 1, completedAt = factTime, actual = 20.0, actualReps = 8),
     )
-    assertEquals(20.0, projectedWeight(tupleOwner, tupleTarget))
+    provider.handler = { providerResponse(tupleTarget) }
+    val firstSet =
+      actions.calendar(tupleOwner, rawRequest()).proposal.snapshot.draft.exercises.single().plannedSets.first()
+    // The descending ten-set plan starts at ten reps, projected from the canonical 20 kg x 8 set.
+    assertEquals(10, firstSet.reps)
+    assertEquals(17.5, firstSet.weightKg)
   }
 
   @Test
@@ -1848,6 +1877,100 @@ class CalendarAiCaptureIntegrationTest {
       assertThrows<ApiException> { explanations.read(owner(), response.proposal.proposalId) }.status,
     )
     assertFalse(json.valueToTree<JsonNode>(response.proposal).has("explanation"))
+  }
+
+  @Test
+  fun `creation and refinement send completed history in initial context and tool response`() {
+    val owner = owner()
+    val upper = exercise(owner, muscles = listOf(mapOf("muscle" to "LATS", "contribution" to 100)))
+    val lower = exercise(owner, muscles = listOf(mapOf("muscle" to "QUADS", "contribution" to 100)))
+    record(
+      owner,
+      "profile",
+      UUID.randomUUID(),
+      mapOf(
+        "trainingGoal" to "MUSCLE_GAIN",
+        "sex" to null,
+        "birthDate" to null,
+        "experienceLevel" to null,
+        "plannedSessionsPerWeek" to 3,
+        "preferredSessionDurationMinutes" to 45,
+        "manualConstraints" to null,
+        "equipmentIds" to emptyList<String>(),
+      ),
+    )
+    val last = UUID.randomUUID()
+    workout(
+      owner,
+      UUID.randomUUID(),
+      capturedAt - 3 * 86_400_000L,
+      capturedAt - 3 * 86_400_000L + 1000,
+      sets(lower, 2),
+    )
+    workout(
+      owner,
+      last,
+      capturedAt - 2 * 86_400_000L,
+      capturedAt - 2 * 86_400_000L + 1000,
+      sets(upper, 3, actual = 50.0, actualReps = 10, note = "private-set-note"),
+      note = "private-workout-note",
+    )
+    val unfinished = UUID.randomUUID()
+    workout(owner, unfinished, capturedAt - 1000, capturedAt, sets(lower, 9))
+    db.update(
+      "UPDATE records SET payload=jsonb_set(payload,'{finishedAt}','null') WHERE user_id=? AND id=?",
+      owner.userId,
+      unfinished,
+    )
+    assertEquals(2, capture(owner).workouts.size)
+    // Active workouts intentionally prevent proposal publication; deletion also must not restore
+    // this unfinished session to the context used by creation or refinement.
+    db.update(
+      "UPDATE records SET deleted=true,payload=null WHERE user_id=? AND id=?",
+      owner.userId,
+      unfinished,
+    )
+    val other = owner()
+    workout(other, UUID.randomUUID(), capturedAt - 500, capturedAt, sets(upper, 99))
+    provider.historyCandidateIds = listOf(upper.toString())
+    provider.handler = { input ->
+      val context = json.readTree(input.context)
+      val planning = context["planningContext"] ?: context
+      val recent = planning["workoutHistory"]["recentWorkouts"]
+      assertEquals(2, recent.size())
+      assertEquals(upper.toString(), recent[0]["exercises"][0]["exerciseId"].asString())
+      assertEquals(3, recent[0]["exercises"][0]["completedSetCounts"]["work"].asInt())
+      assertEquals(100, recent[0]["exercises"][0]["currentMuscleContributions"]["LATS"].asInt())
+      assertEquals(lower.toString(), recent[1]["exercises"][0]["exerciseId"].asString())
+      val historyCall =
+        input.plannerTranscript.single { it.call.name == "get_candidate_details_and_history" }
+      val history = json.readTree(historyCall.result)["history"]
+      assertEquals("AVAILABLE", history["status"].asString())
+      assertEquals(1, history["recentWorkouts"].size())
+      assertEquals(
+        recent[0]["finishedLocalTime"],
+        history["recentWorkouts"][0]["finishedLocalTime"],
+      )
+      assertEquals(
+        3,
+        history["recentWorkouts"][0]["exercises"][0]["completedSetCounts"]["work"].asInt(),
+      )
+      val outgoing = input.context + historyCall.result.toString(Charsets.UTF_8)
+      listOf(
+          "private-set-note",
+          "private-workout-note",
+          last.toString(),
+          other.userId.toString(),
+          "actualWeightKg",
+          "actualReps",
+        )
+        .forEach { assertFalse(outgoing.contains(it), it) }
+      if (context.has("planningContext")) refinedProviderResponse(upper, lower)
+      else providerResponse(upper)
+    }
+    val created = actions.calendar(owner, rawRequest())
+    actions.refineCalendar(owner, created.proposal.proposalId, refinementRequest(UUID.randomUUID()))
+    assertEquals(2, provider.calls)
   }
 
   @Test

@@ -305,8 +305,16 @@ internal object CalendarPlannerContext {
       } else if (node.isArray) node.forEach(::redact)
     }
     redact(root)
-    // Agentic turns never receive raw observation tuples; candidate detail remains tool-gated.
+    // Replace raw observations with an explicit completed-session sequence for every goal.
     (root as tools.jackson.databind.node.ObjectNode).remove("history")
+    root["candidates"].forEach { candidate ->
+      (candidate as tools.jackson.databind.node.ObjectNode).remove("lastObservationIds")
+      candidate.remove("historyStatus")
+    }
+    root.replace(
+      "workoutHistory",
+      json.valueToTree(PlannerWorkoutHistory.summarize(captured, request.timeZoneId)),
+    )
     val musclesByExercise =
       captured.candidates.associate { source ->
         source.id to
@@ -367,18 +375,23 @@ internal object CalendarPlannerContext {
         "plannerPatternCatalog",
         json.valueToTree(
           mapOf(
-            "collectionId" to planner.collection.id,
-            "collectionName" to planner.collection.name,
-            "sequence" to planner.collection.sequence,
-            "recommendedPatternId" to
-              planner.recommendedPatternId(captured.workouts, captured.facts + captured.olderFacts),
-            "patterns" to
-              planner.collection.patterns.map {
+            "selectionGuidance" to
+              "All configured patterns are equally available. Choose from user goal, coverage, history and actual workout order.",
+            "collections" to
+              planner.configuration.collections.map { collection ->
                 mapOf(
-                  "id" to it.id,
-                  "name" to it.name,
-                  "focus" to it.focus,
-                  "description" to it.description,
+                  "id" to collection.id,
+                  "name" to collection.name,
+                  "goal" to collection.goal,
+                  "patterns" to
+                    collection.patterns.map {
+                      mapOf(
+                        "id" to it.id,
+                        "name" to it.name,
+                        "focus" to it.focus,
+                        "description" to it.description,
+                      )
+                    },
                 )
               },
           )

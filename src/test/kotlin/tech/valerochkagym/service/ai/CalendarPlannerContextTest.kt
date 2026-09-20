@@ -289,10 +289,25 @@ class CalendarPlannerContextTest {
         listOf(pattern),
         listOf(pattern.id),
       )
+    val strengthPattern =
+      PlannerPattern(
+        "upper-a",
+        "Upper A",
+        "UPPER",
+        "Strength pattern",
+        listOf(PlannerPatternSlot("PRIMARY", "press", repsMin = 3, repsMax = 6)),
+      )
+    val strengthCollection =
+      PlannerPatternCollection(
+        "strength",
+        "STRENGTH",
+        "Strength",
+        listOf(strengthPattern),
+        listOf(strengthPattern.id),
+      )
     val adaptive =
       AdaptivePlannerContext(
-        PlannerConfiguration(collections = listOf(collection)),
-        collection,
+        PlannerConfiguration(collections = listOf(collection, strengthCollection)),
         eligible.map { it.getValue("exerciseId") as String },
       )
     val payload =
@@ -337,8 +352,15 @@ class CalendarPlannerContextTest {
         older["endAtMillisExclusive"].asLong() == newer["startAtMillis"].asLong()
       }
     )
-    assertEquals("full-body", context["plannerPatternCatalog"]["recommendedPatternId"].asString())
-    assertEquals("full-body", context["plannerPatternCatalog"]["patterns"][0]["id"].asString())
+    val catalog = context["plannerPatternCatalog"]
+    assertFalse(catalog.has("recommendedCollectionId"))
+    assertFalse(catalog.has("recommendedPatternId"))
+    assertFalse(catalog.toString().contains("sequence"))
+    assertTrue(catalog["selectionGuidance"].asString().contains("equally available"))
+    assertEquals(
+      setOf("full-body", "upper-a"),
+      catalog["collections"].flatMap { it["patterns"].toList() }.map { it["id"].asString() }.toSet(),
+    )
   }
 
   @Test
@@ -440,5 +462,140 @@ class CalendarPlannerContextTest {
     assertEquals(listOf(focus), skeleton.slots.first().allowedExerciseIds)
     assertEquals(listOf(focus, accessory), skeleton.slots[1].allowedExerciseIds)
     assertEquals(PlannerDuration.minimumSeconds(60).toInt(), skeleton.minDurationSec)
+  }
+
+  @Test
+  fun `agentic history preserves actual session order and muscles for every goal`() {
+    val sources = listOf(source(1, "LATS"), source(2, "QUADS"))
+    val facts =
+      listOf(
+        fact(2, 102, now - 2 * 86_400_000L),
+        fact(1, 101, now - 86_400_000L),
+        fact(1, 101, now - 86_400_000L).copy(setIndex = 1, setType = "WARMUP"),
+        fact(1, 101, now - 86_400_000L).copy(setIndex = 2, setType = null),
+      )
+    val goals =
+      listOf(null, "MUSCLE_GAIN", "STRENGTH", "FAT_LOSS", "GENERAL_FITNESS", "ENDURANCE", "OTHER")
+    goals.forEach { goal ->
+      val captured =
+        capture(sources, facts)
+          .copy(
+            profile = AiProfileContext(goal, null, null, null, 3, 60, null, emptyList()),
+            notes = listOf(mapOf("kind" to "WORKOUT_NOTE", "text" to "private-history-note")),
+            mass = mapOf("kg" to 77),
+          )
+      val eligible =
+        CalendarCandidateSelector.eligible(sources, emptyList(), request(), facts, goal)
+      val strength =
+        if (goal == "STRENGTH")
+          StrengthPlannerFacts.compact(
+            facts,
+            setOf(id(2)),
+            emptySet(),
+            now,
+            emptyMap(),
+            emptyList(),
+          )
+        else null
+      // The last session must survive even when its exercise is not selectable for the next plan.
+      val payload =
+        CalendarPlannerContext.serializeAgentic(
+          json,
+          captured,
+          request().copy(timeZoneId = "Europe/Moscow"),
+          eligible.filter { it["exerciseId"] == id(2) },
+          eligible.size,
+          strengthFacts = strength,
+        )
+      val context = json.readTree(payload)
+      val recent = context["workoutHistory"]["recentWorkouts"]
+      assertEquals(2, recent.size(), goal)
+      assertEquals("2026-09-12T15:00:01+03:00", recent[0]["finishedLocalTime"].asString())
+      val lastExercise = recent[0]["exercises"].single()
+      assertEquals(id(1), lastExercise["exerciseId"].asString())
+      assertEquals(100, lastExercise["currentMuscleContributions"]["LATS"].asInt())
+      assertEquals(1, lastExercise["completedSetCounts"]["work"].asInt())
+      assertEquals(1, lastExercise["completedSetCounts"]["warmup"].asInt())
+      assertEquals(1, lastExercise["completedSetCounts"]["otherOrUnknown"].asInt())
+      assertEquals(id(2), recent[1]["exercises"][0]["exerciseId"].asString())
+      assertFalse(recent[0]["outsideHistoryWindow"].asBoolean())
+      listOf(
+          "private-history-note",
+          "weight",
+          "volume",
+          "observationId",
+          "lastObservationIds",
+          id(101),
+          id(102),
+          id(1101),
+        )
+        .forEach { assertFalse(payload.contains(it, ignoreCase = true), "$goal leaks $it") }
+    }
+  }
+
+  @Test
+  fun `agentic history bounds recent sessions and labels old sessions without inventing load`() {
+    val facts = (1..5).map { fact(1, 100 + it, now - it * 10 * 86_400_000L) }
+    val captured = capture(listOf(source(1)), facts.take(2), facts.drop(2)).copy(detailDays = 1)
+    val history =
+      json.valueToTree<tools.jackson.databind.JsonNode>(
+        PlannerWorkoutHistory.summarize(captured, "UTC")
+      )
+    val recent = history["recentWorkouts"]
+    assertEquals(3, recent.size())
+    assertTrue(recent.all { it["outsideDetailWindow"].asBoolean() })
+    assertFalse(recent[0]["outsideHistoryWindow"].asBoolean())
+    assertTrue(recent[2]["outsideHistoryWindow"].asBoolean())
+    val empty =
+      json.valueToTree<tools.jackson.databind.JsonNode>(
+        PlannerWorkoutHistory.summarize(capture(emptyList()), "UTC")
+      )
+    assertTrue(empty["recentWorkouts"].isEmpty)
+    val tool =
+      json.readTree(PlannerWorkoutHistory.candidateDetails(json, empty, emptyList(), listOf(id(1))))
+    assertEquals("NO_COMPLETED_SETS_IN_RECENT_CAPTURE", tool["history"]["status"].asString())
+    assertTrue(tool["history"]["recentWorkouts"].isEmpty)
+  }
+
+  @Test
+  fun `candidate history returns real scoped summaries and reports tool budget omissions`() {
+    val captured =
+      capture(
+        listOf(source(1), source(2)),
+        listOf(
+          fact(1, 101, now - 86_400_000L),
+          fact(2, 101, now - 86_400_000L),
+          fact(1, 102, now - 2 * 86_400_000L),
+        ),
+      )
+    val history =
+      json.valueToTree<tools.jackson.databind.JsonNode>(
+        PlannerWorkoutHistory.summarize(captured, "UTC")
+      )
+    val candidates =
+      listOf(
+        mapOf<String, Any>("exerciseId" to id(1), "name" to "Тяга"),
+        mapOf<String, Any>("exerciseId" to id(2)),
+      )
+    val detail =
+      json.readTree(
+        PlannerWorkoutHistory.candidateDetails(json, history, candidates, listOf(id(1)))
+      )
+    assertEquals("AVAILABLE", detail["history"]["status"].asString())
+    assertEquals(2, detail["history"]["recentWorkouts"].size())
+    assertEquals(
+      1,
+      detail["history"]["recentWorkouts"][0]["exercises"][0]["completedSetCounts"]["work"].asInt(),
+    )
+    assertFalse(detail.toString().contains(id(2)))
+    val large = listOf(mapOf<String, Any>("exerciseId" to id(1), "name" to "x".repeat(15_800)))
+    val bounded = PlannerWorkoutHistory.candidateDetails(json, history, large, listOf(id(1)))
+    assertTrue(bounded.size <= 16_384)
+    val truncated = json.readTree(bounded)["history"]
+    assertEquals(
+      "TRUNCATED_USE_INITIAL_CONTEXT_OR_FEWER_CANDIDATES",
+      truncated["status"].asString(),
+    )
+    assertTrue(truncated["omittedWorkoutCount"].asInt() > 0)
   }
 }
