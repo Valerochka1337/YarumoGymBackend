@@ -173,6 +173,7 @@ class HttpOpenAiChatCompletionsProviderTest {
     val planName =
       schema["\u0024defs"]["ProviderOutput"]["properties"]["result"]["properties"]["name"]
 
+    assertFalse(schema.has("\u0024schema"))
     assertFalse(planName.has("minLength"))
     assertFalse(planName.has("maxLength"))
   }
