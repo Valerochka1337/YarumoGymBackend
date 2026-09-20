@@ -23,7 +23,6 @@ internal object AgenticPlannerPolicy {
     facts: List<CalendarFact>,
     sources: Map<String, CalendarCandidateSource> = emptyMap(),
   ): List<Map<String, Any>> {
-    val history = facts.mapTo(mutableSetOf()) { it.exerciseId }
     val ordered =
       eligible
         .asSequence()
@@ -34,16 +33,15 @@ internal object AgenticPlannerPolicy {
               val id = row.getValue("exerciseId") as String
               when {
                 id in keyExercises || preferences[id] == "MORE" -> 0
-                id in history -> 1
-                preferences[id] == "LESS" -> 3
-                else -> 2
+                preferences[id] == "LESS" -> 2
+                else -> 1
               }
             },
             { it.getValue("exerciseId") as String },
           )
         )
         .toList()
-    // Keep a compact pool, but do not let an upper-body/familiarity-heavy sort erase another
+    // Keep a compact pool, but do not let an upper-body-heavy sort erase another
     // valid movement class before the agent can select its configured pattern.
     val selected = linkedSetOf<String>()
     fun add(row: Map<String, Any>) {
