@@ -29,6 +29,7 @@ class CoachRunService(
   private val clock: Clock,
   private val behavior: CoachBehaviorStore,
   private val interventions: CoachInterventionService,
+  private val dialogue: CoachDialogueService,
   @Value("\${gym.coach-runs.workers:4}") workerCount: Int,
   @Value("\${gym.coach-runs.max-pending-messages:8}") private val maxPendingMessages: Int,
   @Value("\${gym.coach-runs.enabled:true}") private val enabled: Boolean,
@@ -544,7 +545,7 @@ class CoachRunService(
       interventions.refresh(
         identity.userId,
         workout,
-        behavior.planningSnapshot(identity.userId, workout, input["snapshot"]),
+        interventions.planningSnapshot(identity.userId, workout, input["snapshot"]),
       )
       migrateMemory(identity.userId, workout, input["snapshot"])
       if (!active || !initiative || !behavior.allowsAutomatic(identity.userId, workout)) {
@@ -739,7 +740,7 @@ class CoachRunService(
           interventions.evaluate(
             owner,
             workout,
-            behavior.planningSnapshot(owner, workout, timerSnapshot),
+            interventions.planningSnapshot(owner, workout, timerSnapshot),
             session.second,
           )
         )
@@ -823,6 +824,22 @@ class CoachRunService(
       }
     val hooks =
       object : CoachRunHooks {
+        override fun observe(callId: String, args: JsonNode): JsonNode {
+          require(run.input["automatic"]?.asBoolean() != true)
+          var observed: JsonNode? = null
+          fenced(run) {
+            observed =
+              interventions.observe(
+                run.owner,
+                run.workout,
+                UUID.nameUUIDFromBytes("coach-observation:${run.id}:$callId".toByteArray()),
+                args,
+                run.input["message"].asString(),
+              )
+          }
+          return observed!!
+        }
+
         override fun checkActive() {
           if (stopped.get()) throw IllegalStateException("Lease lost")
           fenced(run) {}
@@ -899,22 +916,6 @@ class CoachRunService(
 
   private fun executionInput(run: Run): JsonNode {
     if (run.checkpoint != null) return run.input
-    val prior =
-      jdbc
-        .query(
-          "SELECT input::text,result::text,automatic FROM coach_runs WHERE owner_id=? AND workout_id=? AND ordinal<? AND (NOT automatic OR state='SUCCEEDED') ORDER BY ordinal DESC LIMIT 20",
-          { r, _ ->
-            Triple(
-              json.readTree(r.getString(1)),
-              r.getString(2)?.let(json::readTree) ?: json.nullNode(),
-              r.getBoolean(3),
-            )
-          },
-          run.owner,
-          run.workout,
-          run.ordinal,
-        )
-        .reversed()
     val knownIds =
       jdbc
         .query(
@@ -944,19 +945,8 @@ class CoachRunService(
             ?.take(16000)
             ?.let { mapOf("role" to payload["role"].asString(), "text" to it) }
         }
-    val history =
-      (legacy +
-          prior.flatMap { (input, result, automatic) ->
-            buildList {
-              if (!automatic) add(mapOf("role" to "user", "text" to input["message"].asString()))
-              val text = result["text"]?.asString().orEmpty()
-              if (text.isNotBlank() && result["kind"]?.asString() != "no_change")
-                add(mapOf("role" to "assistant", "text" to text))
-            }
-          })
-        .takeLast(40)
+    val history = (legacy + dialogue.history(run.owner, run.workout, run.id)).takeLast(40)
     return (run.input.deepCopy() as tools.jackson.databind.node.ObjectNode).apply {
-      put("deterministicPolicy", behavior.enforce(run.owner, run.workout))
       set("history", json.valueToTree<JsonNode>(history))
       if (run.input["model"] == null || run.input["model"].isNull) {
         sessionModel(run.owner, run.workout)?.let { put("model", it) }
@@ -991,7 +981,7 @@ class CoachRunService(
               (clock.millis() - observed).coerceAtLeast(0) / 1000,
           )
         }
-      set("snapshot", behavior.planningSnapshot(run.owner, run.workout, snapshot))
+      set("snapshot", interventions.planningSnapshot(run.owner, run.workout, snapshot))
     }
   }
 
@@ -1211,13 +1201,13 @@ class CoachRunService(
     )
       return
     val snapshot =
-      behavior.planningSnapshot(owner, workout, json.readTree(sessionRow[0]))
+      interventions.planningSnapshot(owner, workout, json.readTree(sessionRow[0]))
         as tools.jackson.databind.node.ObjectNode
     snapshot.set("decisions", memory(owner, workout))
     val reason =
       executor.initiativeDecision(
         snapshot,
-        sessionRow[1]?.let { behavior.planningSnapshot(owner, workout, json.readTree(it)) },
+        sessionRow[1]?.let { interventions.planningSnapshot(owner, workout, json.readTree(it)) },
         memory(owner, workout),
       )
     jdbc

@@ -74,7 +74,7 @@ data class AutoregulationProof(
  * Deterministic local calculation; thresholds and limits are documented in docs/autoregulation.md.
  */
 object AutoregulationEngine {
-  const val RULES_VERSION = "1.5.0"
+  const val RULES_VERSION = "1.5.1"
 
   fun calculate(
     snapshot: WorkoutSnapshot,
@@ -234,11 +234,11 @@ object AutoregulationEngine {
         )
       val harderConfirmed = "HARDER_THAN_EXPECTED" in latest.reportedFeelings
       if ("INTERRUPTED" in latest.reportedFeelings)
-        return clarify(
+        return result(
           "interrupted_set",
-          "Последний подход прерван.",
-          "Это было запланировано или стало тяжелее?",
-          MissingData.INTENT,
+          RecommendationKind.NO_CHANGE,
+          "Подход прервали; результат не используем для оценки нагрузки.",
+          "Сохраняем оставшийся план.",
         )
       if (latest.setType == "WARMUP")
         return result(

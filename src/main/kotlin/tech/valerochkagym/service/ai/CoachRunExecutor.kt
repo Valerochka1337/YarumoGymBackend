@@ -8,6 +8,9 @@ import tools.jackson.databind.JsonNode
 import tools.jackson.databind.ObjectMapper
 
 interface CoachRunHooks {
+  fun observe(callId: String, args: JsonNode): JsonNode =
+    throw IllegalArgumentException("Запись факта недоступна")
+
   fun checkpoint(value: JsonNode)
 
   fun progress(stage: String)
@@ -41,7 +44,8 @@ class CoachRunExecutor(
       )
         throw aiError("ai_timeout")
     }
-    val snapshot = input["snapshot"] ?: throw aiError("ai_invalid_response")
+    var snapshot =
+      checkpoint?.get("snapshot") ?: input["snapshot"] ?: throw aiError("ai_invalid_response")
     val messages = checkpoint?.get("messages")?.toList()?.toMutableList() ?: mutableListOf()
     var requests = checkpoint?.get("requests")?.asInt() ?: 0
     var calls = checkpoint?.get("calls")?.asInt() ?: 0
@@ -52,6 +56,7 @@ class CoachRunExecutor(
         json.valueToTree<JsonNode>(
           mapOf(
             "messages" to messages,
+            "snapshot" to snapshot,
             "requests" to requests,
             "calls" to calls,
             "result" to result,
@@ -64,13 +69,6 @@ class CoachRunExecutor(
     if (result != null) {
       active()
       return result!!
-    }
-    if (input["deterministicPolicy"]?.asBoolean() == true) {
-      codec.deterministicResult(owner, input, clock.millis())?.let {
-        result = it
-        save()
-        return it
-      }
     }
     val catalog = provider.catalog()
     val model =
@@ -146,6 +144,14 @@ class CoachRunExecutor(
           val args = json.readTree(call["function"]["arguments"].asString())
           output =
             when (name) {
+              "record_coach_observation" -> {
+                require(input["automatic"]?.asBoolean() != true) {
+                  "Нужен явный ответ пользователя"
+                }
+                codec.validateObservation(args)
+                snapshot = hooks.observe(call["id"].asString(), args)
+                snapshot
+              }
               "get_workout_state" -> {
                 codec.validateRead(name, args)
                 if (args.has("autoregulation"))
@@ -355,6 +361,6 @@ class CoachRunExecutor(
 
   companion object {
     private const val RULES =
-      "\nТы выполняешь полный цикл на сервере. Не применяй изменения сам: submit_workout_changes создаёт только предложение для подтверждения. Верни ответ JSON {text,quick_replies}. Никогда не показывай пользователю сырой JSON, аргументы или внутренние рассуждения. RIR — только явно сообщённое значение; 4+ не равно точному 4. Не выводи усилие или восстановление из пульса. Пустой RIR неизвестен. Не назначай целевой RIR. Профиль и история — ориентиры, скопированные значения не обязательный план. Результаты выполненных подходов сохраняй. Для изменения используй конкретные edit_set/rest либо autoregulate для расчёта. Не выдумывай идентификаторы: читай состояние, каталог и историю. При боли или нарушении техники сначала уточни ситуацию."
+      "\nТы выполняешь полный цикл на сервере. Не применяй изменения сам: submit_workout_changes создаёт только предложение для подтверждения. Верни ответ JSON {text,quick_replies}. Никогда не показывай пользователю сырой JSON, аргументы или внутренние рассуждения. RIR — только явно сообщённое значение; 4+ не равно точному 4. Не выводи усилие или восстановление из пульса. Пустой RIR неизвестен. Не назначай целевой RIR. Профиль и история — ориентиры, скопированные значения не обязательный план. Результаты выполненных подходов сохраняй. Для изменения используй конкретные edit_set/rest либо autoregulate для расчёта. Не выдумывай идентификаторы: читай состояние, каталог и историю. Общайся естественно и коротко, продолжай текущий разговор без повторных приветствий. Снимок сообщает текущий подход, предыдущий, отдых и phase: не спрашивай то, что уже известно. IN_SET означает рабочую фазу по событиям приложения, а не датчик движения. coach_questions содержит вопросы, на которые ещё нет ответа; behavior_facts — уже полученные ответы. Если пользователь отвечает на вопрос обычными словами, вызови record_coach_observation с question_id, категорией ответа и точной цитатой evidence. Не требуй нажимать кнопку. Не классифицируй неоднозначный ответ наугад. Ответ — факт, не согласие изменить план. После сохранения используй обновлённый снимок и расчёт. open_concerns перечисляет неразрешённые жалобы: при явном сообщении, что конкретная проблема прошла или была ошибочно отмечена, запиши resolve_concern с её ключом и точной цитатой. Не снимай другие жалобы и не считай молчание, смену темы, завершение подхода или просто желание продолжить разрешением жалобы. Если обстоятельства уже описаны, не спрашивай их заново; уточняй только то, без чего нельзя выбрать следующий шаг."
   }
 }

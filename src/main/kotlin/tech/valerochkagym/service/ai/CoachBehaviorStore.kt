@@ -1,5 +1,6 @@
 package tech.valerochkagym.service.ai
 
+import java.time.Clock
 import java.util.UUID
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.jdbc.core.JdbcTemplate
@@ -13,7 +14,9 @@ import tools.jackson.databind.ObjectMapper
 class CoachBehaviorStore(
   private val jdbc: JdbcTemplate,
   private val json: ObjectMapper,
-  @Value("\${gym.coach-behavior.mode:SHADOW}") private val mode: String,
+  private val dialogue: CoachDialogueService,
+  private val clock: Clock,
+  @Value("\${gym.coach-behavior.mode:ENFORCE}") private val mode: String,
 ) {
   init {
     require(mode in setOf("SHADOW", "ENFORCE"))
@@ -62,33 +65,46 @@ class CoachBehaviorStore(
       json.writeValueAsString(decision),
     )
     if (decision.action == BehaviorAction.CONCERN) {
-      val sequence =
-        jdbc.queryForObject(
-          "INSERT INTO coach_workout_event_cursors(owner_id,workout_id,sequence) VALUES (?,?,1) ON CONFLICT(owner_id,workout_id) DO UPDATE SET sequence=coach_workout_event_cursors.sequence+1 RETURNING sequence",
-          Long::class.java,
-          owner,
-          workout,
-        )!!
       val payload =
         mapOf(
           "type" to "concern",
           "source" to "BEHAVIOR",
           "schemaVersion" to 1,
-          "sequence" to sequence,
           "eventId" to eventId,
           "stateVersion" to version,
           "text" to CoachBehaviorPolicy.CONCERN_TEXT,
           "decision" to decision,
         )
-      jdbc.update(
-        "INSERT INTO coach_workout_events(owner_id,workout_id,sequence,request_id,payload) VALUES (?,?,?,NULL,?::jsonb)",
-        owner,
-        workout,
-        sequence,
-        json.writeValueAsString(payload),
-      )
+      dialogue.enqueue(owner, workout, "concern", json.valueToTree(payload))
     }
     return decision
+  }
+
+  fun resolve(owner: UUID, workout: UUID, eventId: UUID, key: String) {
+    val view = state(owner, workout) ?: throw IllegalArgumentException("Неизвестная тренировка")
+    val previous = json.treeToValue(view["state"], BehaviorState::class.java)
+    require(key in previous.openConcerns) { "Уточни, о какой текущей жалобе говорит пользователь" }
+    val next = previous.copy(openConcerns = previous.openConcerns - key)
+    jdbc.update(
+      "UPDATE coach_sessions SET behavior_state=?::jsonb,state_version=state_version+1 WHERE owner_id=? AND workout_id=?",
+      json.writeValueAsString(next),
+      owner,
+      workout,
+    )
+    jdbc.update(
+      "INSERT INTO coach_behavior_events(owner_id,workout_id,event_id,state_version,input,decision) SELECT owner_id,workout_id,?,state_version,?::jsonb,?::jsonb FROM coach_sessions WHERE owner_id=? AND workout_id=?",
+      eventId,
+      json.writeValueAsString(mapOf("resolvedConcernKeys" to listOf(key))),
+      json.writeValueAsString(mapOf("state" to next, "reasonCode" to "user_resolved_concern")),
+      owner,
+      workout,
+    )
+    dialogue.emit(
+      owner,
+      workout,
+      "concern_resolved",
+      json.valueToTree(mapOf("resolvedConcernKeys" to listOf(key))),
+    )
   }
 
   fun state(owner: UUID, workout: UUID): JsonNode? =
@@ -132,10 +148,24 @@ class CoachBehaviorStore(
     val view = state(owner, workout) ?: return true
     val state = json.treeToValue(view["state"], BehaviorState::class.java)
     if (state.openConcerns.isNotEmpty()) return false
-    return view["mode"].asString() != "ENFORCE" ||
-      (state.online &&
-        state.lifecycle == WorkoutLifecycle.ACTIVE &&
-        state.phase !in setOf(WorkoutPhase.UNKNOWN, WorkoutPhase.IN_SET))
+    if (state.phase == WorkoutPhase.RESTING) {
+      val snapshot =
+        jdbc
+          .queryForObject(
+            "SELECT snapshot::text FROM coach_sessions WHERE owner_id=? AND workout_id=?",
+            String::class.java,
+            owner,
+            workout,
+          )
+          ?.let(json::readTree)
+      val rest = snapshot?.get("rest")
+      val ends = rest?.get("ends_at_millis")?.takeUnless { it.isNull }?.asLong()
+      if (ends != null && ends <= clock.millis()) return false
+    }
+    return state.online &&
+      state.lifecycle == WorkoutLifecycle.ACTIVE &&
+      state.phase != WorkoutPhase.IN_SET &&
+      (state.phase != WorkoutPhase.UNKNOWN || view["mode"].asString() != "ENFORCE")
   }
 
   /** Derived planning view; original reports remain in the stored workout snapshot. */

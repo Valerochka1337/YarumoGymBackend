@@ -408,19 +408,124 @@ class CoachRunExecutorTest {
   }
 
   @Test
-  fun `deterministic adjustment needs no provider and resumes same proposal`() {
+  fun `automatic response uses contextual language instead of deterministic template`() {
     val provider = Provider()
     val request =
       input(snapshot(listOf("HARDER_THAN_EXPECTED"))) as tools.jackson.databind.node.ObjectNode
     request.put("automatic", true)
     request.put("deterministicPolicy", true)
     val hooks = Hooks()
-    val result = executor(provider).execute(owner, request, null, hooks)
-    assertEquals("proposal", result["kind"].asString())
-    assertEquals("confirmed_harder_adjustment", result["decision"]["reasonCode"].asString())
-    assertEquals(2, result["proposal"]["operations"].size())
-    assertEquals(0, provider.count)
+    val result =
+      executor(provider)
+        .execute(
+          owner,
+          request,
+          checkpoint(listOf(tree(mapOf("role" to "user", "content" to "Помоги")))),
+          hooks,
+        )
+    assertEquals("answer", result["kind"].asString())
+    assertEquals("Продолжим", result["text"].asString())
+    assertEquals(1, provider.count)
     assertEquals(result, executor(provider).execute(owner, request, hooks.saved, Hooks()))
+    assertEquals(1, provider.count)
+  }
+
+  @Test
+  fun `automatic observation cannot record an answer or resolve a concern`() {
+    val request = input() as tools.jackson.databind.node.ObjectNode
+    request.put("automatic", true)
+    var observed = false
+    val hooks =
+      object : CoachRunHooks {
+        override fun checkpoint(value: JsonNode) {}
+
+        override fun progress(stage: String) {}
+
+        override fun text(value: String) {}
+
+        override fun checkActive() {}
+
+        override fun observe(callId: String, args: JsonNode): JsonNode {
+          observed = true
+          return snapshot()
+        }
+      }
+    val args =
+      mapOf("kind" to "resolve_concern", "concern_key" to "workout:PAIN", "evidence" to "Помоги")
+    val point =
+      checkpoint(
+        listOf(
+          tree(
+            mapOf(
+              "role" to "assistant",
+              "tool_calls" to listOf(call("record_coach_observation", args)),
+            )
+          )
+        )
+      )
+    executor(Provider()).execute(owner, request, point, hooks)
+    assertFalse(observed)
+  }
+
+  @Test
+  fun `known interruption never asks the same cause again`() {
+    val state = snapshot(listOf("INTERRUPTED"))
+    assertEquals(
+      "NO_CHANGE",
+      codec.assessment(owner, state, tree(emptyMap<String, String>()))["kind"].asString(),
+    )
+    assertNull(codec.initiative(state, null, null))
+  }
+
+  @Test
+  fun `observation tool records explicit answer and resumes with updated facts`() {
+    val request = input()
+    val question = UUID.randomUUID().toString()
+    val args =
+      mapOf(
+        "kind" to "answer",
+        "question_id" to question,
+        "answer" to "INTERRUPTED",
+        "evidence" to "Прервали",
+      )
+    var writes = 0
+    var saved: JsonNode? = null
+    val hooks =
+      object : CoachRunHooks {
+        override fun checkActive() {}
+
+        override fun progress(stage: String) {}
+
+        override fun text(value: String) {}
+
+        override fun checkpoint(value: JsonNode) {
+          saved = value
+        }
+
+        override fun observe(callId: String, args: JsonNode): JsonNode {
+          writes++
+          return snapshot(listOf("INTERRUPTED"))
+        }
+      }
+    val point =
+      checkpoint(
+        listOf(
+          tree(
+            mapOf(
+              "role" to "assistant",
+              "tool_calls" to listOf(call("record_coach_observation", args)),
+            )
+          )
+        )
+      )
+    val result = executor(Provider()).execute(owner, request, point, hooks)
+    assertEquals(1, writes)
+    assertEquals(
+      "INTERRUPTED",
+      saved!!["snapshot"]["exercises"][0]["sets"][0]["reported_feelings"][0].asString(),
+    )
+    assertEquals(result, executor(Provider()).execute(owner, request, saved, hooks))
+    assertEquals(1, writes)
   }
 
   @Test

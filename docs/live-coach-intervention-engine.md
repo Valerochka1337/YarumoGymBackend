@@ -1,5 +1,7 @@
 # Live Coach: движок обоснованных вмешательств
 
+Актуальные изменения от 2026-09-20: [единое состояние и диалог](live-coach-conversation-state.md).
+
 Ход реализации: [backend-срез и оставшиеся этапы](live-coach-behavior-implementation.md).
 2026-09-19. Проект решения, не реализация. Дополнение к
 [архитектуре поведения](live-coach-behavior-architecture.md).

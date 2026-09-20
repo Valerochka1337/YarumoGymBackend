@@ -174,7 +174,7 @@ internal object CoachCompletionSanitizer {
       if ((reason == "tool_calls") != (calls != null)) throw aiError("ai_invalid_response")
       if (calls != null) {
         if (!calls.isArray || calls.size() !in 1..16) throw aiError("ai_invalid_response")
-        calls.forEach(CoachTurnService::validateCall)
+        calls.forEach { CoachTurnService.validateCall(it, allowObservations = true) }
         if (
           (0 until calls.size()).map { calls[it]["id"].asString() }.distinct().size != calls.size()
         )

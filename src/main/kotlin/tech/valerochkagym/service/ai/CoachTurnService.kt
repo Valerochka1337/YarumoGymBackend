@@ -193,12 +193,13 @@ class CoachTurnService(private val provider: CoachTurnProvider, private val json
       return result
     }
 
-    internal fun validateCall(call: JsonNode) {
+    internal fun validateCall(call: JsonNode, allowObservations: Boolean = false) {
       keys(call, setOf("id", "type", "function"))
       string(call["id"], 200)
       if (string(call["type"], 20) != "function") bad("Некорректный тип инструмента")
       keys(call["function"], setOf("name", "arguments"))
-      if (string(call["function"]["name"], 100) !in TOOL_NAMES) bad("Неизвестный инструмент")
+      val allowed = if (allowObservations) TOOL_NAMES + "record_coach_observation" else TOOL_NAMES
+      if (string(call["function"]["name"], 100) !in allowed) bad("Неизвестный инструмент")
       string(call["function"]["arguments"], 32000)
     }
   }

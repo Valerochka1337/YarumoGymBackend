@@ -23,6 +23,7 @@ class CoachInterventionService(
   private val behavior: CoachBehaviorStore,
   private val json: ObjectMapper,
   private val clock: Clock,
+  private val dialogue: CoachDialogueService,
 ) {
   private val codec = CoachRunTools(json)
 
@@ -52,6 +53,9 @@ class CoachInterventionService(
         "paused",
         "online",
         "decisions",
+        "behavior_facts",
+        "coach_questions",
+        "open_concerns",
       )
       .forEach { copy.remove(it) }
     if (copy.has("available_time_ends_at_millis")) copy.remove("available_time_minutes")
@@ -76,30 +80,9 @@ class CoachInterventionService(
   private fun missing(): Nothing = throw ApiException(404, "not_found", "Решение не найдено")
 
   private fun emit(owner: UUID, workout: UUID, type: String, result: JsonNode) {
-    val sequence =
-      jdbc.queryForObject(
-        "INSERT INTO coach_workout_event_cursors(owner_id,workout_id,sequence) VALUES (?,?,1) ON CONFLICT(owner_id,workout_id) DO UPDATE SET sequence=coach_workout_event_cursors.sequence+1 RETURNING sequence",
-        Long::class.java,
-        owner,
-        workout,
-      )!!
-    val payload =
-      tree(
-        mapOf(
-          "type" to type,
-          "source" to "INTERVENTION",
-          "schemaVersion" to 1,
-          "sequence" to sequence,
-          "result" to result,
-        )
-      )
-    jdbc.update(
-      "INSERT INTO coach_workout_events(owner_id,workout_id,sequence,request_id,payload) VALUES (?,?,?,NULL,?::jsonb)",
-      owner,
-      workout,
-      sequence,
-      json.writeValueAsString(payload),
-    )
+    if (type == "intervention" && result["kind"]?.asString() in setOf("question", "proposal"))
+      dialogue.enqueue(owner, workout, type, tree(mapOf("result" to result)))
+    else dialogue.emit(owner, workout, type, tree(mapOf("result" to result)))
   }
 
   private fun current(owner: UUID, workout: UUID): Pair<JsonNode, String> =
@@ -198,21 +181,29 @@ class CoachInterventionService(
   /** Called after the existing initiative/memory gate, under the session transaction. */
   fun evaluate(owner: UUID, workout: UUID, snapshot: JsonNode, context: String): Boolean {
     if (!behavior.enforce(owner, workout)) return false
-    val decision = assessment(owner, snapshot)
+    val decision = assessment(owner, planningSnapshot(owner, workout, snapshot))
     when (decision["reason_code"].asString()) {
       "confirmed_harder_adjustment",
       "time_capacity" -> {
         publish(owner, workout, snapshot, context, decision)
         return true
       }
-      "unexplained_drop",
-      "interrupted_set" -> {
+      "unexplained_drop" -> {
         val latest =
           snapshot["exercises"]
             .flatMap { it["sets"].toList() }
             .filter { it["completed"]?.asBoolean() == true }
             .maxByOrNull { it["completed_at"]?.asLong() ?: 0 } ?: return false
-        val topicKey = hash(tree(mapOf("set" to latest, "topic" to "cause")))
+        val topicKey =
+          hash(
+            tree(
+              mapOf(
+                "setId" to latest["set_id"],
+                "originalFeelings" to (latest["reported_feelings"] ?: tree(emptyList<String>())),
+                "topic" to "cause",
+              )
+            )
+          )
         if (
           jdbc.queryForObject(
             "SELECT count(*) FROM coach_questions WHERE owner_id=? AND workout_id=? AND topic_key=?",
@@ -237,6 +228,7 @@ class CoachInterventionService(
                   "questionId" to questionId,
                   "version" to 1,
                   "setId" to latest["set_id"],
+                  "originalFeelings" to (latest["reported_feelings"] ?: tree(emptyList<String>())),
                   "expiresAtMillis" to expires,
                   "options" to
                     listOf(
@@ -275,8 +267,9 @@ class CoachInterventionService(
   private fun withAnswer(snapshot: JsonNode, setId: String, answer: String): JsonNode {
     val copy = snapshot.deepCopy() as ObjectNode
     val set =
-      copy["exercises"].flatMap { it["sets"].toList() }.single { it["set_id"].asString() == setId }
-        as ObjectNode
+      copy["exercises"]
+        .flatMap { it["sets"].toList() }
+        .firstOrNull { it["set_id"].asString() == setId } as? ObjectNode ?: return copy
     val feelings =
       set["reported_feelings"]
         ?.toList()
@@ -334,7 +327,7 @@ class CoachInterventionService(
           .firstOrNull() ?: missing()
       if (row["status"] == "ANSWERED") conflict()
       val (rawSnapshot, context) = current(identity.userId, workout)
-      val snapshot = behavior.planningSnapshot(identity.userId, workout, rawSnapshot)
+      val snapshot = planningSnapshot(identity.userId, workout, rawSnapshot)
       val stale =
         row["status"] == "STALE" ||
           dependencies(snapshot) != row["dependencies"] ||
@@ -342,36 +335,24 @@ class CoachInterventionService(
           !behavior.allowsAutomatic(identity.userId, workout)
       val expired =
         row["status"] == "EXPIRED" || clock.millis() >= (row["expires_at"] as Number).toLong()
-      if (stale || expired) {
-        val status = if (expired) "EXPIRED" else "STALE"
-        jdbc.update(
-          "UPDATE coach_questions SET status=? WHERE owner_id=? AND question_id=?",
-          status,
-          identity.userId,
-          questionId,
-        )
-        val result =
-          tree(
-            mapOf(
-              "kind" to "no_change",
-              "questionId" to questionId,
-              "status" to status,
-              "text" to "Вопрос больше не актуален. План сохранён.",
-            )
-          )
-        emit(identity.userId, workout, "intervention_answer", result)
-        return@execute remember(identity.userId, answerId, envelope, result)
-      }
       val derived = withAnswer(snapshot, row["set_id"].toString(), answer!!)
       val decision = assessment(identity.userId, derived)
       val result =
-        if (answer == "HARDER_THAN_EXPECTED" && decision["kind"].asString() == "ADJUST")
-          publish(identity.userId, workout, derived, context, decision, snapshot)
+        if (
+          !stale &&
+            !expired &&
+            answer == "HARDER_THAN_EXPECTED" &&
+            decision["kind"].asString() == "ADJUST"
+        )
+          publish(identity.userId, workout, derived, context, decision, derived)
         else
           tree(
             mapOf(
               "kind" to "no_change",
-              "text" to "Ответ сохранён. План оставлен без изменений.",
+              "text" to
+                if (stale || expired)
+                  "Запомнил причину того подхода. Старое предложение применять не буду."
+                else "Понял, оставляем план как есть.",
               "decision" to decision,
             )
           )
@@ -381,11 +362,18 @@ class CoachInterventionService(
         identity.userId,
         questionId,
       )
+      refresh(identity.userId, workout, planningSnapshot(identity.userId, workout, rawSnapshot))
       val response =
-        (result.deepCopy() as ObjectNode).apply {
-          put("questionId", questionId.toString())
-          put("status", "ANSWERED")
-        }
+        (if (result["kind"]?.asString() == "proposal")
+            tree(mapOf("kind" to "no_change", "text" to "", "proposalPending" to true))
+          else result.deepCopy() as JsonNode)
+          .let { it as ObjectNode }
+          .apply {
+            put("questionId", questionId.toString())
+            put("status", "ANSWERED")
+            put("userText", answerLabel(answer!!))
+            put("answerId", answerId.toString())
+          }
       emit(identity.userId, workout, "intervention_answer", response)
       remember(identity.userId, answerId, envelope, response)
     }!!
@@ -510,16 +498,119 @@ class CoachInterventionService(
     }
   }
 
+  fun planningSnapshot(owner: UUID, workout: UUID, raw: JsonNode): JsonNode {
+    var snapshot = behavior.planningSnapshot(owner, workout, raw)
+    val facts = answeredFacts(owner, workout)
+    facts.reversed().forEach { fact ->
+      val set =
+        snapshot["exercises"]
+          ?.flatMap { it["sets"].toList() }
+          ?.firstOrNull { it["set_id"]?.asString() == fact["setId"].asString() }
+      // A newer explicit edit to the workout wins over an older answer.
+      val original = fact["originalFeelings"]?.takeUnless { it.isNull }
+      if (
+        set != null &&
+          (original == null || original == (set["reported_feelings"] ?: tree(emptyList<String>())))
+      )
+        snapshot =
+          withAnswer(snapshot, fact["setId"].asString(), fact["reportedFeeling"].asString())
+    }
+    return (snapshot.deepCopy() as ObjectNode).apply {
+      set("behavior_facts", facts)
+      set(
+        "coach_questions",
+        tree(
+          jdbc.query(
+            "SELECT payload::text,status FROM coach_questions WHERE owner_id=? AND workout_id=? AND status<>'ANSWERED' ORDER BY expires_at DESC LIMIT 20",
+            { r, _ -> (json.readTree(r.getString(1)) as ObjectNode).put("status", r.getString(2)) },
+            owner,
+            workout,
+          )
+        ),
+      )
+      set(
+        "open_concerns",
+        behavior.state(owner, workout)?.get("state")?.get("openConcerns")
+          ?: tree(emptyList<String>()),
+      )
+    }
+  }
+
+  /** Called inside the run lease/account transaction; quote must come from this user turn. */
+  fun observe(
+    owner: UUID,
+    workout: UUID,
+    eventId: UUID,
+    args: JsonNode,
+    message: String,
+  ): JsonNode {
+    val evidence = args["evidence"]?.asString().orEmpty().trim()
+    require(evidence.isNotEmpty() && message.contains(evidence, ignoreCase = true)) {
+      "Нужна точная цитата текущего ответа пользователя"
+    }
+    val envelope = tree(mapOf("workoutId" to workout, "observation" to args))
+    replay(owner, eventId, envelope)?.let {
+      return it
+    }
+    when (args["kind"]?.asString()) {
+      "answer" -> {
+        val questionId = id(args["question_id"])
+        val answer = args["answer"]?.asString()
+        require(answer in setOf("PLANNED_EFFORT", "HARDER_THAN_EXPECTED", "INTERRUPTED"))
+        val row =
+          jdbc
+            .queryForList(
+              "SELECT * FROM coach_questions WHERE owner_id=? AND workout_id=? AND question_id=? FOR UPDATE",
+              owner,
+              workout,
+              questionId,
+            )
+            .firstOrNull()
+        require(row != null) { "Неизвестный вопрос" }
+        jdbc.update(
+          "UPDATE coach_questions SET status='ANSWERED',payload=payload || ?::jsonb WHERE owner_id=? AND question_id=?",
+          json.writeValueAsString(
+            mapOf("answer" to answer, "answerId" to eventId, "evidence" to evidence)
+          ),
+          owner,
+          questionId,
+        )
+        emit(
+          owner,
+          workout,
+          "intervention_answer",
+          tree(mapOf("questionId" to questionId, "status" to "ANSWERED")),
+        )
+      }
+      "resolve_concern" -> {
+        val key = args["concern_key"]?.asString().orEmpty()
+        behavior.resolve(owner, workout, eventId, key)
+      }
+      else -> throw IllegalArgumentException("Неизвестный вид факта")
+    }
+    val result = planningSnapshot(owner, workout, current(owner, workout).first)
+    refresh(owner, workout, result)
+    return remember(owner, eventId, envelope, result)
+  }
+
+  private fun answerLabel(answer: String): String =
+    when (answer) {
+      "PLANNED_EFFORT" -> "Остановился специально"
+      "HARDER_THAN_EXPECTED" -> "Было тяжелее"
+      else -> "Меня прервали"
+    }
+
   fun answeredFacts(owner: UUID, workout: UUID): JsonNode =
     tree(
       jdbc.query(
-        "SELECT set_id,payload->>'answer',question_id FROM coach_questions WHERE owner_id=? AND workout_id=? AND status='ANSWERED' ORDER BY expires_at DESC LIMIT 30",
+        "SELECT set_id,payload->>'answer',question_id,payload::text FROM coach_questions WHERE owner_id=? AND workout_id=? AND status='ANSWERED' ORDER BY expires_at DESC LIMIT 30",
         { r, _ ->
           mapOf(
             "setId" to r.getObject(1).toString(),
             "reportedFeeling" to r.getString(2),
             "questionId" to r.getObject(3).toString(),
             "source" to "USER_ANSWER",
+            "originalFeelings" to json.readTree(r.getString(4))["question"]?.get("originalFeelings"),
           )
         },
         owner,

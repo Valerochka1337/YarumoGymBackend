@@ -92,3 +92,6 @@ databaseChangeLog:
   - include:
       file: 030-coach-interventions.sql
       relativeToChangelogFile: true
+  - include:
+      file: 031-coach-presentations.sql
+      relativeToChangelogFile: true

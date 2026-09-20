@@ -124,20 +124,19 @@ test('SSE resumes persisted cursor and fragmented frames render only the cumulat
   assert.ok(!w.document.getElementById('messages').textContent.includes('Повторное событие'));
 });
 
-test('concern replay without a run is rendered once and explicit resolution is persisted', async t => {
+test('concern resolves from the conversation event without a manual status button', async t => {
   const state=fixture(), eventId=S.uuid();
   const event={sequence:1,type:'concern',eventId,text:'Уточните, что произошло.',decision:{reasonCode:'reported_safety_issue',state:{policyVersion:'behavior-1',openConcerns:['workout:PAIN']}}};
-  const bytes=new TextEncoder().encode([event,event].map(e=>`data: ${JSON.stringify(e)}\n\n`).join(''));
-  const {w,requests}=await ui(t,state,async path=>{
+  const resolved={sequence:2,type:'concern_resolved',resolvedConcernKeys:['workout:PAIN']};
+  const bytes=new TextEncoder().encode([event,event,resolved].map(e=>`data: ${JSON.stringify(e)}\n\n`).join(''));
+  const {w}=await ui(t,state,async path=>{
     if(path.includes('/events?'))return {ok:true,status:200,body:new ReadableStream({start(c){c.enqueue(bytes);c.close();}})};
   });
-  await until(()=>w.document.getElementById('messages').textContent.includes(event.text));
+  await until(()=>JSON.parse(w.sessionStorage.getItem('coach-playground-v1')).eventCursor === 2);
   assert.equal(w.document.querySelectorAll('#messages .bubble').length,1);
-  w.document.querySelector('#messages .bubble button').click();
-  await until(()=>JSON.parse(w.sessionStorage.getItem('coach-playground-v1')).concerns[0].resolved);
-  assert.ok(requests.some(r=>r.body?.resolvedConcernKeys?.includes('workout:PAIN')));
+  assert.equal(w.document.querySelector('#messages .bubble button'),null);
   const saved=JSON.parse(w.sessionStorage.getItem('coach-playground-v1'));
-  assert.equal(saved.eventCursor,1);
+  assert.equal(saved.concerns[0].resolved,true);
   assert.equal(saved.concerns.length,1);
 });
 

@@ -79,6 +79,33 @@ internal class CoachRunTools(private val json: ObjectMapper) {
     }
   }
 
+  fun validateObservation(args: JsonNode) {
+    when (args["kind"]?.asString()) {
+      "answer" -> {
+        keys(
+          args,
+          setOf("kind", "question_id", "answer", "evidence"),
+          setOf("kind", "question_id", "answer", "evidence"),
+        )
+        uuid(args["question_id"])
+        require(
+          args["answer"]?.asString() in
+            setOf("PLANNED_EFFORT", "HARDER_THAN_EXPECTED", "INTERRUPTED")
+        )
+      }
+      "resolve_concern" -> {
+        keys(
+          args,
+          setOf("kind", "concern_key", "evidence"),
+          setOf("kind", "concern_key", "evidence"),
+        )
+        text(args["concern_key"], 200)
+      }
+      else -> throw IllegalArgumentException("Неизвестный вид факта")
+    }
+    text(args["evidence"], 4000)
+  }
+
   fun operations(
     owner: UUID,
     snapshot: JsonNode,
@@ -344,56 +371,6 @@ internal class CoachRunTools(private val json: ObjectMapper) {
         "reason_code" to result.reasonCode,
         "evidence_key" to result.evidenceKey,
         "intervention_key" to result.interventionKey,
-      )
-    )
-  }
-
-  fun deterministicResult(owner: UUID, input: JsonNode, now: Long): JsonNode? {
-    if (input["automatic"]?.asBoolean() != true) return null
-    val snapshot = input["snapshot"]
-    val recommendation = calculation(owner, snapshot, options(json.createObjectNode(), snapshot))
-    if (
-      recommendation.reasonCode !in
-        setOf("confirmed_harder_adjustment", "time_capacity", "reported_safety_issue")
-    )
-      return null
-    val args =
-      json.valueToTree<JsonNode>(
-        mapOf(
-          "base_revision" to snapshot["revision"],
-          "operations" to recommendation.operations.map(::wire),
-        )
-      )
-    val ops =
-      if (recommendation.operations.isEmpty()) emptyList()
-      else operations(owner, snapshot, args) { false }
-    val explanation = recommendation.explanation()
-    return json.valueToTree(
-      mapOf(
-        "kind" to if (ops.isEmpty()) "message" else "proposal",
-        "text" to explanation,
-        "quickReplies" to emptyList<String>(),
-        "decision" to
-          mapOf(
-            "reasonCode" to recommendation.reasonCode,
-            "policyVersion" to recommendation.rulesVersion,
-            "evidenceKey" to recommendation.evidenceKey,
-          ),
-        "proposal" to
-          if (ops.isEmpty()) null
-          else
-            mapOf(
-              "proposalId" to
-                UUID.nameUUIDFromBytes(
-                    "coach-proposal:${input["requestId"].asString()}".toByteArray()
-                  )
-                  .toString(),
-              "baseRevision" to snapshot["revision"].asLong(),
-              "contextVersion" to input["contextVersion"],
-              "expiresAtMillis" to now + 300_000,
-              "operations" to ops,
-              "reason" to explanation,
-            ),
       )
     )
   }

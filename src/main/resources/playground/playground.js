@@ -123,19 +123,12 @@ function renderMessages() {
   if (!state.runs.length && !state.messages.length) target.append(el('p','Отметьте подход или напишите тренеру.','empty'));
   for (const concern of state.concerns || []) {
     const bubble = el('div', concern.text, 'bubble');
-    if (!concern.resolved) bubble.append(button('Жалоба разрешена', async () => {
-      try {
-        await enqueue(flushSession);
-        await persistSession(true, concern.decision.state.openConcerns);
-        concern.resolved = true; save(); renderMessages();
-      } catch (e) { error(e); }
-    }));
     target.append(bubble);
   }
   for (const item of state.interventions || []) {
     const bubble = el('div', item.text, 'bubble');
     const question = item.question;
-    if (question && !item.status && question.expiresAtMillis > Date.now()) {
+    if (question && item.status !== 'ANSWERED') {
       for (const option of question.options) bubble.append(button(option.text, async () => {
         if (state.pendingAnswer) return;
         state.pendingAnswer = { path: `/v1/coach/sessions/${state.snapshot.workout_id}/questions/${question.questionId}/answers`,
@@ -265,6 +258,13 @@ async function stream() {
           state.concerns ||= [];
           if (!state.concerns.some(c => c.eventId === event.eventId)) state.concerns.push(event);
           trace(`Concern · ${event.decision.reasonCode} · ${event.decision.state.policyVersion}`);
+        }
+        if (event.type === 'concern_resolved') {
+          for (const concern of state.concerns || []) {
+            const remaining = concern.decision.state.openConcerns.filter(key => !event.resolvedConcernKeys.includes(key));
+            concern.decision.state.openConcerns = remaining;
+            concern.resolved = remaining.length === 0;
+          }
         }
         if (event.type === 'intervention' || event.type === 'intervention_answer') mergeIntervention(event.result);
         if (event.type === 'intervention_receipt') {
