@@ -23,6 +23,16 @@ def summarize(logs):
     }
 
 
+def sync_statuses(access_logs):
+    # Aggregate only the status code of sync requests. Never expose addresses, query strings,
+    # user agents, request bodies, or response bodies from the reverse-proxy access log.
+    statuses = re.findall(
+        r'"(?:GET|POST) /v1/sync(?:\?[^ ]*)? HTTP/[^\"]*" ([0-9]{3})\b',
+        access_logs,
+    )
+    return dict(collections.Counter(statuses).most_common())
+
+
 def run(args):
     try:
         result = subprocess.run(args, capture_output=True, text=True, timeout=40)
@@ -37,6 +47,7 @@ def main():
                "/opt/valerochkagym/compose.production.yaml"]
     services = run(compose + ["ps", "--status", "running", "--services"])
     logs = run(compose + ["logs", "--no-color", "--since=2h", "--tail=2000", "backend"])
+    nginx_access = run(["tail", "-n", "2000", "/var/log/nginx/api.valerochkagym.tech.access.log"])
     health = run(["curl", "--fail", "--silent", "--max-time", "10",
                   "http://127.0.0.1:18080/actuator/health/readiness"])
     try:
@@ -51,6 +62,8 @@ def main():
         "health": status if status in {"UP", "DOWN", "OUT_OF_SERVICE"} else "unknown",
         "log_query_ok": logs is not None,
         "log_summary": summarize(logs or ""),
+        "sync_access_log_query_ok": nginx_access is not None,
+        "sync_http_statuses": sync_statuses(nginx_access or ""),
         "note": "Caught exceptions may not be logged; empty summary does not prove absence of errors.",
     }, indent=2))
     if services is None or logs is None:
