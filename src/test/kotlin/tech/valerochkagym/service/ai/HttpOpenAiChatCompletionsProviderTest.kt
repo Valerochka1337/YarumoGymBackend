@@ -168,6 +168,16 @@ class HttpOpenAiChatCompletionsProviderTest {
   }
 
   @Test
+  fun `planner strict output schema excludes unsupported string bounds`() {
+    val schema = json.readTree(javaClass.getResourceAsStream("/ai/calendar-planner-output-v3.json"))
+    val planName =
+      schema["\u0024defs"]["ProviderOutput"]["properties"]["result"]["properties"]["name"]
+
+    assertFalse(planName.has("minLength"))
+    assertFalse(planName.has("maxLength"))
+  }
+
+  @Test
   fun `planner parser rejects malformed unknown and duplicate tool calls`() {
     val bodies =
       listOf(
