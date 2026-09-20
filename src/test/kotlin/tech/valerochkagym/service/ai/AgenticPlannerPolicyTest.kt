@@ -14,6 +14,37 @@ class AgenticPlannerPolicyTest {
   private fun row(id: String) = mapOf<String, Any>("exerciseId" to id, "type" to "STRENGTH")
 
   @Test
+  fun `completed history does not change candidate pool or ordering`() {
+    val eligible =
+      (1..30).map { index ->
+        row(UUID(0, index.toLong()).toString()) +
+          ("muscles" to
+            listOf(mapOf("muscle" to if (index <= 26) "LATS" else "QUADS", "contribution" to 100)))
+      }
+    val withoutHistory = AgenticPlannerPolicy.select(eligible, emptyMap(), emptyMap(), emptyList())
+    assertEquals(AgenticPlannerPolicy.candidateLimit, withoutHistory.size)
+    listOf(eligible.take(2), eligible.takeLast(2)).forEach { completed ->
+      val history =
+        completed.mapIndexed { index, candidate ->
+          CalendarFact(
+            candidate.getValue("exerciseId") as String,
+            index.toLong(),
+            UUID(0, 100L + index).toString(),
+            UUID(0, 200L + index).toString(),
+            0,
+            true,
+            null,
+            null,
+          )
+        }
+      assertEquals(
+        withoutHistory,
+        AgenticPlannerPolicy.select(eligible.reversed(), emptyMap(), emptyMap(), history),
+      )
+    }
+  }
+
+  @Test
   fun `only curated canonical IDs are default candidates and never remains absolute`() {
     val sources =
       mapOf(
@@ -95,7 +126,7 @@ class AgenticPlannerPolicyTest {
         fallback to CalendarCandidateSource(fallback, json.readTree("{\"isCustom\":true}")),
       )
     assertEquals(
-      listOf(fallback, standard),
+      listOf(standard, fallback),
       AgenticPlannerPolicy.select(
           listOf(row(standard), row(fallback)),
           emptyMap(),
