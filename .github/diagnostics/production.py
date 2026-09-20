@@ -63,6 +63,8 @@ def main():
         "log_query_ok": logs is not None,
         "log_summary": summarize(logs or ""),
         "sync_access_log_query_ok": nginx_access is not None,
+        "access_log_lines": len((nginx_access or "").splitlines()),
+        "sync_path_mentions": (nginx_access or "").count("/v1/sync"),
         "sync_http_statuses": sync_statuses(nginx_access or ""),
         "note": "Caught exceptions may not be logged; empty summary does not prove absence of errors.",
     }, indent=2))
