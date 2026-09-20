@@ -315,7 +315,15 @@ class CalendarAiCaptureIntegrationTest {
     )
     provider.handler = { providerResponse(tupleTarget) }
     val firstSet =
-      actions.calendar(tupleOwner, rawRequest()).proposal.snapshot.draft.exercises.single().plannedSets.first()
+      actions
+        .calendar(tupleOwner, rawRequest())
+        .proposal
+        .snapshot
+        .draft
+        .exercises
+        .single()
+        .plannedSets
+        .first()
     // The descending ten-set plan starts at ten reps, projected from the canonical 20 kg x 8 set.
     assertEquals(10, firstSet.reps)
     assertEquals(17.5, firstSet.weightKg)
