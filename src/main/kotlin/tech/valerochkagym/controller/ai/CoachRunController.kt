@@ -14,6 +14,7 @@ import tools.jackson.databind.JsonNode
 @RequestMapping("/v1/coach")
 class CoachRunController(
   private val runs: CoachRunService,
+  private val interventions: tech.valerochkagym.service.ai.CoachInterventionService,
   private val modelCheck: tech.valerochkagym.service.ai.CoachModelCheckService,
 ) {
   @PostMapping("/model-check")
@@ -92,6 +93,16 @@ class CoachRunController(
     return emitter
   }
 
+  @GetMapping("/sessions/{workoutId}/event-page")
+  fun eventPage(
+    @AuthenticationPrincipal identity: Identity,
+    @PathVariable workoutId: UUID,
+    @RequestParam(defaultValue = "0") after: Long,
+  ) =
+    ResponseEntity.ok()
+      .header("Cache-Control", "no-store")
+      .body(runs.workoutEvents(identity, workoutId, after))
+
   @PostMapping("/runs")
   fun submit(
     @AuthenticationPrincipal identity: Identity,
@@ -121,6 +132,28 @@ class CoachRunController(
     @PathVariable workoutId: UUID,
     @RequestParam(defaultValue = "0") after: Long,
   ) = runs.list(identity, workoutId, after)
+
+  @PostMapping("/sessions/{workoutId}/questions/{questionId}/answers")
+  fun answer(
+    @AuthenticationPrincipal identity: Identity,
+    @PathVariable workoutId: UUID,
+    @PathVariable questionId: UUID,
+    @RequestBody raw: ByteArray,
+  ) = interventions.answer(identity, workoutId, questionId, runs.parse(raw))
+
+  @PostMapping("/sessions/{workoutId}/proposals/{proposalId}/receipt")
+  fun interventionReceipt(
+    @AuthenticationPrincipal identity: Identity,
+    @PathVariable workoutId: UUID,
+    @PathVariable proposalId: UUID,
+    @RequestBody raw: ByteArray,
+  ) = interventions.receipt(identity, workoutId, proposalId, runs.parse(raw))
+
+  @GetMapping("/sessions/{workoutId}/behavior")
+  fun behavior(@AuthenticationPrincipal identity: Identity, @PathVariable workoutId: UUID) =
+    ResponseEntity.ok()
+      .header("Cache-Control", "no-store")
+      .body(runs.behaviorState(identity, workoutId))
 
   @PutMapping("/sessions/{workoutId}")
   fun session(

@@ -16,6 +16,7 @@
 <section class="panel workout"><div class="section-head"><h2>Тренировка</h2><span id="revision" class="muted"></span></div>
 <div class="scenario-row"><label>Сценарий<select id="scenario"><option value="normal">Обычная тренировка</option><option value="hard">Слишком тяжёлый подход</option><option value="short">Осталось 5 минут</option></select></label><button id="reset">Начать заново</button></div>
 <div class="workout-options"><label>Осталось, мин<input id="minutes" type="number" min="0" max="1440"></label><label>Отдых, сек<input id="rest" type="number" min="1" max="86400"></label><label class="check"><input id="initiative" type="checkbox">Инициатива coach</label></div>
+<div class="toolbar"><label>Фаза<select id="phase"><option value="UNKNOWN">Неизвестна</option><option value="READY">Готовность</option><option value="IN_SET">Выполняется подход</option><option value="RESTING">Отдых</option><option value="BETWEEN_EXERCISES">Между упражнениями</option></select></label><button id="workout-pause">Пауза / продолжить</button></div>
 <p class="muted hint">У выполненных подходов вес и повторы — фактический результат.</p><div id="exercises"></div><div id="rest-state" class="muted"></div>
 </section>
 <section class="panel coach"><div class="section-head"><h2>Live coach</h2><label class="model-label">Модель<select id="model" aria-label="Модель"></select></label></div>
@@ -23,5 +24,5 @@
 <form id="chat-form"><label class="sr-only" for="message">Сообщение тренеру</label><textarea id="message" maxlength="4000" rows="3" placeholder="Например: сегодня жим даётся тяжело. Что изменить?" required></textarea><div class="send-row"><span class="muted">Enter — отправить · Shift+Enter — новая строка</span><button id="send" class="primary" type="submit" disabled>Отправить</button></div></form>
 </section>
 </main>
-<section class="panel diagnostics"><div class="section-head"><h2>Диагностика</h2><div class="toolbar"><button id="stream-toggle">Отключить поток</button><button id="cancel">Отменить активные задачи</button></div></div><p class="muted">Отключение потока имитирует потерю связи: сервер продолжает работу. Применение предложений здесь имитирует Android.</p><pre id="trace"></pre><details><summary>Текущее состояние тренировки</summary><pre id="snapshot"></pre></details></section>
+<section class="panel diagnostics"><div class="section-head"><h2>Диагностика</h2><div class="toolbar"><button id="stream-toggle">Отключить поток</button><button id="cancel">Отменить активные задачи</button></div></div><p class="muted">Отключение потока имитирует потерю связи: сервер продолжает работу. Применение предложений здесь имитирует Android.</p><button id="behavior-refresh">Обновить поведение</button><pre id="behavior"></pre><pre id="trace"></pre><details><summary>Текущее состояние тренировки</summary><pre id="snapshot"></pre></details></section>
 </body></html>

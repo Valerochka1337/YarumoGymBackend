@@ -27,7 +27,12 @@ import tools.jackson.databind.ObjectMapper
 @SpringBootTest(
   webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
   classes = [Application::class, CoachRunIntegrationTest.Fakes::class],
-  properties = ["gym.coach-runs.enabled=false", "gym.calendar-jobs.enabled=false"],
+  properties =
+    [
+      "gym.coach-runs.enabled=false",
+      "gym.calendar-jobs.enabled=false",
+      "gym.coach-behavior.mode=SHADOW",
+    ],
 )
 class CoachRunIntegrationTest {
   companion object {
@@ -51,12 +56,18 @@ class CoachRunIntegrationTest {
   class Provider : CoachTurnProvider {
     var calls = 0
     var onCall: () -> Unit = {}
+    var completion: ((CoachTurnInput) -> JsonNode)? = null
+    val inputs = mutableListOf<CoachTurnInput>()
 
     override fun catalog() = CoachModelCatalog("AVAILABLE", "fixture", listOf("fixture"))
 
     override fun complete(input: CoachTurnInput): JsonNode {
       calls++
       onCall()
+      inputs += input
+      completion?.let {
+        return it(input)
+      }
       return tools.jackson.databind.json.JsonMapper.builder()
         .build()
         .readTree(
@@ -70,6 +81,8 @@ class CoachRunIntegrationTest {
     @Bean @Primary fun coachProvider() = Provider()
   }
 
+  @Autowired lateinit var dialogue: CoachDialogueService
+  @Autowired lateinit var interventions: CoachInterventionService
   @Autowired lateinit var runs: CoachRunService
   @Autowired lateinit var db: JdbcTemplate
   @Autowired lateinit var json: ObjectMapper
@@ -101,6 +114,8 @@ class CoachRunIntegrationTest {
     )
     provider.calls = 0
     provider.onCall = {}
+    provider.completion = null
+    provider.inputs.clear()
   }
 
   private fun owner(): Identity {
@@ -136,6 +151,608 @@ class CoachRunIntegrationTest {
         "history" to emptyList<Any>(),
       )
     )
+
+  @Test
+  fun `concern is durable without a run despite disabled initiative and pending interaction`() {
+    val user = owner()
+    val workout = UUID.randomUUID()
+    val snapshot =
+      json.readTree(request(workout = workout))["snapshot"]
+        as tools.jackson.databind.node.ObjectNode
+    snapshot.put("finished", true)
+    snapshot.put("pending_interaction", true)
+    snapshot.set("reported_feelings", json.valueToTree(listOf("PAIN")))
+    val body = sessionBody(workout, 1, snapshot = snapshot)
+    runs.session(user, workout, body)
+    dialogue.runNext()
+    runs.session(user, workout, body)
+    dialogue.runNext()
+    runs.session(user, workout, sessionBody(workout, 2, snapshot = snapshot))
+    dialogue.runNext()
+    assertEquals(0, provider.calls)
+    assertEquals(0, db.queryForObject("SELECT count(*) FROM coach_runs", Int::class.java))
+    val events = runs.workoutEvents(user, workout, 0)
+    assertEquals(1, events.size)
+    assertEquals("concern", events.single()["type"].asString())
+    assertFalse(events.single().has("runId"))
+    assertEquals(
+      2,
+      db.queryForObject("SELECT count(*) FROM coach_behavior_events", Int::class.java),
+    )
+    assertEquals(2L, runs.behaviorState(user, workout)["behavior"]["stateVersion"].asLong())
+    assertTrue(runs.workoutEvents(user, workout, 1).isEmpty())
+  }
+
+  @Test
+  fun `deleting an account removes behavior events without run references`() {
+    val user = owner()
+    val workout = UUID.randomUUID()
+    val snapshot =
+      json.readTree(request(workout = workout))["snapshot"]
+        as tools.jackson.databind.node.ObjectNode
+    snapshot.set("reported_feelings", json.valueToTree<JsonNode>(listOf("PAIN")))
+    runs.session(user, workout, sessionBody(workout, 1, snapshot = snapshot))
+    dialogue.runNext()
+    db.update("DELETE FROM users WHERE id=?", user.userId)
+    assertEquals(0, db.queryForObject("SELECT count(*) FROM coach_workout_events", Int::class.java))
+    assertEquals(
+      0,
+      db.queryForObject("SELECT count(*) FROM coach_behavior_events", Int::class.java),
+    )
+  }
+
+  @Test
+  fun `explicit concern resolution survives snapshot refresh and pins session mode`() {
+    val user = owner()
+    val workout = UUID.randomUUID()
+    val snapshot =
+      json.readTree(request(workout = workout))["snapshot"]
+        as tools.jackson.databind.node.ObjectNode
+    snapshot.set("reported_feelings", json.valueToTree<JsonNode>(listOf("PAIN")))
+    runs.session(user, workout, sessionBody(workout, 1, snapshot = snapshot))
+    dialogue.runNext()
+    val resolution =
+      json.readTree(sessionBody(workout, 2, snapshot = snapshot))
+        as tools.jackson.databind.node.ObjectNode
+    resolution.set("resolvedConcernKeys", json.valueToTree<JsonNode>(listOf("workout:PAIN")))
+    val raw = json.writeValueAsBytes(resolution)
+    runs.session(user, workout, raw)
+    dialogue.runNext()
+    runs.session(user, workout, raw)
+    dialogue.runNext()
+    runs.session(user, workout, sessionBody(workout, 3, snapshot = snapshot))
+    dialogue.runNext()
+    val view = runs.behaviorState(user, workout)["behavior"]
+    assertTrue(view["state"]["openConcerns"].isEmpty)
+    assertEquals("SHADOW", view["mode"].asString())
+    assertEquals(1, runs.workoutEvents(user, workout, 0).size)
+    assertEquals(3L, view["stateVersion"].asLong())
+  }
+
+  @Test
+  fun `enforced policy supersedes automatic work during a set but keeps manual questions`() {
+    val user = owner()
+    val workout = UUID.randomUUID()
+    val snapshot =
+      json.readTree(request(workout = workout))["snapshot"]
+        as tools.jackson.databind.node.ObjectNode
+    snapshot.put("phase", "READY")
+    runs.session(user, workout, sessionBody(workout, 1, true, snapshot))
+    dialogue.runNext()
+    db.update("UPDATE coach_sessions SET behavior_mode='ENFORCE' WHERE owner_id=?", user.userId)
+    val id = UUID.randomUUID()
+    val input = json.readTree(request(id, workout)) as tools.jackson.databind.node.ObjectNode
+    input.put("automatic", true)
+    runs.submit(user, json.writeValueAsBytes(input))
+    snapshot.put("phase", "IN_SET")
+    runs.session(user, workout, sessionBody(workout, 2, true, snapshot))
+    dialogue.runNext()
+    assertEquals("SUPERSEDED", runs.status(user, id)["state"].asString())
+    val manual = UUID.randomUUID()
+    runs.submit(user, request(manual, workout))
+    runs.runNext()
+    assertEquals("SUCCEEDED", runs.status(user, manual)["state"].asString())
+    assertEquals(1, provider.calls)
+  }
+
+  @Test
+  fun `pain is delivered immediately even when narration is leased and provider is unavailable`() {
+    val user = owner()
+    val workout = UUID.randomUUID()
+    val snapshot = interventionSnapshot(workout) as tools.jackson.databind.node.ObjectNode
+    runs.session(user, workout, sessionBody(workout, 1, false, snapshot))
+    db.update(
+      "INSERT INTO coach_presentations(id,owner_id,workout_id,event_type,payload,context_version,lease_until) VALUES (?,?,?,'intervention','{}','context',now()+interval '10 minutes')",
+      UUID.randomUUID(),
+      user.userId,
+      workout,
+    )
+    provider.onCall = { error("provider unavailable") }
+    snapshot.set("reported_feelings", json.valueToTree<JsonNode>(listOf("PAIN")))
+    runs.session(user, workout, sessionBody(workout, 2, false, snapshot))
+    val concern = runs.workoutEvents(user, workout, 0).single { it["type"].asString() == "concern" }
+    assertTrue(concern["text"].asString().startsWith("Останови движение"))
+    assertEquals(0, provider.calls)
+    runs.session(user, workout, sessionBody(workout, 3, false, snapshot))
+    assertEquals(
+      1,
+      runs.workoutEvents(user, workout, 0).count { it["type"].asString() == "concern" },
+    )
+  }
+
+  @Test
+  fun `early priorities remain visible after more than twenty dialogue turns`() {
+    val user = owner()
+    val workout = UUID.randomUUID()
+    val priority = "Последнее упражнение обязательно оставь"
+    repeat(25) { index ->
+      runs.submit(
+        user,
+        request(workout = workout, message = if (index == 0) priority else "Уточнение $index"),
+      )
+      runs.runNext()
+    }
+    assertTrue(
+      provider.inputs.last().messages.any {
+        it["role"].asString() == "user" && it["content"].asString() == priority
+      }
+    )
+  }
+
+  private fun interventionSnapshot(workout: UUID): JsonNode =
+    json.valueToTree(
+      mapOf(
+        "workout_id" to workout.toString(),
+        "revision" to 1,
+        "phase" to "RESTING",
+        "future_rest_seconds" to 120,
+        "exercises" to
+          listOf(
+            mapOf(
+              "section_id" to UUID.randomUUID().toString(),
+              "exercise_id" to UUID.randomUUID().toString(),
+              "name" to "Присед",
+              "type" to "STRENGTH",
+              "sets" to
+                (0..2).map { index ->
+                  mapOf(
+                    "set_id" to UUID.randomUUID().toString(),
+                    "index" to index,
+                    "completed" to (index < 2),
+                    "completed_at" to if (index < 2) index + 1 else null,
+                    "weight_kg" to 60,
+                    "reps" to if (index == 1) 6 else 10,
+                    "set_type" to "WORK",
+                  )
+                },
+            )
+          ),
+      )
+    )
+
+  @Test
+  fun `question and proposal are narrated without changing validated operations`() {
+    val user = owner()
+    val workout = UUID.randomUUID()
+    val snapshot = interventionSnapshot(workout)
+    runs.session(user, workout, sessionBody(workout, 1, false, snapshot))
+    dialogue.runNext()
+    db.update("UPDATE coach_sessions SET behavior_mode='ENFORCE' WHERE owner_id=?", user.userId)
+    runs.session(user, workout, sessionBody(workout, 2, true, snapshot))
+    dialogue.runNext()
+    val question = runs.workoutEvents(user, workout, 0).single()["result"]["question"]
+    val questionId = UUID.fromString(question["questionId"].asString())
+    val answer =
+      json.valueToTree<JsonNode>(
+        mapOf(
+          "answerId" to UUID.randomUUID(),
+          "expectedVersion" to 1,
+          "answer" to "HARDER_THAN_EXPECTED",
+        )
+      )
+    val result = interventions.answer(user, workout, questionId, answer)
+    assertEquals("ANSWERED", result["status"].asString())
+    assertTrue(result["proposalPending"].asBoolean())
+    dialogue.runNext()
+    assertEquals(result, interventions.answer(user, workout, questionId, answer))
+    assertTrue(provider.calls > 0)
+    assertEquals(0, db.queryForObject("SELECT count(*) FROM coach_runs", Int::class.java))
+    assertEquals(
+      1,
+      db.queryForObject("SELECT count(*) FROM coach_intervention_proposals", Int::class.java),
+    )
+    val presented =
+      runs.workoutEvents(user, workout, 0).last { it["result"]?.get("proposal") != null }["result"]
+    val proposalId = UUID.fromString(presented["proposal"]["proposalId"].asString())
+    val receipt =
+      json.valueToTree<JsonNode>(
+        mapOf(
+          "receiptId" to UUID.randomUUID(),
+          "version" to 1,
+          "status" to "APPLIED",
+          "resultRevision" to 2,
+        )
+      )
+    db.update("UPDATE coach_intervention_proposals SET status='EXPIRED',expires_at=0")
+    val ack = interventions.receipt(user, workout, proposalId, receipt)
+    assertEquals(ack, interventions.receipt(user, workout, proposalId, receipt))
+    assertEquals(
+      "APPLIED",
+      db.queryForObject("SELECT status FROM coach_intervention_proposals", String::class.java),
+    )
+    assertEquals(
+      2,
+      db.queryForObject("SELECT count(*) FROM coach_intervention_receipts", Int::class.java),
+    )
+    val conflictingReceipt =
+      (receipt.deepCopy() as tools.jackson.databind.node.ObjectNode)
+        .put("receiptId", UUID.randomUUID().toString())
+        .put("status", "REJECTED")
+    assertEquals(
+      409,
+      assertThrows(ApiException::class.java) {
+          interventions.receipt(user, workout, proposalId, conflictingReceipt)
+        }
+        .status,
+    )
+    val changed =
+      (answer.deepCopy() as tools.jackson.databind.node.ObjectNode).put("answer", "PLANNED_EFFORT")
+    assertEquals(
+      409,
+      assertThrows(ApiException::class.java) {
+          interventions.answer(user, workout, questionId, changed)
+        }
+        .status,
+    )
+  }
+
+  @Test
+  fun `time conflict goes through conversational judgement before any proposal`() {
+    val user = owner()
+    val workout = UUID.randomUUID()
+    val snapshot = interventionSnapshot(workout) as tools.jackson.databind.node.ObjectNode
+    snapshot.put("available_time_minutes", 0)
+    runs.session(user, workout, sessionBody(workout, 1, false, snapshot))
+    dialogue.runNext()
+    db.update("UPDATE coach_sessions SET behavior_mode='ENFORCE' WHERE owner_id=?", user.userId)
+    runs.session(user, workout, sessionBody(workout, 2, true, snapshot))
+    dialogue.runNext()
+    runs.session(user, workout, sessionBody(workout, 3, true, snapshot))
+    dialogue.runNext()
+    assertEquals(
+      0,
+      db.queryForObject("SELECT count(*) FROM coach_intervention_proposals", Int::class.java),
+    )
+    assertEquals(0, db.queryForObject("SELECT count(*) FROM coach_questions", Int::class.java))
+    assertEquals(1, db.queryForObject("SELECT count(*) FROM coach_runs", Int::class.java))
+    assertEquals(0, provider.calls)
+  }
+
+  @Test
+  fun `planned effort answer keeps the plan and never implies consent`() {
+    val user = owner()
+    val workout = UUID.randomUUID()
+    val snapshot = interventionSnapshot(workout)
+    runs.session(user, workout, sessionBody(workout, 1, false, snapshot))
+    dialogue.runNext()
+    db.update("UPDATE coach_sessions SET behavior_mode='ENFORCE' WHERE owner_id=?", user.userId)
+    runs.session(user, workout, sessionBody(workout, 2, true, snapshot))
+    dialogue.runNext()
+    val questionId =
+      UUID.fromString(
+        runs.workoutEvents(user, workout, 0).single()["result"]["question"]["questionId"].asString()
+      )
+    val answer =
+      json.valueToTree<JsonNode>(
+        mapOf("answerId" to UUID.randomUUID(), "expectedVersion" to 1, "answer" to "PLANNED_EFFORT")
+      )
+    assertEquals(
+      "no_change",
+      interventions.answer(user, workout, questionId, answer)["kind"].asString(),
+    )
+    assertEquals(
+      0,
+      db.queryForObject("SELECT count(*) FROM coach_intervention_proposals", Int::class.java),
+    )
+    runs.session(user, workout, sessionBody(workout, 3, true, snapshot))
+    dialogue.runNext()
+    assertEquals(1, db.queryForObject("SELECT count(*) FROM coach_questions", Int::class.java))
+  }
+
+  @Test
+  fun `old question cannot modify a later workout revision`() {
+    val user = owner()
+    val workout = UUID.randomUUID()
+    val snapshot = interventionSnapshot(workout) as tools.jackson.databind.node.ObjectNode
+    runs.session(user, workout, sessionBody(workout, 1, false, snapshot))
+    dialogue.runNext()
+    db.update("UPDATE coach_sessions SET behavior_mode='ENFORCE' WHERE owner_id=?", user.userId)
+    runs.session(user, workout, sessionBody(workout, 2, true, snapshot))
+    dialogue.runNext()
+    val question = runs.workoutEvents(user, workout, 0).single()["result"]["question"]
+    snapshot.put("revision", 2)
+    runs.session(user, workout, sessionBody(workout, 3, true, snapshot))
+    dialogue.runNext()
+    val answer =
+      json.valueToTree<JsonNode>(
+        mapOf(
+          "answerId" to UUID.randomUUID(),
+          "expectedVersion" to 1,
+          "answer" to "HARDER_THAN_EXPECTED",
+        )
+      )
+    assertEquals(
+      "ANSWERED",
+      interventions
+        .answer(user, workout, UUID.fromString(question["questionId"].asString()), answer)["status"]
+        .asString(),
+    )
+    assertEquals(
+      0,
+      db.queryForObject("SELECT count(*) FROM coach_intervention_proposals", Int::class.java),
+    )
+  }
+
+  @Test
+  fun `late answer remains a fact in subsequent calculation and conversation`() {
+    val user = owner()
+    val workout = UUID.randomUUID()
+    val snapshot = interventionSnapshot(workout) as tools.jackson.databind.node.ObjectNode
+    runs.session(user, workout, sessionBody(workout, 1, false, snapshot))
+    db.update("UPDATE coach_sessions SET behavior_mode='ENFORCE' WHERE owner_id=?", user.userId)
+    runs.session(user, workout, sessionBody(workout, 2, true, snapshot))
+    dialogue.runNext()
+    val question = runs.workoutEvents(user, workout, 0).single()["result"]["question"]
+    snapshot.put("revision", 2)
+    snapshot.put("phase", "IN_SET")
+    runs.session(user, workout, sessionBody(workout, 3, true, snapshot))
+    db.update("UPDATE coach_questions SET expires_at=0")
+    val answer =
+      json.valueToTree<JsonNode>(
+        mapOf("answerId" to UUID.randomUUID(), "expectedVersion" to 1, "answer" to "PLANNED_EFFORT")
+      )
+    val result =
+      interventions.answer(
+        user,
+        workout,
+        UUID.fromString(question["questionId"].asString()),
+        answer,
+      )
+    assertEquals("ANSWERED", result["status"].asString())
+    assertEquals(
+      result,
+      interventions.answer(
+        user,
+        workout,
+        UUID.fromString(question["questionId"].asString()),
+        answer,
+      ),
+    )
+    val projected = interventions.planningSnapshot(user.userId, workout, snapshot)
+    assertEquals(
+      "PLANNED_EFFORT",
+      projected["exercises"][0]["sets"][1]["reported_feelings"][0].asString(),
+    )
+    assertEquals(
+      "planned_effort",
+      CoachRunTools(json)
+        .assessment(user.userId, projected, json.createObjectNode())["reason_code"]
+        .asString(),
+    )
+    assertTrue(
+      dialogue.history(user.userId, workout).any {
+        it["role"] == "user" && it["text"] == "Остановился специально"
+      }
+    )
+    assertEquals(
+      0,
+      db.queryForObject("SELECT count(*) FROM coach_intervention_proposals", Int::class.java),
+    )
+  }
+
+  @Test
+  fun `text reply resolves only its named concern and is idempotent`() {
+    val user = owner()
+    val workout = UUID.randomUUID()
+    val snapshot = interventionSnapshot(workout) as tools.jackson.databind.node.ObjectNode
+    snapshot.set(
+      "reported_feelings",
+      json.valueToTree<JsonNode>(listOf("PAIN", "TECHNIQUE_BREAKDOWN")),
+    )
+    runs.session(user, workout, sessionBody(workout, 1, true, snapshot))
+    dialogue.runNext()
+    val id = UUID.randomUUID()
+    val args =
+      json.valueToTree<JsonNode>(
+        mapOf(
+          "kind" to "resolve_concern",
+          "concern_key" to "workout:PAIN",
+          "evidence" to "Боль прошла",
+        )
+      )
+    val result =
+      interventions.observe(
+        user.userId,
+        workout,
+        id,
+        args,
+        "Боль прошла, но техника всё ещё страдает",
+      )
+    assertEquals(
+      result,
+      interventions.observe(
+        user.userId,
+        workout,
+        id,
+        args,
+        "Боль прошла, но техника всё ещё страдает",
+      ),
+    )
+    assertEquals(
+      listOf("workout:TECHNIQUE_BREAKDOWN"),
+      result["open_concerns"].toList().map { it.asString() },
+    )
+    assertThrows(IllegalArgumentException::class.java) {
+      interventions.observe(user.userId, workout, UUID.randomUUID(), args, "Продолжаем")
+    }
+  }
+
+  @Test
+  fun `narration never publishes a proposal after the athlete starts a set`() {
+    val user = owner()
+    val workout = UUID.randomUUID()
+    val snapshot = interventionSnapshot(workout) as tools.jackson.databind.node.ObjectNode
+    snapshot.put("available_time_minutes", 0)
+    runs.session(user, workout, sessionBody(workout, 1, false, snapshot))
+    db.update("UPDATE coach_sessions SET behavior_mode='ENFORCE' WHERE owner_id=?", user.userId)
+    runs.session(user, workout, sessionBody(workout, 2, true, snapshot))
+    provider.onCall = {
+      snapshot.put("phase", "IN_SET")
+      runs.session(user, workout, sessionBody(workout, 3, true, snapshot))
+    }
+    dialogue.runNext()
+    assertTrue(
+      runs.workoutEvents(user, workout, 0).none { it["type"]?.asString() == "intervention" }
+    )
+  }
+
+  @Test
+  fun `ordinary chat answers the pending question and model sees updated calculation`() {
+    val user = owner()
+    val workout = UUID.randomUUID()
+    val snapshot = interventionSnapshot(workout)
+    runs.session(user, workout, sessionBody(workout, 1, false, snapshot))
+    db.update("UPDATE coach_sessions SET behavior_mode='ENFORCE' WHERE owner_id=?", user.userId)
+    runs.session(user, workout, sessionBody(workout, 2, true, snapshot))
+    dialogue.runNext()
+    val questionId =
+      runs.workoutEvents(user, workout, 0).single()["result"]["question"]["questionId"].asString()
+    provider.completion = { input ->
+      val message =
+        if (input.messages.any { it["role"]?.asString() == "tool" }) {
+          val toolState = json.readTree(input.messages.last()["content"].asString())
+          assertEquals("INTERRUPTED", toolState["behavior_facts"][0]["reportedFeeling"].asString())
+          mapOf(
+            "role" to "assistant",
+            "content" to "Понял, прерванный подход не считаю признаком слишком большого веса.",
+          )
+        } else {
+          assertTrue(
+            input.messages.any {
+              it["role"]?.asString() == "assistant" && it["content"]?.asString() == "Продолжим"
+            }
+          )
+          mapOf(
+            "role" to "assistant",
+            "tool_calls" to
+              listOf(
+                mapOf(
+                  "id" to "answer-cause",
+                  "type" to "function",
+                  "function" to
+                    mapOf(
+                      "name" to "record_coach_observation",
+                      "arguments" to
+                        json.writeValueAsString(
+                          mapOf(
+                            "kind" to "answer",
+                            "question_id" to questionId,
+                            "answer" to "INTERRUPTED",
+                            "evidence" to "меня отвлекли",
+                          )
+                        ),
+                    ),
+                )
+              ),
+          )
+        }
+      json.valueToTree(
+        mapOf(
+          "choices" to
+            listOf(
+              mapOf(
+                "finish_reason" to if (message.containsKey("tool_calls")) "tool_calls" else "stop",
+                "message" to message,
+              )
+            )
+        )
+      )
+    }
+    val requestId = UUID.randomUUID()
+    val body =
+      json.readTree(request(id = requestId, workout = workout, message = "Да, меня отвлекли"))
+        as tools.jackson.databind.node.ObjectNode
+    body.set("snapshot", snapshot)
+    runs.submit(user, json.writeValueAsBytes(body))
+    runs.runNext()
+    assertEquals(
+      "ANSWERED",
+      db.queryForObject("SELECT status FROM coach_questions", String::class.java),
+    )
+    assertEquals("SUCCEEDED", runs.status(user, requestId)["state"].asString())
+    assertEquals(
+      "interrupted_set",
+      CoachRunTools(json)
+        .assessment(
+          user.userId,
+          interventions.planningSnapshot(user.userId, workout, snapshot),
+          json.createObjectNode(),
+        )["reason_code"]
+        .asString(),
+    )
+    assertEquals(
+      0,
+      db.queryForObject("SELECT count(*) FROM coach_intervention_proposals", Int::class.java),
+    )
+  }
+
+  @Test
+  fun `wording changes no operations and provider failure preserves the decision`() {
+    val user = owner()
+    val workout = UUID.randomUUID()
+    val snapshot = interventionSnapshot(workout) as tools.jackson.databind.node.ObjectNode
+    (snapshot["exercises"][0]["sets"][1] as tools.jackson.databind.node.ObjectNode).set(
+      "reported_feelings",
+      json.valueToTree<JsonNode>(listOf("HARDER_THAN_EXPECTED")),
+    )
+    runs.session(user, workout, sessionBody(workout, 1, false, snapshot))
+    db.update("UPDATE coach_sessions SET behavior_mode='ENFORCE' WHERE owner_id=?", user.userId)
+    runs.session(user, workout, sessionBody(workout, 2, true, snapshot))
+    val prepared =
+      json.readTree(
+        db.queryForObject(
+          "SELECT payload::text FROM coach_intervention_proposals",
+          String::class.java,
+        )!!
+      )
+    provider.completion = { input ->
+      assertTrue(input.tools.isEmpty)
+      throw IllegalStateException("fixture provider unavailable")
+    }
+    dialogue.runNext()
+    val presented = runs.workoutEvents(user, workout, 0).single()["result"]
+    assertEquals(prepared["proposal"]["operations"], presented["proposal"]["operations"])
+    assertEquals(prepared["proposal"]["proposalId"], presented["proposal"]["proposalId"])
+    assertEquals(prepared["text"], presented["text"])
+    dialogue.runNext()
+    assertEquals(1, runs.workoutEvents(user, workout, 0).size)
+  }
+
+  @Test
+  fun `admission bound preserves idempotent retries`() {
+    val user = owner()
+    val workout = UUID.randomUUID()
+    val first = request(workout = workout)
+    runs.submit(user, first)
+    repeat(7) { runs.submit(user, request(workout = workout)) }
+    assertEquals("QUEUED", runs.submit(user, first)["state"].asString())
+    assertEquals(
+      429,
+      assertThrows(ApiException::class.java) { runs.submit(user, request(workout = workout)) }
+        .status,
+    )
+    assertEquals(8, db.queryForObject("SELECT count(*) FROM coach_runs", Int::class.java))
+  }
 
   @Test
   fun `submission is idempotent and conflicting payload is rejected`() {

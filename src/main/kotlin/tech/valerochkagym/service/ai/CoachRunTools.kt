@@ -79,6 +79,33 @@ internal class CoachRunTools(private val json: ObjectMapper) {
     }
   }
 
+  fun validateObservation(args: JsonNode) {
+    when (args["kind"]?.asString()) {
+      "answer" -> {
+        keys(
+          args,
+          setOf("kind", "question_id", "answer", "evidence"),
+          setOf("kind", "question_id", "answer", "evidence"),
+        )
+        uuid(args["question_id"])
+        require(
+          args["answer"]?.asString() in
+            setOf("PLANNED_EFFORT", "HARDER_THAN_EXPECTED", "INTERRUPTED")
+        )
+      }
+      "resolve_concern" -> {
+        keys(
+          args,
+          setOf("kind", "concern_key", "evidence"),
+          setOf("kind", "concern_key", "evidence"),
+        )
+        text(args["concern_key"], 200)
+      }
+      else -> throw IllegalArgumentException("Неизвестный вид факта")
+    }
+    text(args["evidence"], 4000)
+  }
+
   fun operations(
     owner: UUID,
     snapshot: JsonNode,
@@ -341,6 +368,9 @@ internal class CoachRunTools(private val json: ObjectMapper) {
         "missing_data" to result.missingData.map { it.name },
         "operations" to result.operations.map(::wire),
         "rules_version" to result.rulesVersion,
+        "reason_code" to result.reasonCode,
+        "evidence_key" to result.evidenceKey,
+        "intervention_key" to result.interventionKey,
       )
     )
   }
@@ -402,6 +432,7 @@ internal class CoachRunTools(private val json: ObjectMapper) {
                 .orEmpty(),
           )
         },
+      feelings = node.strings("reported_feelings"),
       availableTimeMinutes = node.integer("available_time_minutes"),
       futureRestSeconds = node.integer("future_rest_seconds"),
       excludedExerciseIds = node.strings("excluded_exercise_ids"),
@@ -425,6 +456,13 @@ internal class CoachRunTools(private val json: ObjectMapper) {
   }
 
   fun initiative(current: JsonNode, previous: JsonNode?, memory: JsonNode?): String? {
+    val concerns = tech.valerochkagym.service.ai.coach.CoachBehaviorPolicy.concerns(current)
+    if (
+      (concerns - tech.valerochkagym.service.ai.coach.CoachBehaviorPolicy.concerns(previous))
+        .isNotEmpty()
+    )
+      return "Вы сообщили о боли или нарушении техники. Уточните, что произошло, перед планированием продолжения."
+    if (concerns.isNotEmpty()) return null
     if (
       current["initiative_enabled"]?.asBoolean() == false ||
         current["pending_interaction"]?.asBoolean() == true ||

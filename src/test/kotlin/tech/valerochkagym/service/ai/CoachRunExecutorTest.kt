@@ -102,6 +102,9 @@ class CoachRunExecutorTest {
     val texts = mutableListOf<String>()
     var checks = 0
     var reject = false
+    var fresh: Pair<JsonNode, String>? = null
+
+    override fun refreshState() = fresh
 
     override fun checkpoint(value: JsonNode) {
       saved = value
@@ -158,6 +161,62 @@ class CoachRunExecutorTest {
     )
 
   @Test
+  fun `state read refreshes the snapshot and checkpoints its context version`() {
+    val provider = Provider()
+    val hooks = Hooks()
+    val fresh = snapshot().deepCopy() as tools.jackson.databind.node.ObjectNode
+    fresh.put("revision", 8)
+    hooks.fresh = fresh to "ctx-8"
+    val messages =
+      listOf(
+        tree(
+          mapOf(
+            "role" to "assistant",
+            "tool_calls" to listOf(call("get_workout_state", emptyMap<String, String>())),
+          )
+        )
+      )
+    executor(provider).execute(owner, input(), checkpoint(messages), hooks)
+    val output =
+      json.readTree(
+        provider.received!!.messages.first { it["role"].asString() == "tool" }["content"].asString()
+      )
+    assertEquals(8, output["revision"].asInt())
+    assertEquals("ctx-8", hooks.saved!!["contextVersion"].asString())
+  }
+
+  @Test
+  fun `pending proposal blocks a second change but still permits an answer`() {
+    val provider = Provider()
+    val hooks = Hooks()
+    val fresh = snapshot().deepCopy() as tools.jackson.databind.node.ObjectNode
+    fresh.set("pending_proposals", tree(listOf(mapOf("proposalId" to "pending"))))
+    hooks.fresh = fresh to "ctx-7"
+    val args =
+      mapOf(
+        "base_revision" to 7,
+        "operations" to
+          listOf(
+            mapOf("action" to "edit_set", "set_id" to next, "values" to mapOf("weight_kg" to 95))
+          ),
+      )
+    val messages =
+      listOf(
+        tree(
+          mapOf("role" to "assistant", "tool_calls" to listOf(call("submit_workout_changes", args)))
+        )
+      )
+    val result = executor(provider).execute(owner, input(), checkpoint(messages), hooks)
+    assertEquals("answer", result["kind"].asString())
+    assertFalse(result.has("proposal"))
+    val output =
+      json.readTree(
+        provider.received!!.messages.first { it["role"].asString() == "tool" }["content"].asString()
+      )
+    assertEquals("invalid_tool_arguments", output["error"].asString())
+  }
+
+  @Test
   fun `resuming a completed read tool never dispatches it twice`() {
     val provider = Provider()
     val hooks = Hooks()
@@ -180,6 +239,43 @@ class CoachRunExecutorTest {
     assertEquals(1, hooks.saved!!["calls"].asInt())
     assertEquals(listOf("Продолжим"), hooks.texts)
     assertEquals(1, provider.received!!.messages.toList().count { it["role"].asString() == "tool" })
+  }
+
+  @Test
+  fun `automatic tool call cannot invent a recorded result`() {
+    val request = input() as tools.jackson.databind.node.ObjectNode
+    request.put("automatic", true)
+    val saved =
+      checkpoint(
+        listOf(
+          tree(
+            mapOf(
+              "role" to "assistant",
+              "tool_calls" to
+                listOf(
+                  call(
+                    "submit_workout_changes",
+                    mapOf(
+                      "base_revision" to 7,
+                      "operations" to
+                        listOf(
+                          mapOf(
+                            "action" to "record_result",
+                            "set_id" to first,
+                            "values" to mapOf("reps" to 20),
+                          )
+                        ),
+                    ),
+                  )
+                ),
+            )
+          )
+        )
+      )
+    val hooks = Hooks()
+    val result = executor(Provider()).execute(owner, request, saved, hooks)
+    assertNotEquals("proposal", result["kind"].asString())
+    assertTrue(hooks.saved!!["messages"].toString().contains("invalid_tool_arguments"))
   }
 
   @Test
@@ -351,6 +447,144 @@ class CoachRunExecutorTest {
     assertEquals("CLARIFY", result["kind"].asString())
     assertEquals("EQUIPMENT", result["missing_data"][0].asString())
     assertTrue(result["operations"].isEmpty)
+  }
+
+  @Test
+  fun `pain wins over deadline pending card and final set`() {
+    val state = snapshot(listOf("PAIN")) as tools.jackson.databind.node.ObjectNode
+    state.put("available_time_minutes", 0)
+    state.put("pending_interaction", true)
+    state.put("finished", true)
+    (state["exercises"][0]["sets"][1] as tools.jackson.databind.node.ObjectNode).put(
+      "completed",
+      true,
+    )
+    val decision = codec.assessment(owner, state, tree(emptyMap<String, String>()))
+    assertEquals("reported_safety_issue", decision["reason_code"].asString())
+    assertTrue(decision["operations"].isEmpty)
+    assertNotNull(codec.initiative(state, null, null))
+    assertNull(codec.initiative(state, state, null))
+  }
+
+  @Test
+  fun `automatic response uses contextual language instead of deterministic template`() {
+    val provider = Provider()
+    val request =
+      input(snapshot(listOf("HARDER_THAN_EXPECTED"))) as tools.jackson.databind.node.ObjectNode
+    request.put("automatic", true)
+    request.put("deterministicPolicy", true)
+    val hooks = Hooks()
+    val result =
+      executor(provider)
+        .execute(
+          owner,
+          request,
+          checkpoint(listOf(tree(mapOf("role" to "user", "content" to "Помоги")))),
+          hooks,
+        )
+    assertEquals("answer", result["kind"].asString())
+    assertEquals("Продолжим", result["text"].asString())
+    assertEquals(1, provider.count)
+    assertEquals(result, executor(provider).execute(owner, request, hooks.saved, Hooks()))
+    assertEquals(1, provider.count)
+  }
+
+  @Test
+  fun `automatic observation cannot record an answer or resolve a concern`() {
+    val request = input() as tools.jackson.databind.node.ObjectNode
+    request.put("automatic", true)
+    var observed = false
+    val hooks =
+      object : CoachRunHooks {
+        override fun checkpoint(value: JsonNode) {}
+
+        override fun progress(stage: String) {}
+
+        override fun text(value: String) {}
+
+        override fun checkActive() {}
+
+        override fun observe(callId: String, args: JsonNode): JsonNode {
+          observed = true
+          return snapshot()
+        }
+      }
+    val args =
+      mapOf("kind" to "resolve_concern", "concern_key" to "workout:PAIN", "evidence" to "Помоги")
+    val point =
+      checkpoint(
+        listOf(
+          tree(
+            mapOf(
+              "role" to "assistant",
+              "tool_calls" to listOf(call("record_coach_observation", args)),
+            )
+          )
+        )
+      )
+    executor(Provider()).execute(owner, request, point, hooks)
+    assertFalse(observed)
+  }
+
+  @Test
+  fun `known interruption never asks the same cause again`() {
+    val state = snapshot(listOf("INTERRUPTED"))
+    assertEquals(
+      "NO_CHANGE",
+      codec.assessment(owner, state, tree(emptyMap<String, String>()))["kind"].asString(),
+    )
+    assertNull(codec.initiative(state, null, null))
+  }
+
+  @Test
+  fun `observation tool records explicit answer and resumes with updated facts`() {
+    val request = input()
+    val question = UUID.randomUUID().toString()
+    val args =
+      mapOf(
+        "kind" to "answer",
+        "question_id" to question,
+        "answer" to "INTERRUPTED",
+        "evidence" to "Прервали",
+      )
+    var writes = 0
+    var saved: JsonNode? = null
+    val hooks =
+      object : CoachRunHooks {
+        override fun checkActive() {}
+
+        override fun progress(stage: String) {}
+
+        override fun text(value: String) {}
+
+        override fun checkpoint(value: JsonNode) {
+          saved = value
+        }
+
+        override fun observe(callId: String, args: JsonNode): JsonNode {
+          writes++
+          return snapshot(listOf("INTERRUPTED"))
+        }
+      }
+    val point =
+      checkpoint(
+        listOf(
+          tree(
+            mapOf(
+              "role" to "assistant",
+              "tool_calls" to listOf(call("record_coach_observation", args)),
+            )
+          )
+        )
+      )
+    val result = executor(Provider()).execute(owner, request, point, hooks)
+    assertEquals(1, writes)
+    assertEquals(
+      "INTERRUPTED",
+      saved!!["snapshot"]["exercises"][0]["sets"][0]["reported_feelings"][0].asString(),
+    )
+    assertEquals(result, executor(Provider()).execute(owner, request, saved, hooks))
+    assertEquals(1, writes)
   }
 
   @Test

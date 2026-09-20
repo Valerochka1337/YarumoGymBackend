@@ -757,5 +757,48 @@
         "additionalProperties": false
       }
     }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "record_coach_observation",
+      "description": "Save an explicit answer to a known coach question or the explicit resolution of one named open concern. Only from the current user message; evidence must be an exact quote. Does not authorize or apply workout changes. Returns updated workout state.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "answer",
+              "resolve_concern"
+            ]
+          },
+          "question_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "answer": {
+            "type": "string",
+            "enum": [
+              "PLANNED_EFFORT",
+              "HARDER_THAN_EXPECTED",
+              "INTERRUPTED"
+            ]
+          },
+          "concern_key": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "string",
+            "maxLength": 4000
+          }
+        },
+        "required": [
+          "kind",
+          "evidence"
+        ],
+        "additionalProperties": false
+      }
+    }
   }
 ]

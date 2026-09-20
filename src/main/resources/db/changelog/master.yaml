@@ -86,3 +86,12 @@ databaseChangeLog:
   - include:
       file: 029-planner-configuration.sql
       relativeToChangelogFile: true
+  - include:
+      file: 029-coach-behavior.sql
+      relativeToChangelogFile: true
+  - include:
+      file: 030-coach-interventions.sql
+      relativeToChangelogFile: true
+  - include:
+      file: 031-coach-presentations.sql
+      relativeToChangelogFile: true

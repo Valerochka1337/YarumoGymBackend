@@ -123,3 +123,39 @@ test('SSE resumes persisted cursor and fragmented frames render only the cumulat
   assert.equal(w.document.querySelectorAll('#messages .bubble').length,1);
   assert.ok(!w.document.getElementById('messages').textContent.includes('Повторное событие'));
 });
+
+test('concern resolves from the conversation event without a manual status button', async t => {
+  const state=fixture(), eventId=S.uuid();
+  const event={sequence:1,type:'concern',eventId,text:'Уточните, что произошло.',decision:{reasonCode:'reported_safety_issue',state:{policyVersion:'behavior-1',openConcerns:['workout:PAIN']}}};
+  const resolved={sequence:2,type:'concern_resolved',resolvedConcernKeys:['workout:PAIN']};
+  const bytes=new TextEncoder().encode([event,event,resolved].map(e=>`data: ${JSON.stringify(e)}\n\n`).join(''));
+  const {w}=await ui(t,state,async path=>{
+    if(path.includes('/events?'))return {ok:true,status:200,body:new ReadableStream({start(c){c.enqueue(bytes);c.close();}})};
+  });
+  await until(()=>JSON.parse(w.sessionStorage.getItem('coach-playground-v1')).eventCursor === 2);
+  assert.equal(w.document.querySelectorAll('#messages .bubble').length,1);
+  assert.equal(w.document.querySelector('#messages .bubble button'),null);
+  const saved=JSON.parse(w.sessionStorage.getItem('coach-playground-v1'));
+  assert.equal(saved.concerns[0].resolved,true);
+  assert.equal(saved.concerns.length,1);
+});
+
+test('structured question prepares a preview and applying persists a receipt before delivery', async t => {
+  const state=fixture(), questionId=S.uuid(), proposalId=S.uuid();
+  state.interventions=[{kind:'question',text:'Почему?',question:{questionId,version:1,expiresAtMillis:Date.now()+300000,options:[{id:'HARDER_THAN_EXPECTED',text:'Было тяжелее'}]}}];
+  const result={kind:'proposal',questionId,status:'ANSWERED',text:'Сократить повторы',proposal:{proposalId,version:1,baseRevision:state.snapshot.revision,contextVersion:state.contextVersion,expiresAtMillis:Date.now()+300000,operations:[{action:'edit_set',set_id:state.snapshot.exercises[0].sets[1].set_id,values:{reps:5}}]}};
+  const {w,requests}=await ui(t,state,async path=>{
+    if(path.endsWith('/answers'))return {ok:true,status:200,json:async()=>result};
+  });
+  [...w.document.querySelectorAll('#messages button')].find(b=>b.textContent==='Было тяжелее').click();
+  await until(()=>w.document.getElementById('messages').textContent.includes('Сократить повторы'));
+  let saved=JSON.parse(w.sessionStorage.getItem('coach-playground-v1'));
+  assert.notEqual(saved.snapshot.exercises[0].sets[1].reps,5);
+  assert.equal(requests.find(r=>r.path.endsWith('/answers')).body.expectedVersion,1);
+  [...w.document.querySelectorAll('#messages button')].find(b=>b.textContent==='Применить').click();
+  await until(()=>requests.some(r=>r.path.endsWith(`/proposals/${proposalId}/receipt`)));
+  saved=JSON.parse(w.sessionStorage.getItem('coach-playground-v1'));
+  assert.equal(saved.snapshot.exercises[0].sets[1].reps,5);
+  assert.equal(requests.find(r=>r.path.endsWith(`/proposals/${proposalId}/receipt`)).body.resultRevision,state.snapshot.revision+1);
+  assert.equal(saved.interventions.filter(i=>i.proposal).length,1);
+});

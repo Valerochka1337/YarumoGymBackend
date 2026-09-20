@@ -8,4 +8,6 @@ spring:
     username: gym
     password: local-playground-only
 gym:
+  coach-behavior:
+    mode: ${COACH_BEHAVIOR_MODE:ENFORCE}
   mail-enabled: false
