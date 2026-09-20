@@ -65,6 +65,13 @@ class CoachRunExecutor(
       active()
       return result!!
     }
+    if (input["deterministicPolicy"]?.asBoolean() == true) {
+      codec.deterministicResult(owner, input, clock.millis())?.let {
+        result = it
+        save()
+        return it
+      }
+    }
     val catalog = provider.catalog()
     val model =
       pinnedModel
@@ -156,6 +163,15 @@ class CoachRunExecutor(
               "submit_workout_changes" -> {
                 val operations =
                   codec.operations(owner, snapshot, args) { context.exercise(owner, it) != null }
+                require(
+                  input["automatic"]?.asBoolean() != true ||
+                    operations.none {
+                      it["action"]?.asString() in
+                        setOf("record_result", "set_completed", "report_feelings")
+                    }
+                ) {
+                  "Изменение записанных фактов требует явного обращения пользователя"
+                }
                 result =
                   if (operations.isEmpty())
                     json.valueToTree<JsonNode>(

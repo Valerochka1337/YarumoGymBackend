@@ -183,6 +183,43 @@ class CoachRunExecutorTest {
   }
 
   @Test
+  fun `automatic tool call cannot invent a recorded result`() {
+    val request = input() as tools.jackson.databind.node.ObjectNode
+    request.put("automatic", true)
+    val saved =
+      checkpoint(
+        listOf(
+          tree(
+            mapOf(
+              "role" to "assistant",
+              "tool_calls" to
+                listOf(
+                  call(
+                    "submit_workout_changes",
+                    mapOf(
+                      "base_revision" to 7,
+                      "operations" to
+                        listOf(
+                          mapOf(
+                            "action" to "record_result",
+                            "set_id" to first,
+                            "values" to mapOf("reps" to 20),
+                          )
+                        ),
+                    ),
+                  )
+                ),
+            )
+          )
+        )
+      )
+    val hooks = Hooks()
+    val result = executor(Provider()).execute(owner, request, saved, hooks)
+    assertNotEquals("proposal", result["kind"].asString())
+    assertTrue(hooks.saved!!["messages"].toString().contains("invalid_tool_arguments"))
+  }
+
+  @Test
   fun `resuming pending submit publishes immutable concrete proposal without model call`() {
     val provider = Provider()
     val hooks = Hooks()
@@ -351,6 +388,39 @@ class CoachRunExecutorTest {
     assertEquals("CLARIFY", result["kind"].asString())
     assertEquals("EQUIPMENT", result["missing_data"][0].asString())
     assertTrue(result["operations"].isEmpty)
+  }
+
+  @Test
+  fun `pain wins over deadline pending card and final set`() {
+    val state = snapshot(listOf("PAIN")) as tools.jackson.databind.node.ObjectNode
+    state.put("available_time_minutes", 0)
+    state.put("pending_interaction", true)
+    state.put("finished", true)
+    (state["exercises"][0]["sets"][1] as tools.jackson.databind.node.ObjectNode).put(
+      "completed",
+      true,
+    )
+    val decision = codec.assessment(owner, state, tree(emptyMap<String, String>()))
+    assertEquals("reported_safety_issue", decision["reason_code"].asString())
+    assertTrue(decision["operations"].isEmpty)
+    assertNotNull(codec.initiative(state, null, null))
+    assertNull(codec.initiative(state, state, null))
+  }
+
+  @Test
+  fun `deterministic adjustment needs no provider and resumes same proposal`() {
+    val provider = Provider()
+    val request =
+      input(snapshot(listOf("HARDER_THAN_EXPECTED"))) as tools.jackson.databind.node.ObjectNode
+    request.put("automatic", true)
+    request.put("deterministicPolicy", true)
+    val hooks = Hooks()
+    val result = executor(provider).execute(owner, request, null, hooks)
+    assertEquals("proposal", result["kind"].asString())
+    assertEquals("confirmed_harder_adjustment", result["decision"]["reasonCode"].asString())
+    assertEquals(2, result["proposal"]["operations"].size())
+    assertEquals(0, provider.count)
+    assertEquals(result, executor(provider).execute(owner, request, hooks.saved, Hooks()))
   }
 
   @Test

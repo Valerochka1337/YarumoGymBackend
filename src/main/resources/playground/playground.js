@@ -32,10 +32,10 @@ function enqueue(action) {
   serial = result.catch(error);
   return result;
 }
-function persistSession(activeSession = true) {
+function persistSession(activeSession = true, resolvedConcernKeys = []) {
   state.sequence++;
   const next = {
-    eventId: S.uuid(), sequence: state.sequence, contextVersion: state.contextVersion,
+    eventId: S.uuid(), sequence: state.sequence, contextVersion: state.contextVersion, resolvedConcernKeys,
     snapshot: S.clone(state.snapshot), initiativeEnabled: state.initiative, active: activeSession,
   };
   if (state.pendingSession) state.nextSession = next; else state.pendingSession = next;
@@ -53,7 +53,7 @@ async function flushSession() {
 async function flushReceipts() {
   while (state.receipts.length) {
     const receipt = state.receipts[0];
-    await request(`/v1/coach/runs/${receipt.runId}/receipt`, 'POST', receipt.body);
+    await request(receipt.path || `/v1/coach/runs/${receipt.runId}/receipt`, 'POST', receipt.body);
     state.receipts.shift(); save();
     trace(`Подтверждение доставлено: ${receipt.body.status}`);
   }
@@ -71,6 +71,8 @@ function input(value, options, change) {
   return e;
 }
 function renderWorkout() {
+  $('phase').value = state.snapshot.phase || 'UNKNOWN';
+  $('workout-pause').textContent = state.snapshot.paused ? 'Продолжить тренировку' : 'Пауза тренировки';
   $('revision').textContent = `Версия ${state.snapshot.revision}`;
   $('minutes').value = state.snapshot.available_time_minutes ?? '';
   $('rest').value = state.snapshot.future_rest_seconds ?? '';
@@ -119,6 +121,54 @@ function renderMessages() {
   const target = $('messages'), atBottom = target.scrollHeight - target.scrollTop - target.clientHeight < 80;
   target.replaceChildren();
   if (!state.runs.length && !state.messages.length) target.append(el('p','Отметьте подход или напишите тренеру.','empty'));
+  for (const concern of state.concerns || []) {
+    const bubble = el('div', concern.text, 'bubble');
+    if (!concern.resolved) bubble.append(button('Жалоба разрешена', async () => {
+      try {
+        await enqueue(flushSession);
+        await persistSession(true, concern.decision.state.openConcerns);
+        concern.resolved = true; save(); renderMessages();
+      } catch (e) { error(e); }
+    }));
+    target.append(bubble);
+  }
+  for (const item of state.interventions || []) {
+    const bubble = el('div', item.text, 'bubble');
+    const question = item.question;
+    if (question && !item.status && question.expiresAtMillis > Date.now()) {
+      for (const option of question.options) bubble.append(button(option.text, async () => {
+        if (state.pendingAnswer) return;
+        state.pendingAnswer = { path: `/v1/coach/sessions/${state.snapshot.workout_id}/questions/${question.questionId}/answers`,
+          body: { answerId: S.uuid(), expectedVersion: question.version, answer: option.id } };
+        save();
+        try { await enqueue(flushAnswer); } catch (e) { error(e); }
+      }));
+    }
+    if (item.status) bubble.append(el('p', item.status, 'muted'));
+    if (item.proposal) {
+      const list = el('ul');
+      for (const op of item.proposal.operations) list.append(el('li', operationText(op)));
+      bubble.append(list);
+      if (!item.receiptStatus && !item.status && !S.stale(state, item.proposal)) {
+        for (const [label, status] of [['Применить', 'APPLIED'], ['Оставить план', 'REJECTED']])
+          bubble.append(button(label, async () => {
+            try {
+              const card = {runId: item.proposal.proposalId, result:item};
+              S.decide(state, card, status, catalog);
+              item.receiptStatus = card.receiptStatus;
+              const receipt = state.receipts.at(-1);
+              receipt.path = `/v1/coach/sessions/${state.snapshot.workout_id}/proposals/${item.proposal.proposalId}/receipt`;
+              receipt.body.version = item.proposal.version;
+              receipt.body.resultRevision = state.snapshot.revision;
+              save(); renderMessages(); renderWorkout();
+              await enqueue(flushReceipts); await persistSession();
+            } catch (e) { error(e); }
+          }));
+      }
+      if (item.receiptStatus) bubble.append(el('p', item.receiptStatus, 'muted'));
+    }
+    target.append(bubble);
+  }
   for (const run of state.runs) {
     const message = state.messages.find(m => m.runId === run.runId);
     if (message) target.append(el('div', message.text, 'bubble user'));
@@ -151,6 +201,25 @@ function renderMessages() {
     target.append(bubble);
   }
   if (atBottom) target.scrollTop = target.scrollHeight;
+}
+function mergeIntervention(result) {
+  state.interventions ||= [];
+  if (result.questionId) {
+    const question = state.interventions.find(i => i.question?.questionId === result.questionId);
+    if (question) question.status = result.status;
+  }
+  const key = result.proposal?.proposalId || result.question?.questionId;
+  if (!key) return;
+  const existing = state.interventions.find(i => (i.proposal?.proposalId || i.question?.questionId) === key);
+  // ANSWERED belongs to the question, not the newly prepared proposal.
+  const incoming = {...result}; if (incoming.proposal && incoming.questionId) delete incoming.status;
+  if (existing) Object.assign(existing, incoming); else state.interventions.push(incoming);
+}
+async function flushAnswer() {
+  if (!state.pendingAnswer) return;
+  const pending = state.pendingAnswer;
+  const result = await request(pending.path, 'POST', pending.body);
+  mergeIntervention(result); delete state.pendingAnswer; save(); renderMessages();
 }
 async function decision(run, status) {
   status = S.decide(state, run, status, catalog); save();
@@ -192,6 +261,16 @@ async function stream() {
         const event = JSON.parse(data);
         if (workout !== state.snapshot.workout_id) return;
         if (event.sequence <= (state.eventCursor || 0)) continue;
+        if (event.type === 'concern') {
+          state.concerns ||= [];
+          if (!state.concerns.some(c => c.eventId === event.eventId)) state.concerns.push(event);
+          trace(`Concern · ${event.decision.reasonCode} · ${event.decision.state.policyVersion}`);
+        }
+        if (event.type === 'intervention' || event.type === 'intervention_answer') mergeIntervention(event.result);
+        if (event.type === 'intervention_receipt') {
+          const item = state.interventions?.find(i => i.proposal?.proposalId === event.result.proposalId);
+          if (item) item.receiptStatus = event.result.status;
+        }
         if (event.run) mergeRun(event.run);
         const run = state.runs.find(r => r.runId === event.runId);
         if (run && event.origin === 'USER' && event.type === 'text') run.draft = event.text;
@@ -228,7 +307,7 @@ async function submit(event) {
   const text = $('message').value.trim(); if (!text) return;
   busy = true; $('send').disabled = true; clearError();
   try {
-    await enqueue(async () => { await flushSession(); await flushReceipts(); await sendPending(); });
+    await enqueue(async () => { await flushSession(); await flushReceipts(); await flushAnswer(); await sendPending(); });
     const requestId = S.uuid();
     state.pendingRun = { requestId, message: text, model: $('model').value || undefined,
       state: { eventId: S.uuid(), sequence: ++state.sequence, contextVersion: state.contextVersion, snapshot: S.clone(state.snapshot), initiativeEnabled: state.initiative, active: true } };
@@ -264,6 +343,12 @@ $('settings-form').onsubmit = async event => {
     await loadSettings(); await loadModels();
   } catch(e) { error(e); await loadSettings().catch(error); } finally { b.disabled = false; }
 };
+$('phase').onchange = () => edit(() => { state.snapshot.phase = $('phase').value; });
+$('workout-pause').onclick = () => edit(() => { state.snapshot.paused = !state.snapshot.paused; });
+$('behavior-refresh').onclick = async () => {
+  try { $('behavior').textContent = JSON.stringify(await request(`/v1/coach/sessions/${state.snapshot.workout_id}/behavior`), null, 2); }
+  catch (e) { error(e); }
+};
 $('minutes').onchange = () => { if ($('minutes').reportValidity()) edit(() => { state.snapshot.available_time_minutes = $('minutes').value === '' ? null : Number($('minutes').value); }); };
 $('rest').onchange = () => { if ($('rest').reportValidity()) edit(() => { state.snapshot.future_rest_seconds = $('rest').value === '' ? null : Number($('rest').value); }); };
 $('initiative').onchange = () => edit(() => { state.initiative = $('initiative').checked; });
@@ -293,7 +378,7 @@ $('export').onclick = () => {
 async function tick() {
   try {
     await enqueue(async () => {
-      await flushSession(); await flushReceipts(); await sendPending();
+      await flushSession(); await flushReceipts(); await flushAnswer(); await sendPending();
       if (!paused) { if (!streams.has(state.snapshot.workout_id)) await discover(); stream().catch(error); }
       for (const run of state.runs) if (run.result?.proposal && !run.receiptStatus && !run.applicationStatus && S.stale(state, run.result.proposal)) {
         S.decide(state,run,'STALE',catalog); save(); renderMessages();

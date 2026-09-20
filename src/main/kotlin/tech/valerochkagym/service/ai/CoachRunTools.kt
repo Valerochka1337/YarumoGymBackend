@@ -341,6 +341,59 @@ internal class CoachRunTools(private val json: ObjectMapper) {
         "missing_data" to result.missingData.map { it.name },
         "operations" to result.operations.map(::wire),
         "rules_version" to result.rulesVersion,
+        "reason_code" to result.reasonCode,
+        "evidence_key" to result.evidenceKey,
+        "intervention_key" to result.interventionKey,
+      )
+    )
+  }
+
+  fun deterministicResult(owner: UUID, input: JsonNode, now: Long): JsonNode? {
+    if (input["automatic"]?.asBoolean() != true) return null
+    val snapshot = input["snapshot"]
+    val recommendation = calculation(owner, snapshot, options(json.createObjectNode(), snapshot))
+    if (
+      recommendation.reasonCode !in
+        setOf("confirmed_harder_adjustment", "time_capacity", "reported_safety_issue")
+    )
+      return null
+    val args =
+      json.valueToTree<JsonNode>(
+        mapOf(
+          "base_revision" to snapshot["revision"],
+          "operations" to recommendation.operations.map(::wire),
+        )
+      )
+    val ops =
+      if (recommendation.operations.isEmpty()) emptyList()
+      else operations(owner, snapshot, args) { false }
+    val explanation = recommendation.explanation()
+    return json.valueToTree(
+      mapOf(
+        "kind" to if (ops.isEmpty()) "message" else "proposal",
+        "text" to explanation,
+        "quickReplies" to emptyList<String>(),
+        "decision" to
+          mapOf(
+            "reasonCode" to recommendation.reasonCode,
+            "policyVersion" to recommendation.rulesVersion,
+            "evidenceKey" to recommendation.evidenceKey,
+          ),
+        "proposal" to
+          if (ops.isEmpty()) null
+          else
+            mapOf(
+              "proposalId" to
+                UUID.nameUUIDFromBytes(
+                    "coach-proposal:${input["requestId"].asString()}".toByteArray()
+                  )
+                  .toString(),
+              "baseRevision" to snapshot["revision"].asLong(),
+              "contextVersion" to input["contextVersion"],
+              "expiresAtMillis" to now + 300_000,
+              "operations" to ops,
+              "reason" to explanation,
+            ),
       )
     )
   }
@@ -402,6 +455,7 @@ internal class CoachRunTools(private val json: ObjectMapper) {
                 .orEmpty(),
           )
         },
+      feelings = node.strings("reported_feelings"),
       availableTimeMinutes = node.integer("available_time_minutes"),
       futureRestSeconds = node.integer("future_rest_seconds"),
       excludedExerciseIds = node.strings("excluded_exercise_ids"),
@@ -425,6 +479,13 @@ internal class CoachRunTools(private val json: ObjectMapper) {
   }
 
   fun initiative(current: JsonNode, previous: JsonNode?, memory: JsonNode?): String? {
+    val concerns = tech.valerochkagym.service.ai.coach.CoachBehaviorPolicy.concerns(current)
+    if (
+      (concerns - tech.valerochkagym.service.ai.coach.CoachBehaviorPolicy.concerns(previous))
+        .isNotEmpty()
+    )
+      return "Вы сообщили о боли или нарушении техники. Уточните, что произошло, перед планированием продолжения."
+    if (concerns.isNotEmpty()) return null
     if (
       current["initiative_enabled"]?.asBoolean() == false ||
         current["pending_interaction"]?.asBoolean() == true ||

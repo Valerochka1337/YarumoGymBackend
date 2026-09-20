@@ -8,7 +8,7 @@
   }
   function scenario(catalog, kind) {
     const snapshot = {
-      workout_id: uuid(), revision: 1, observed_at_millis: Date.now(), available_time_minutes: kind === 'short' ? 5 : 45,
+      phase: 'READY', workout_id: uuid(), revision: 1, observed_at_millis: Date.now(), available_time_minutes: kind === 'short' ? 5 : 45,
       future_rest_seconds: 120, excluded_exercise_ids: [], decisions: [],
       profile: { training_goal: 'HYPERTROPHY', preferred_rep_min: 8, preferred_rep_max: 12 },
       autoregulation_options: { goal: 'PRESERVE_PLAN', available_weights_kg: Object.fromEntries(catalog.map(e => [e.exercise_id, Array.from({length: 40}, (_, i) => (i + 1) * 2.5)])) },

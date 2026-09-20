@@ -5,6 +5,7 @@ import java.sql.ResultSet
 import java.sql.Timestamp
 import java.time.Clock
 import java.util.UUID
+import java.util.concurrent.Semaphore
 import java.util.concurrent.atomic.AtomicBoolean
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.jdbc.core.JdbcTemplate
@@ -26,9 +27,18 @@ class CoachRunService(
   private val executor: CoachRunExecutor,
   private val json: ObjectMapper,
   private val clock: Clock,
+  private val behavior: CoachBehaviorStore,
+  private val interventions: CoachInterventionService,
+  @Value("\${gym.coach-runs.workers:4}") workerCount: Int,
+  @Value("\${gym.coach-runs.max-pending-messages:8}") private val maxPendingMessages: Int,
   @Value("\${gym.coach-runs.enabled:true}") private val enabled: Boolean,
 ) {
-  private val busy = AtomicBoolean()
+  private val workerSlots = Semaphore(workerCount.also { require(it in 1..32) })
+
+  init {
+    require(maxPendingMessages in 1..100)
+  }
+
   private val timerBusy = AtomicBoolean()
 
   private data class Run(
@@ -208,6 +218,20 @@ class CoachRunService(
         conflict()
       return response(prior)
     }
+    if (
+      input["automatic"]?.asBoolean() != true &&
+        jdbc.queryForObject(
+          "SELECT count(*) FROM coach_runs WHERE owner_id=? AND workout_id=? AND NOT automatic AND state IN ('QUEUED','RUNNING')",
+          Int::class.java,
+          owner,
+          workout,
+        )!! >= maxPendingMessages
+    )
+      throw ApiException(
+        429,
+        "coach_queue_full",
+        "Очередь сообщений заполнена. Дождитесь ответа тренера.",
+      )
     jdbc.update(
       "INSERT INTO coach_runs(owner_id,request_id,workout_id,context_version,request_digest,input,automatic,state) VALUES (?,?,?,?,?,?::jsonb,?,'QUEUED')",
       owner,
@@ -320,6 +344,32 @@ class CoachRunService(
       ),
     )
   }
+
+  fun behaviorState(identity: Identity, workout: UUID): JsonNode =
+    tx.execute {
+      guard.lock(identity)
+      val state = behavior.state(identity.userId, workout) ?: missing()
+      json.valueToTree<JsonNode>(
+        mapOf(
+          "behavior" to state,
+          "interventions" to interventions.projection(identity.userId, workout),
+          "timeline" to behavior.timeline(identity.userId, workout),
+          "highWaterSequence" to
+            (jdbc.queryForObject(
+              "SELECT COALESCE(max(sequence),0) FROM coach_workout_events WHERE owner_id=? AND workout_id=?",
+              Long::class.java,
+              identity.userId,
+              workout,
+            ) ?: 0),
+          "queue" to
+            jdbc.queryForMap(
+              "SELECT count(*) AS pending, COALESCE(max(extract(epoch from (now()-created_at))),0) AS oldest_seconds FROM coach_runs WHERE owner_id=? AND workout_id=? AND state IN ('QUEUED','RUNNING')",
+              identity.userId,
+              workout,
+            ),
+        )
+      )
+    }!!
 
   fun workoutEvents(identity: Identity, workout: UUID, after: Long): List<JsonNode> =
     tx.execute {
@@ -474,8 +524,30 @@ class CoachRunService(
           workout,
         )
       }
+      val resolved = input["resolvedConcernKeys"]
+      if (
+        resolved != null &&
+          (!resolved.isArray ||
+            resolved.size() > 100 ||
+            resolved.any { !it.isString || it.asString().length > 200 })
+      )
+        bad("Некорректное разрешение жалобы")
+      behavior.record(
+        identity.userId,
+        workout,
+        eventId,
+        input["snapshot"],
+        active,
+        initiative,
+        resolved?.toList()?.map { it.asString() }?.toSet().orEmpty(),
+      )
+      interventions.refresh(
+        identity.userId,
+        workout,
+        behavior.planningSnapshot(identity.userId, workout, input["snapshot"]),
+      )
       migrateMemory(identity.userId, workout, input["snapshot"])
-      if (!active || !initiative) {
+      if (!active || !initiative || !behavior.allowsAutomatic(identity.userId, workout)) {
         jdbc
           .query(
             "SELECT request_id FROM coach_runs WHERE owner_id=? AND workout_id=? AND automatic AND state IN ('QUEUED','RUNNING') FOR UPDATE",
@@ -581,16 +653,19 @@ class CoachRunService(
 
   @Scheduled(fixedDelayString = "\${gym.coach-runs.poll-ms:1000}")
   fun tick() {
-    if (enabled && busy.compareAndSet(false, true))
-      Thread.ofVirtual().start {
-        try {
-          runNext()
-        } catch (_: Exception) {
-          /* A lost lease remains recoverable. */
-        } finally {
-          busy.set(false)
+    if (!enabled) return
+    repeat(workerSlots.availablePermits()) {
+      if (workerSlots.tryAcquire())
+        Thread.ofVirtual().start {
+          try {
+            runNext()
+          } catch (_: Exception) {
+            /* A lost lease remains recoverable. */
+          } finally {
+            workerSlots.release()
+          }
         }
-      }
+    }
   }
 
   @Scheduled(fixedDelayString = "\${gym.coach-runs.timer-poll-ms:5000}")
@@ -628,6 +703,7 @@ class CoachRunService(
             )
             .firstOrNull() ?: return@executeWithoutResult
         evaluate(owner, workout)
+        if (!behavior.allowsAutomatic(owner, workout)) return@executeWithoutResult
         val ends =
           session.first["available_time_ends_at_millis"]?.asLong() ?: return@executeWithoutResult
         val reminded =
@@ -648,7 +724,7 @@ class CoachRunService(
             workout,
             clock.millis(),
           )!!
-        if (pending > 0) return@executeWithoutResult
+        if (pending > 0 || interventions.pending(owner, workout)) return@executeWithoutResult
         jdbc.update(
           "UPDATE coach_sessions SET timer_version=? WHERE owner_id=? AND workout_id=?",
           ends.toString(),
@@ -659,6 +735,15 @@ class CoachRunService(
           (session.first.deepCopy() as tools.jackson.databind.node.ObjectNode).apply {
             put("available_time_minutes", ((remaining.coerceAtLeast(0) + 59999) / 60000).toInt())
           }
+        if (
+          interventions.evaluate(
+            owner,
+            workout,
+            behavior.planningSnapshot(owner, workout, timerSnapshot),
+            session.second,
+          )
+        )
+          return@executeWithoutResult
         insert(
           owner,
           json.valueToTree(
@@ -686,7 +771,7 @@ class CoachRunService(
         val candidate =
           jdbc
             .query(
-              "SELECT * FROM coach_runs r WHERE (state='QUEUED' OR (state='RUNNING' AND lease_until<=?)) AND NOT EXISTS (SELECT 1 FROM coach_runs older WHERE older.owner_id=r.owner_id AND older.workout_id=r.workout_id AND older.ordinal<r.ordinal AND older.state IN ('QUEUED','RUNNING')) ORDER BY ordinal LIMIT 1",
+              "SELECT r.* FROM coach_runs r JOIN users u ON u.id=r.owner_id WHERE (state='QUEUED' OR (state='RUNNING' AND lease_until<=?)) AND NOT EXISTS (SELECT 1 FROM coach_runs older WHERE older.owner_id=r.owner_id AND older.workout_id=r.workout_id AND older.ordinal<r.ordinal AND older.state IN ('QUEUED','RUNNING')) ORDER BY r.automatic,r.ordinal LIMIT 1 FOR UPDATE OF u SKIP LOCKED",
               { r, _ -> row(r) },
               Timestamp.from(clock.instant()),
             )
@@ -871,12 +956,14 @@ class CoachRunService(
           })
         .takeLast(40)
     return (run.input.deepCopy() as tools.jackson.databind.node.ObjectNode).apply {
+      put("deterministicPolicy", behavior.enforce(run.owner, run.workout))
       set("history", json.valueToTree<JsonNode>(history))
       if (run.input["model"] == null || run.input["model"].isNull) {
         sessionModel(run.owner, run.workout)?.let { put("model", it) }
       }
       val snapshot = run.input["snapshot"].deepCopy() as tools.jackson.databind.node.ObjectNode
       snapshot.set("decisions", memory(run.owner, run.workout))
+      snapshot.set("behavior_facts", interventions.answeredFacts(run.owner, run.workout))
       snapshot["available_time_ends_at_millis"]
         ?.takeUnless { it.isNull }
         ?.asLong()
@@ -904,7 +991,7 @@ class CoachRunService(
               (clock.millis() - observed).coerceAtLeast(0) / 1000,
           )
         }
-      set("snapshot", snapshot)
+      set("snapshot", behavior.planningSnapshot(run.owner, run.workout, snapshot))
     }
   }
 
@@ -1064,17 +1151,19 @@ class CoachRunService(
   }
 
   private fun blocked(owner: UUID, workout: UUID, excluding: UUID? = null): Boolean =
-    jdbc.queryForObject(
-      "SELECT count(*) FROM coach_runs r WHERE owner_id=? AND workout_id=? AND request_id<>? AND ((NOT automatic AND state IN ('QUEUED','RUNNING')) OR (state='SUCCEEDED' AND result->>'kind'='proposal' AND COALESCE((result->'proposal'->>'expiresAtMillis')::bigint,0)>? AND NOT EXISTS (SELECT 1 FROM coach_run_receipts p WHERE p.owner_id=r.owner_id AND p.request_id=r.request_id)))",
-      Int::class.java,
-      owner,
-      workout,
-      excluding ?: UUID(0, 0),
-      clock.millis(),
-    )!! > 0
+    interventions.pending(owner, workout) ||
+      jdbc.queryForObject(
+        "SELECT count(*) FROM coach_runs r WHERE owner_id=? AND workout_id=? AND request_id<>? AND ((NOT automatic AND state IN ('QUEUED','RUNNING')) OR (state='SUCCEEDED' AND result->>'kind'='proposal' AND COALESCE((result->'proposal'->>'expiresAtMillis')::bigint,0)>? AND NOT EXISTS (SELECT 1 FROM coach_run_receipts p WHERE p.owner_id=r.owner_id AND p.request_id=r.request_id)))",
+        Int::class.java,
+        owner,
+        workout,
+        excluding ?: UUID(0, 0),
+        clock.millis(),
+      )!! > 0
 
   private fun automaticAllowed(run: Run): Boolean {
     if (run.input["automatic"]?.asBoolean() != true) return true
+    if (!behavior.allowsAutomatic(run.owner, run.workout)) return false
     return jdbc.queryForObject(
       "SELECT count(*) FROM coach_sessions WHERE owner_id=? AND workout_id=? AND active AND initiative_enabled AND (semantic_version=? OR (semantic_version IS NULL AND context_version=?)) AND updated_at>?",
       Int::class.java,
@@ -1098,6 +1187,7 @@ class CoachRunService(
 
   /** Called under the account lock; deferred changes are re-evaluated by the timer scanner. */
   private fun evaluate(owner: UUID, workout: UUID) {
+    if (!behavior.allowsAutomatic(owner, workout)) return
     val sessionRow =
       jdbc
         .query(
@@ -1120,12 +1210,14 @@ class CoachRunService(
       )!! > 0
     )
       return
-    val snapshot = json.readTree(sessionRow[0]) as tools.jackson.databind.node.ObjectNode
+    val snapshot =
+      behavior.planningSnapshot(owner, workout, json.readTree(sessionRow[0]))
+        as tools.jackson.databind.node.ObjectNode
     snapshot.set("decisions", memory(owner, workout))
     val reason =
       executor.initiativeDecision(
         snapshot,
-        sessionRow[1]?.let(json::readTree),
+        sessionRow[1]?.let { behavior.planningSnapshot(owner, workout, json.readTree(it)) },
         memory(owner, workout),
       )
     jdbc
@@ -1142,6 +1234,7 @@ class CoachRunService(
       workout,
     )
     if (reason == null) return
+    if (interventions.evaluate(owner, workout, snapshot, sessionRow[4]!!)) return
     insert(
       owner,
       json.valueToTree(
