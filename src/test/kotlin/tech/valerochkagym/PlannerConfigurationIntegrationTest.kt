@@ -76,7 +76,7 @@ class PlannerConfigurationIntegrationTest {
   }
 
   @Test
-  fun `invalid windows duplicate goals and dangling sequence cannot replace saved configuration`() {
+  fun `invalid windows and duplicate goals cannot replace saved configuration`() {
     val good = service.snapshot()
     val first = good.collections.first()
     val invalid =
@@ -86,13 +86,28 @@ class PlannerConfigurationIntegrationTest {
         good.copy(weightStepKg = Double.NaN),
         good.copy(maxRounds = 2),
         good.copy(collections = good.collections + first),
-        good.copy(collections = good.collections.map { it.copy(sequence = listOf("missing")) }),
         good.copy(collections = good.collections.filterNot { it.goal == "GENERAL_FITNESS" }),
       )
     invalid.forEach { candidate ->
       assertThrows<ApiException> { service.save(candidate) }
       assertEquals(good, service.snapshot())
     }
+  }
+
+  @Test
+  fun `empty and legacy sequences remain writable without affecting configuration validity`() {
+    val original = service.snapshot()
+    val edited =
+      original.copy(
+        collections =
+          original.collections.mapIndexed { index, collection ->
+            collection.copy(
+              sequence = if (index == 0) listOf("legacy-removed-pattern") else emptyList()
+            )
+          }
+      )
+    assertEquals(edited, service.save(edited))
+    assertEquals(edited, service.snapshot())
   }
 
   @Test

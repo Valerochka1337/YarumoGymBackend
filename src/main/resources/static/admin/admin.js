@@ -548,26 +548,12 @@ function renderPlannerSettings(source) {
       const body=el('div',{class:'planner-fields'}); box.append(body);
       field(body,collection,'name','Название коллекции','text',{required:true,maxlength:120});
       select(body,collection,'goal','Цель',goalOptions);
-      body.append(el('p',{class:'muted'},'Паттерны — редактируемые заготовки. AI может менять упражнения и параметры.'));
-      const sequence=el('div');
-      function drawSequence() {
-        sequence.replaceChildren(el('strong',{},'Рекомендуемая последовательность'));
-        collection.sequence.forEach((id,index)=>{
-          const row=el('div',{class:'planner-sequence'});
-          const picker=el('select',{'aria-label':'Тренировка '+(index+1)});
-          collection.patterns.forEach(p=>picker.append(el('option',{value:p.id},p.name)));
-          picker.value=id; picker.onchange=()=>collection.sequence[index]=picker.value;
-          row.append(picker,button('↑',()=>{if(index>0){[collection.sequence[index-1],collection.sequence[index]]=[collection.sequence[index],collection.sequence[index-1]];drawSequence();}}),button('Убрать',()=>{collection.sequence.splice(index,1);drawSequence();}));
-          sequence.append(row);
-        });
-        sequence.append(button('Добавить в последовательность',()=>{if(collection.patterns.length){collection.sequence.push(collection.patterns[0].id);drawSequence();}}));
-      }
-      drawSequence(); body.append(sequence);
+      body.append(el('p',{class:'muted'},'Все сохранённые паттерны равноправны для AI. Он выбирает по цели, истории, приоритетам и фактическому порядку тренировок.'));
       collection.patterns.forEach(pattern=>{
         const details=el('details',{class:'planner-pattern'},el('summary',{},pattern.name));
         const editor=el('div',{class:'planner-fields'}); details.append(editor);
         const title=field(editor,pattern,'name','Название паттерна','text',{required:true,maxlength:120});
-        title.addEventListener('change',()=>{details.querySelector('summary').textContent=pattern.name;drawSequence();});
+        title.addEventListener('change',()=>{details.querySelector('summary').textContent=pattern.name;});
         select(editor,pattern,'focus','Акцент',focusOptions);
         field(editor,pattern,'description','Назначение и рекомендации','textarea',{maxlength:2000});
         const slots=el('div'); editor.append(slots);
@@ -602,7 +588,7 @@ function renderPlannerSettings(source) {
     const available=goalOptions.find(([goal])=>!data.collections.some(c=>c.goal===goal));
     if(!available){notice('Для всех целей уже есть коллекции',true);return;}
     const id=newId('collection'); const pattern={id:newId(id),name:'Новая тренировка',focus:'FULL_BODY',description:'',slots:[slot()]};
-    data.collections.push({id,name:available[1],goal:available[0],patterns:[pattern],sequence:[pattern.id]});draw();
+    data.collections.push({id,name:available[1],goal:available[0],patterns:[pattern],sequence:[]});draw();
   }));
   const submit=el('button',{type:'submit',class:'primary'},'Сохранить настройки планировщика');
   const error=el('p',{class:'error',role:'alert'}); form.append(submit,error);

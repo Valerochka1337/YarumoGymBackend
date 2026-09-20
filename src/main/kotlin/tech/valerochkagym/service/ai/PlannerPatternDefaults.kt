@@ -187,9 +187,6 @@ object PlannerPatternDefaults {
           slots,
         )
       }
-    val rotation =
-      if (goal == "ENDURANCE") listOf("steady", "muscular", "intervals", "mixed")
-      else listOf("full-a", "full-b")
-    return PlannerPatternCollection(id, goal, name, patterns, rotation.map { "$id-$it" })
+    return PlannerPatternCollection(id, goal, name, patterns)
   }
 }

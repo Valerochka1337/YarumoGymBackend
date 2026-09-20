@@ -24,7 +24,8 @@ data class PlannerPatternCollection(
   val goal: String,
   val name: String,
   val patterns: List<PlannerPattern>,
-  val sequence: List<String>,
+  /** Legacy field retained for existing admin payloads; planner behavior ignores it. */
+  val sequence: List<String> = emptyList(),
 )
 
 data class PlannerPattern(
@@ -110,10 +111,9 @@ class PlannerConfigurationService(private val jdbc: JdbcTemplate, private val js
           collection.goal !in goals ||
           !text(collection.name, 120) ||
           collection.patterns.size !in 1..20 ||
-          collection.sequence.size !in 1..20 ||
-          collection.sequence.any { next -> collection.patterns.none { it.id == next } }
+          collection.sequence.size > 20
       )
-        bad("Проверьте коллекцию и последовательность тренировок")
+        bad("Проверьте коллекцию")
       collection.patterns.forEach { pattern ->
         if (
           !id(pattern.id) ||

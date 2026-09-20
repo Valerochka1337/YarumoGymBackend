@@ -5,33 +5,27 @@ package tech.valerochkagym.service.ai
  */
 internal data class AdaptivePlannerContext(
   val configuration: PlannerConfiguration,
-  val collection: PlannerPatternCollection,
   val candidateIds: List<String>,
 ) {
-  val patterns: Map<String, PlannerPattern> = collection.patterns.associateBy { it.id }
+  val patterns: Map<String, PlannerPattern> =
+    configuration.collections.flatMap { it.patterns }.associateBy { it.id }
+  private val collectionsByPatternId: Map<String, PlannerPatternCollection> =
+    configuration.collections
+      .flatMap { collection -> collection.patterns.map { it.id to collection } }
+      .toMap()
 
   fun pattern(id: String): PlannerPattern = patterns[id] ?: throw aiError("ai_invalid_response")
 
-  fun recommendedPatternId(workouts: List<CalendarWorkout>, facts: List<CalendarFact>): String {
-    val completed =
-      workouts
-        .filter { workout -> facts.any { it.workoutId == workout.id && it.setType == "WORK" } }
-        .sortedWith(compareBy<CalendarWorkout> { it.finishedAtMillis }.thenBy { it.id })
-    return collection.sequence.getOrNull(completed.size % collection.sequence.size)
-      ?: collection.patterns.first().id
-  }
+  fun collectionFor(patternId: String): PlannerPatternCollection =
+    collectionsByPatternId[patternId] ?: throw aiError("ai_invalid_response")
 
   companion object {
     fun create(
       configuration: PlannerConfiguration,
-      goal: String?,
       candidateIds: List<String>,
     ): AdaptivePlannerContext {
-      val collection =
-        configuration.collections.firstOrNull { it.goal == goal }
-          ?: configuration.collections.firstOrNull { it.goal == "GENERAL_FITNESS" }
-          ?: throw aiError("ai_context_stale")
-      return AdaptivePlannerContext(configuration, collection, candidateIds.sorted())
+      if (configuration.collections.isEmpty()) throw aiError("ai_context_stale")
+      return AdaptivePlannerContext(configuration, candidateIds.sorted())
     }
   }
 }
