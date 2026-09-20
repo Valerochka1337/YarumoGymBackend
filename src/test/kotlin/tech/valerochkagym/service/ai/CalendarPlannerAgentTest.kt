@@ -155,4 +155,47 @@ class CalendarPlannerAgentTest {
     val error = assertThrows<ApiException> { agent.run(setOf(candidate)) { remaining } }
     assertEquals("ai_timeout", error.code)
   }
+
+  @Test
+  fun `planner diagnostics count rounds tools and typed stages`() {
+    val diagnostics = AiDiagnostics()
+    val arguments = "{\"candidateIds\":[\"$candidate\"]}".encodeToByteArray()
+    val agent =
+      CalendarPlannerAgent(
+        turn = { transcript ->
+          if (transcript.isEmpty())
+            PlannerTurn(
+              calls =
+                listOf(
+                  PlannerToolProtocol.Call(
+                    "details",
+                    "get_candidate_details_and_history",
+                    listOf(candidate),
+                    arguments,
+                  )
+                )
+            )
+          else PlannerTurn(final = json.readTree("{}"))
+        },
+        tool = { "{}".encodeToByteArray() },
+        diagnostics = diagnostics,
+      )
+
+    diagnostics.observe(AiDiagnosticStage.CALENDAR_CREATE) {
+      agent.run(setOf(candidate)) { 45_000 }
+    }
+
+    val run = diagnostics.snapshot().single()
+    assertEquals(2, run.rounds)
+    assertEquals(1, run.toolCalls)
+    assertEquals(
+      listOf(
+        AiDiagnosticStage.CALENDAR_CREATE,
+        AiDiagnosticStage.PLANNER_TURN,
+        AiDiagnosticStage.PLANNER_TOOL,
+        AiDiagnosticStage.PLANNER_TURN,
+      ),
+      run.stages.map { it.stage },
+    )
+  }
 }

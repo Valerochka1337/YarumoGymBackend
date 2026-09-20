@@ -44,7 +44,7 @@ class HttpOpenAiChatCompletionsProviderTest {
     executor.shutdownNow()
   }
 
-  fun provider(timeout: Long = 1000) =
+  fun provider(timeout: Long = 1000, diagnostics: AiDiagnostics = AiDiagnostics()) =
     HttpOpenAiChatCompletionsProvider(
       AiProviderSettings(
         URI("http://127.0.0.1:${server.address.port}/v1/chat/completions"),
@@ -58,6 +58,7 @@ class HttpOpenAiChatCompletionsProviderTest {
         .connectTimeout(Duration.ofSeconds(5))
         .build(),
       timeout,
+      diagnostics,
     )
 
   fun input(vision: Boolean = false) =
@@ -302,5 +303,32 @@ class HttpOpenAiChatCompletionsProviderTest {
       "ai_unavailable",
       assertThrows(ApiException::class.java) { provider().generate(input()) }.code,
     )
+  }
+
+  @Test
+  fun `non success response retains only allowlisted diagnostics metadata`() {
+    val diagnostics = AiDiagnostics()
+    handler = {
+      respond(
+        it,
+        """{"error":{"code":"invalid_function_parameters","type":"invalid_request_error","param":"tools[0].function","message":"secret provider body"}}""",
+        400,
+      )
+    }
+
+    assertEquals(
+      "ai_unavailable",
+      assertThrows(ApiException::class.java) {
+          provider(diagnostics = diagnostics).generate(input())
+        }
+        .code,
+    )
+    val run = diagnostics.snapshot().single()
+    assertEquals(400, run.httpStatus)
+    assertEquals("invalid_function_parameters", run.upstreamCode)
+    assertEquals("invalid_request_error", run.upstreamType)
+    assertEquals("tools", run.upstreamParam)
+    assertEquals(AiDiagnosticFailureCategory.UPSTREAM_REJECTED, run.failureCategory)
+    assertFalse(run.toString().contains("secret provider body"))
   }
 }

@@ -4,6 +4,7 @@ const EQUIPMENT_LABELS = {"barbell": "Штанга", "dumbbells": "Гантел�
 const $ = id => document.getElementById(id);
 const names = {ai:'ИИ · Провайдер и модели',overview:'Обзор',users:'Пользователи',exercise:'Упражнения',gym:'Залы',routine:'Программы',workout:'Тренировки',measurement:'Замеры',schedule:'Расписание',audit:'Журнал изменений'};
 names.planner = 'ИИ · Паттерны тренировок';
+names['ai-diagnostics'] = 'ИИ · Диагностика';
 Object.assign(names, {'standard:exercise':'Стандартный каталог · Упражнения','standard:gym':'Стандартные залы','standard:routine':'Стандартные шаблоны','standard:equipment':'Оборудование'});
 const isStandard = () => view.startsWith('standard:');
 const singular = {exercise:'Упражнение',gym:'Зал',routine:'Программа',workout:'Тренировка',measurement:'Замер',schedule:'Событие',equipment:'Оборудование'};
@@ -12,7 +13,14 @@ const types = {STRENGTH:'Силовое',TIMED:'На время',CARDIO:'Кар�
 const muscles = {UPPER_CHEST:'Верх груди',LOWER_CHEST:'Низ груди',FRONT_DELTS:'Передние дельты',SIDE_DELTS:'Средние дельты',REAR_DELTS:'Задние дельты',ROTATOR_CUFF:'Ротаторная манжета',SERRATUS_ANTERIOR:'Передняя зубчатая',BICEPS:'Бицепс',TRICEPS:'Трицепс',FOREARMS:'Предплечья',ABS:'Пресс',OBLIQUES:'Косые мышцы живота',HIP_FLEXORS:'Сгибатели бедра',ADDUCTORS:'Приводящие мышцы',QUADS:'Квадрицепсы',TIBIALIS_ANTERIOR:'Передняя большеберцовая',CALVES:'Икры',HAMSTRINGS:'Задняя поверхность бедра',GLUTES:'Ягодицы',HIP_ABDUCTORS:'Отводящие мышцы',LOWER_BACK:'Поясница',LATS:'Широчайшие',UPPER_BACK:'Верх спины',TRAPS:'Трапеции',NECK:'Шея'};
 const actions = {create:'Создание',edit:'Редактирование',revoke_sessions:'Отзыв сессий',grant_admin:'Назначение администратора',revoke_admin:'Отзыв прав администратора'};
 let csrf = '', view = 'overview', owner = null, offset = 0, hasMore = false, requestVersion = 0, dialogVersion = 0, catalog = null, dialogBusy = false, dialogDirty = false;
+let diagnostics = null;
 const pageSize = 50;
+const diagnosticOutcomes = new Set(['RUNNING','SUCCESS','FAILURE','CANCELLED']);
+const diagnosticFailures = new Set(['NONE','AI_UNAVAILABLE','AI_TIMEOUT','AI_BUSY','AI_INTERRUPTED','AI_INVALID_RESPONSE','AI_CONTEXT_STALE','AI_CONTEXT_TOO_LARGE','UPSTREAM_REJECTED','UPSTREAM_UNAVAILABLE','DATABASE','TRANSPORT','VALIDATION','PROVIDER_UNCONFIGURED','INTERNAL']);
+const diagnosticStages = new Set(['CALENDAR_JOB','CALENDAR_CREATE','CALENDAR_REFINE','PLANNER_TURN','PLANNER_TOOL','PROVIDER_HTTP']);
+const diagnosticUpstreamCodes = new Set(['invalid_json_schema','invalid_request_error','invalid_function_parameters','model_not_found','unsupported_parameter']);
+const diagnosticUpstreamTypes = new Set(['invalid_request_error']);
+const diagnosticUpstreamParams = new Set(['response_format','tools','model','max_completion_tokens']);
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
   for (const [key,value] of Object.entries(attrs)) {
@@ -48,9 +56,9 @@ async function api(path, method = 'GET', body) {
   return data;
 }
 function clearSession() {
-  csrf=''; owner=null; requestVersion++; dialogVersion++; dialogBusy=false; dialogDirty=false;
+  csrf=''; owner=null; diagnostics=null; requestVersion++; dialogVersion++; dialogBusy=false; dialogDirty=false;
   $('dialog').close(); $('dialog-content').replaceChildren();
-  $('ai-settings').replaceChildren(); $('overview').replaceChildren(); $('table-wrap').replaceChildren(); $('shell').hidden=true;
+  $('ai-settings').replaceChildren(); $('ai-diagnostics').replaceChildren(); $('overview').replaceChildren(); $('table-wrap').replaceChildren(); $('shell').hidden=true;
 }
 async function showLogin(message='') {
   $('login').hidden=false; $('login-error').textContent=message;
@@ -94,11 +102,11 @@ async function navigate(next) { view=next;offset=0;$('search').value='';$('delet
 async function load() {
   const version=++requestVersion;
   $('page-title').textContent=names[view];
-  $('page-description').textContent=view==='ai' ? 'Подключение OpenAI-совместимого провайдера. Изменения применяются сразу после сохранения.' : isStandard() ? 'Общие объекты доступны всем, включая офлайн. Архив сохраняет содержимое и ссылки.' : view==='overview' ? 'Пользователи, данные и последние действия — всё в одном месте.' : view==='audit' ? 'Кто, что и зачем изменил. История сохраняется вместе с версиями записей.' : view==='users' ? 'Аккаунты, способы входа и данные пользователей.' : 'Данные пользователей приложения. Правки появятся на устройствах при синхронизации.';
+  $('page-description').textContent=view==='ai' ? 'Подключение OpenAI-совместимого провайдера. Изменения применяются сразу после сохранения.' : view==='ai-diagnostics' ? 'Только чтение: последние попытки AI в текущем процессе.' : isStandard() ? 'Общие объекты доступны всем, включая офлайн. Архив сохраняет содержимое и ссылки.' : view==='overview' ? 'Пользователи, данные и последние действия — всё в одном месте.' : view==='audit' ? 'Кто, что и зачем изменил. История сохраняется вместе с версиями записей.' : view==='users' ? 'Аккаунты, способы входа и данные пользователей.' : 'Данные пользователей приложения. Правки появятся на устройствах при синхронизации.';
   if(view==='planner') $('page-description').textContent='Коллекции заготовок, модель и параметры серверного планировщика. Запуск тренировок доступен только в приложении.';
   for(const nav of $('navigation').querySelectorAll('button')) { if(nav.dataset.view===view) nav.setAttribute('aria-current','page'); else nav.removeAttribute('aria-current'); }
-  $('overview').hidden=view!=='overview'; $('listing').hidden=['overview','ai','planner'].includes(view); $('ai-settings').hidden=!['ai','planner'].includes(view); if(!['ai','planner'].includes(view)) $('ai-settings').replaceChildren();
-  $('owner-banner').hidden=isStandard() || !owner || ['users','overview','ai','planner'].includes(view);
+  $('overview').hidden=view!=='overview'; $('listing').hidden=['overview','ai','planner','ai-diagnostics'].includes(view); $('ai-settings').hidden=!['ai','planner'].includes(view); $('ai-diagnostics').hidden=view!=='ai-diagnostics'; if(!['ai','planner'].includes(view)) $('ai-settings').replaceChildren(); if(view!=='ai-diagnostics') $('ai-diagnostics').replaceChildren();
+  $('owner-banner').hidden=isStandard() || !owner || ['users','overview','ai','planner','ai-diagnostics'].includes(view);
   $('owner-name').textContent=owner ? 'Данные: ' + owner.email : '';
   $('create').hidden=!isStandard() && !['gym','exercise'].includes(view);
   $('deleted-label').hidden=['overview','users','audit'].includes(view);
@@ -108,6 +116,7 @@ async function load() {
   try {
     if(view==='ai') { $('ai-settings').replaceChildren(); const data=await api('/ai-settings'); if(version===requestVersion) renderAiSettings(data); return; }
     if(view==='planner') { $('ai-settings').replaceChildren(); const data=await api('/planner-settings'); if(version===requestVersion) renderPlannerSettings(data); return; }
+    if(view==='ai-diagnostics') { $('ai-diagnostics').replaceChildren(el('p',{class:'empty'},'Загружаем диагностику…')); const data=await api('/ai-diagnostics'); if(version===requestVersion) renderDiagnostics(data); return; }
     if(isStandard()) { await loadStandard(version); return; }
     if(view==='overview') { const data=await api('/summary'); if(version===requestVersion) renderOverview(data); return; }
     $('table-wrap').replaceChildren(el('p',{class:'empty'},'Загружаем данные…'));
@@ -122,7 +131,7 @@ async function load() {
     $('page-range').textContent=data.items.length ? (offset+1)+'–'+(offset+data.items.length) + (hasMore ? ' · есть ещё' : '') : 'Нет записей';
     $('prev').disabled=offset===0;$('next').disabled=!hasMore;
   } catch(e) {
-    if(version===requestVersion) {notice(e.message,true);$('table-wrap').replaceChildren(el('p',{class:'empty'},'Не удалось загрузить данные. Нажми «Обновить».'));$('prev').disabled=true;$('next').disabled=true;}
+    if(version===requestVersion) {notice(e.message,true);const target=view==='ai-diagnostics' ? $('ai-diagnostics') : $('table-wrap');target.replaceChildren(el('p',{class:'empty'},'Не удалось загрузить данные. Нажми «Обновить».'));$('prev').disabled=true;$('next').disabled=true;}
   } finally { if(version===requestVersion){$('refresh').disabled=false;$('table-wrap').removeAttribute('aria-busy');} }
 }
 function table(headers,rows) {
@@ -160,6 +169,76 @@ function renderOverview(data) {
   const collections=el('section',{class:'panel'},el('div',{class:'panel-head'},el('h3',{},'Данные приложения')),el('p',{class:'hint'},'Выбери раздел для просмотра. Чтобы создать запись, сначала выбери пользователя.'),el('div',{class:'collection-grid'},Object.keys(singular).map(kind=>button([names[kind],el('span',{},String(counts[kind]||0))],()=>navigate(kind),'collection-button'))));
   const recent=el('section',{class:'panel'},el('div',{class:'panel-head'},el('h3',{},'Последние изменения'),button('Весь журнал →',()=>navigate('audit'),'quiet')),el('div',{class:'table-wrap'},auditTable(data.recentActions)));
   $('overview').replaceChildren(stats,collections,recent);
+}
+function diagnosticText(value, max = 200) { return typeof value === 'string' ? value.slice(0,max) : null; }
+function diagnosticCount(value, max = 1_000_000) { return Number.isInteger(value) && value >= 0 && value <= max ? value : 0; }
+function diagnosticEnum(value, allowed, fallback) { return allowed.has(value) ? value : fallback; }
+function sanitizeDiagnostics(data) {
+  const source=data && typeof data==='object' ? data : {};
+  const retention=source.retention && typeof source.retention==='object' ? source.retention : {};
+  const queue=source.calendarQueue && typeof source.calendarQueue==='object' ? source.calendarQueue : {};
+  const queueStatus=queue.status==='OK' ? 'OK' : 'ERROR';
+  const sanitizeRun=run=>{
+    const raw=run && typeof run==='object' ? run : {};
+    const outcome=diagnosticEnum(raw.outcome,diagnosticOutcomes,'FAILURE');
+    const stages=Array.isArray(raw.stages) ? raw.stages.slice(0,64).map(stage=>{
+      const current=stage && typeof stage==='object' ? stage : {};
+      return {stage:diagnosticEnum(current.stage,diagnosticStages,'PROVIDER_HTTP'),outcome:diagnosticEnum(current.outcome,diagnosticOutcomes,'FAILURE'),durationMs:diagnosticCount(current.durationMs)};
+    }) : [];
+    return {
+      id:diagnosticText(raw.id,64) || '—',startedAt:diagnosticText(raw.startedAt,64),durationMs:diagnosticCount(raw.durationMs),
+      outcome,failureCategory:diagnosticEnum(raw.failureCategory,diagnosticFailures,outcome==='FAILURE'?'INTERNAL':'NONE'),
+      model:diagnosticText(raw.model),httpStatus:Number.isInteger(raw.httpStatus) && raw.httpStatus>=100 && raw.httpStatus<=599 ? raw.httpStatus : null,
+      upstreamCode:diagnosticUpstreamCodes.has(raw.upstreamCode)?raw.upstreamCode:null,upstreamType:diagnosticUpstreamTypes.has(raw.upstreamType)?raw.upstreamType:null,upstreamParam:diagnosticUpstreamParams.has(raw.upstreamParam)?raw.upstreamParam:null,
+      rounds:diagnosticCount(raw.rounds,100),toolCalls:diagnosticCount(raw.toolCalls,100),stages,
+    };
+  };
+  return {
+    generatedAt:diagnosticText(source.generatedAt,64),
+    retention:{maxRuns:diagnosticCount(retention.maxRuns,200),maxAgeHours:diagnosticCount(retention.maxAgeHours,24),processLocal:retention.processLocal===true,lostOnRestart:retention.lostOnRestart===true},
+    database:{status:source.database?.status==='OK'?'OK':'ERROR'},
+    calendarQueue:{status:queueStatus,queued:queueStatus==='OK'?diagnosticCount(queue.queued):null,running:queueStatus==='OK'?diagnosticCount(queue.running):null,failed:queueStatus==='OK'?diagnosticCount(queue.failed):null,ready:queueStatus==='OK'?diagnosticCount(queue.ready):null},
+    runs:Array.isArray(source.runs)?source.runs.slice(0,200).map(sanitizeRun):[],
+  };
+}
+function renderDiagnostics(data) {
+  diagnostics=sanitizeDiagnostics(data);
+  const root=$('ai-diagnostics'), outcome=el('select',{'aria-label':'Исход попытки'}), failure=el('select',{'aria-label':'Категория сбоя'}), age=el('select',{'aria-label':'Период'});
+  [['ALL','Все исходы'],...Array.from(diagnosticOutcomes).map(value=>[value,value])].forEach(([value,label])=>outcome.append(el('option',{value},label)));
+  [['ALL','Все категории'],...Array.from(diagnosticFailures).map(value=>[value,value])].forEach(([value,label])=>failure.append(el('option',{value},label)));
+  [['ALL','Последние 24 часа'],['1','Последний час'],['6','Последние 6 часов']].forEach(([value,label])=>age.append(el('option',{value},label)));
+  const rows=el('div',{class:'table-wrap'}), count=el('p',{class:'hint'}), copied=async selected=>{
+    if(!navigator.clipboard?.writeText) throw new Error('Копирование недоступно в этом браузере.');
+    await navigator.clipboard.writeText(JSON.stringify({...diagnostics,runs:selected},null,2));
+    notice('Санитизированный отчёт скопирован локально.');
+  };
+  const selected=()=>{
+    const hours=age.value==='ALL'?24:Number(age.value), now=Date.now();
+    return diagnostics.runs.filter(run=>{
+      const started=Date.parse(run.startedAt||'');
+      return (outcome.value==='ALL'||run.outcome===outcome.value) && (failure.value==='ALL'||run.failureCategory===failure.value) && (!Number.isFinite(started)||now-started<=hours*3_600_000);
+    });
+  };
+  const redraw=()=>{
+    const filtered=selected();
+    count.textContent=`Показано: ${filtered.length} из ${diagnostics.runs.length}`;
+    if(!filtered.length) {rows.replaceChildren(el('p',{class:'empty'},'Нет диагностических запусков для выбранного фильтра.'));return;}
+    rows.replaceChildren(table(['Начало','Исход','Провайдер','Длительность','Этапы'],filtered.map(run=>[
+      el('div',{},date(run.startedAt),el('span',{class:'cell-sub'},run.id)),
+      el('div',{},el('span',{class:'pill'},run.outcome),el('span',{class:'diagnostics-stage'},run.failureCategory)),
+      [run.model||'—',run.httpStatus?`HTTP ${run.httpStatus}`:'—',run.upstreamCode||'—',run.upstreamType||'—',run.upstreamParam||'—'].join(' · '),
+      `${run.durationMs} мс · раунды ${run.rounds} · вызовы ${run.toolCalls}`,
+      run.stages.map(stage=>`${stage.stage}: ${stage.outcome} (${stage.durationMs} мс)`).join(' · ') || '—',
+    ])));
+  };
+  outcome.onchange=redraw;failure.onchange=redraw;age.onchange=redraw;
+  const queue=diagnostics.calendarQueue;
+  const queueText=queue.status==='OK'?`В очереди ${queue.queued} · выполняется ${queue.running} · готово ${queue.ready} · ошибки ${queue.failed}`:'Агрегаты очереди временно недоступны.';
+  const status=el('section',{class:'panel'},el('div',{class:'panel-head'},el('h3',{},'Ограничения диагностики')),el('p',{class:'hint'},`Только память текущего процесса: максимум ${diagnostics.retention.maxRuns} запусков за ${diagnostics.retention.maxAgeHours} ч. После перезапуска данные теряются и не объединяются между экземплярами.`),el('p',{class:'hint'},`Снимок: ${date(diagnostics.generatedAt)} · База: ${diagnostics.database.status} · Очередь: ${queue.status}. ${queueText}`));
+  const filters=el('div',{class:'diagnostics-filters'},el('label',{},'Исход',outcome),el('label',{},'Категория',failure),el('label',{},'Время',age));
+  const copy=button('Скопировать отчёт',()=>copied(selected()),'secondary');
+  root.replaceChildren(status,filters,el('div',{class:'diagnostics-meta'},count,copy),rows);
+  redraw();
 }
 function details(entries) { return el('dl',{class:'detail-grid'},entries.map(([label,value])=>el('div',{},el('dt',{},label),el('dd',{},String(value??'—'))))); }
 async function showUser(id) {

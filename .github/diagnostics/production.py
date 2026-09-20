@@ -38,7 +38,7 @@ def main():
     services = run(compose + ["ps", "--status", "running", "--services"])
     logs = run(compose + ["logs", "--no-color", "--since=2h", "--tail=2000", "backend"])
     health = run(["curl", "--fail", "--silent", "--max-time", "10",
-                  "http://127.0.0.1:18080/health"])
+                  "http://127.0.0.1:18080/actuator/health/readiness"])
     try:
         status = json.loads(health or "{}").get("status")
     except (ValueError, AttributeError):

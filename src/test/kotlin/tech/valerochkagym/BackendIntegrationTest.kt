@@ -36,6 +36,43 @@ import tools.jackson.databind.ObjectMapper
   classes = [Application::class, BackendIntegrationTest.Fakes::class],
 )
 class BackendIntegrationTest {
+  @Autowired lateinit var diagnostics: tech.valerochkagym.service.ai.AiDiagnostics
+
+  @Test
+  fun `diagnostics require live admin session and expose only read only metadata`() {
+    val path = "/api/ai-diagnostics"
+    assertEquals(401, adminCall("GET", path).status)
+    val ordinary = account()
+    assertEquals(401, adminCall("GET", path, bearer = ordinary["accessToken"].asString()).status)
+    val browser = administrator()
+    diagnostics
+      .open(tech.valerochkagym.service.ai.AiDiagnosticStage.PROVIDER_HTTP, "test-model")
+      .use {
+        diagnostics.recordHttp(
+          400,
+          "invalid_json_schema",
+          "invalid_request_error",
+          "response_format",
+        )
+        it.fail(IllegalStateException("secret-prompt-and-provider-response"))
+      }
+    val response = adminCall("GET", path, browser = browser)
+    assertEquals(200, response.status)
+    assertEquals("no-store", response.response.headers().firstValue("Cache-Control").orElseThrow())
+    val report = response.body!!
+    assertEquals("OK", report["database"]["status"].asString())
+    assertEquals("OK", report["calendarQueue"]["status"].asString())
+    assertEquals(200, report["retention"]["maxRuns"].asInt())
+    assertTrue(report["retention"]["lostOnRestart"].asBoolean())
+    assertTrue(report["runs"].any { it["httpStatus"].asInt() == 400 })
+    val raw = response.response.body()
+    assertFalse(raw.contains("secret-prompt-and-provider-response"))
+    assertFalse(raw.contains(browser.userId.toString()))
+    assertFalse(raw.contains(ordinary["accessToken"].asString()))
+    db.update("UPDATE users SET is_admin=false WHERE id=?", browser.userId)
+    assertEquals(401, adminCall("GET", path, browser = browser).status)
+  }
+
   @Test
   fun `planner settings require admin csrf and preserve edited patterns on read`() {
     val path = "/api/planner-settings"

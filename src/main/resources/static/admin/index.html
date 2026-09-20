@@ -41,6 +41,7 @@
       <button data-view="schedule"><span aria-hidden="true">▤</span>Расписание</button>
       <button data-view="ai">ИИ · Провайдер и модели</button>
       <button data-view="planner">ИИ · Паттерны тренировок</button>
+      <button data-view="ai-diagnostics">ИИ · Диагностика</button>
       <button data-view="audit"><span aria-hidden="true">↺</span>Журнал изменений</button>
     </nav>
     <div class="sidebar-bottom"><span class="badge">ADMIN</span><p id="admin-email"></p><button id="logout" class="quiet">Выйти из аккаунта</button></div>
@@ -51,6 +52,7 @@
     <div id="owner-banner" class="owner-banner" hidden><span id="owner-name"></span><button id="clear-owner" class="quiet">Все пользователи ×</button></div>
     <div id="notice" role="status" aria-live="polite" hidden></div>
     <section id="ai-settings" hidden></section>
+    <section id="ai-diagnostics" hidden aria-live="polite"></section>
     <section id="overview" hidden></section>
     <section id="listing" hidden>
       <div class="toolbar"><label class="search-label"><span class="sr-only">Поиск</span><input id="search" type="search" placeholder="Поиск по названию, email или ID" maxlength="200"></label><label id="deleted-label" class="check compact"><input type="checkbox" id="deleted">Удалённые</label><button id="create" class="primary" hidden>+ Создать</button></div>
