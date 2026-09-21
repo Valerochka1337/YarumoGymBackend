@@ -18,6 +18,9 @@ const pageSize = 50;
 const diagnosticOutcomes = new Set(['RUNNING','SUCCESS','FAILURE','CANCELLED']);
 const diagnosticFailures = new Set(['NONE','AI_UNAVAILABLE','AI_TIMEOUT','AI_BUSY','AI_INTERRUPTED','AI_INVALID_RESPONSE','AI_CONTEXT_STALE','AI_CONTEXT_TOO_LARGE','UPSTREAM_REJECTED','UPSTREAM_UNAVAILABLE','DATABASE','TRANSPORT','VALIDATION','PROVIDER_UNCONFIGURED','INTERNAL']);
 const diagnosticStages = new Set(['CALENDAR_JOB','CALENDAR_CREATE','CALENDAR_REFINE','PLANNER_TURN','PLANNER_TOOL','PROVIDER_HTTP']);
+const diagnosticReasons = new Set(['ROUND_BUDGET', 'TOOL_CALL_BUDGET', 'TOOL_STARTED', 'TOOL_COMPLETED', 'PLAN_ACCEPTED', 'PLAN_REJECTED', 'ROUND_LIMIT', 'TOOL_CALL_LIMIT', 'TOOL_RESULT_SIZE', 'TRANSCRIPT_SIZE', 'EMPTY_TURN', 'FINAL_WITH_TOOLS', 'DUPLICATE_TOOL_CALL', 'INVALID_TOOL_ARGUMENTS', 'INVALID_TOOL_ID', 'UNKNOWN_TOOL', 'TOOL_ARGUMENT_SIZE', 'INVALID_CANDIDATE_IDS', 'UNKNOWN_CANDIDATE', 'UNKNOWN_PATTERN', 'INVALID_PROVIDER_RESPONSE', 'SCHEMA_MISMATCH', 'PATTERN_MISSING', 'FINALIZATION_MISSING', 'FINAL_PLAN_MISMATCH', 'REFINEMENT_UNCHANGED', 'INVALID_PLAN_SHAPE', 'UNKNOWN_EXERCISE', 'DUPLICATE_EXERCISE', 'INVALID_REST', 'INVALID_SET_COUNT', 'INVALID_SET_VALUES', 'DURATION_TOO_SHORT', 'DURATION_TOO_LONG']);
+const diagnosticSites = new Set(['AGENT_LOOP', 'TOOL_PROTOCOL', 'PROVIDER_RESPONSE', 'PLAN_SCHEMA', 'PLAN_VALIDATION', 'FINALIZATION']);
+const diagnosticTools = new Set(['GET_STRENGTH_SKELETON', 'GET_CANDIDATE_DETAILS_AND_HISTORY', 'VALIDATE_AND_FINALIZE_PLAN', 'UNKNOWN']);
 const diagnosticUpstreamCodes = new Set(['invalid_json_schema','invalid_request_error','invalid_function_parameters','model_not_found','unsupported_parameter']);
 const diagnosticUpstreamTypes = new Set(['invalid_request_error']);
 const diagnosticUpstreamParams = new Set(['response_format','tools','model','max_completion_tokens']);
@@ -173,6 +176,14 @@ function renderOverview(data) {
 function diagnosticText(value, max = 200) { return typeof value === 'string' ? value.slice(0,max) : null; }
 function diagnosticCount(value, max = 1_000_000) { return Number.isInteger(value) && value >= 0 && value <= max ? value : 0; }
 function diagnosticEnum(value, allowed, fallback) { return allowed.has(value) ? value : fallback; }
+function sanitizeDiagnosticEvent(raw) {
+  if (!raw || !diagnosticSites.has(raw.site) || !diagnosticReasons.has(raw.reason)) return null;
+  const number = value => Number.isInteger(value) && value >= 0 && value <= 86_400_000 ? value : null;
+  const segment = '(?:result|name|exercises|exerciseId|restSeconds|plannedSets|reps|durationSec)';
+  const field = typeof raw.field==='string' && raw.field.length<=200 && new RegExp(`^${segment}(?:\\[[0-9]{1,3}\\]|\\.${segment})*$`).test(raw.field) ? raw.field : null;
+  return {site:raw.site,reason:raw.reason,round:diagnosticCount(raw.round,100),tool:diagnosticTools.has(raw.tool)?raw.tool:null,
+    actual:number(raw.actual),minimum:number(raw.minimum),maximum:number(raw.maximum),field};
+}
 function sanitizeDiagnostics(data) {
   const source=data && typeof data==='object' ? data : {};
   const retention=source.retention && typeof source.retention==='object' ? source.retention : {};
@@ -191,10 +202,14 @@ function sanitizeDiagnostics(data) {
       model:diagnosticText(raw.model),httpStatus:Number.isInteger(raw.httpStatus) && raw.httpStatus>=100 && raw.httpStatus<=599 ? raw.httpStatus : null,
       upstreamCode:diagnosticUpstreamCodes.has(raw.upstreamCode)?raw.upstreamCode:null,upstreamType:diagnosticUpstreamTypes.has(raw.upstreamType)?raw.upstreamType:null,upstreamParam:diagnosticUpstreamParams.has(raw.upstreamParam)?raw.upstreamParam:null,
       rounds:diagnosticCount(raw.rounds,100),toolCalls:diagnosticCount(raw.toolCalls,100),stages,
+      events:Array.isArray(raw.events)?raw.events.slice(0,64).map(sanitizeDiagnosticEvent).filter(Boolean):[],
+      droppedEvents:diagnosticCount(raw.droppedEvents),
     };
   };
   return {
     generatedAt:diagnosticText(source.generatedAt,64),
+    process:{id:typeof source.process?.id==='string' && /^[a-f0-9-]{36}$/.test(source.process.id)?source.process.id:null,
+      startedAt:diagnosticText(source.process?.startedAt,64),revision:/^[a-f0-9]{40}$/.test(source.process?.revision)?source.process.revision:'unknown'},
     retention:{maxRuns:diagnosticCount(retention.maxRuns,200),maxAgeHours:diagnosticCount(retention.maxAgeHours,24),processLocal:retention.processLocal===true,lostOnRestart:retention.lostOnRestart===true},
     database:{status:source.database?.status==='OK'?'OK':'ERROR'},
     calendarQueue:{status:queueStatus,queued:queueStatus==='OK'?diagnosticCount(queue.queued):null,running:queueStatus==='OK'?diagnosticCount(queue.running):null,failed:queueStatus==='OK'?diagnosticCount(queue.failed):null,ready:queueStatus==='OK'?diagnosticCount(queue.ready):null},
@@ -223,11 +238,17 @@ function renderDiagnostics(data) {
     const filtered=selected();
     count.textContent=`Показано: ${filtered.length} из ${diagnostics.runs.length}`;
     if(!filtered.length) {rows.replaceChildren(el('p',{class:'empty'},'Нет диагностических запусков для выбранного фильтра.'));return;}
-    rows.replaceChildren(table(['Начало','Исход','Провайдер','Длительность','Этапы'],filtered.map(run=>[
+    rows.replaceChildren(table(['Начало','Исход','Провайдер','Длительность','События','Этапы'],filtered.map(run=>[
       el('div',{},date(run.startedAt),el('span',{class:'cell-sub'},run.id)),
       el('div',{},el('span',{class:'pill'},run.outcome),el('span',{class:'diagnostics-stage'},run.failureCategory)),
       [run.model||'—',run.httpStatus?`HTTP ${run.httpStatus}`:'—',run.upstreamCode||'—',run.upstreamType||'—',run.upstreamParam||'—'].join(' · '),
       `${run.durationMs} мс · раунды ${run.rounds} · вызовы ${run.toolCalls}`,
+      el('div',{},run.events.map(event=>el('p',{class:'hint'},[
+        `Раунд ${event.round}`, event.site, event.tool, event.reason, event.field,
+        event.actual!==null?`значение ${event.actual}`:null,
+        event.minimum!==null?`минимум ${event.minimum}`:null,
+        event.maximum!==null?`максимум ${event.maximum}`:null,
+      ].filter(value=>value!==null).join(' · '))),run.droppedEvents?el('p',{},`Ранних событий пропущено: ${run.droppedEvents}`):null),
       run.stages.map(stage=>`${stage.stage}: ${stage.outcome} (${stage.durationMs} мс)`).join(' · ') || '—',
     ])));
   };
@@ -235,6 +256,8 @@ function renderDiagnostics(data) {
   const queue=diagnostics.calendarQueue;
   const queueText=queue.status==='OK'?`В очереди ${queue.queued} · выполняется ${queue.running} · готово ${queue.ready} · ошибки ${queue.failed}`:'Агрегаты очереди временно недоступны.';
   const status=el('section',{class:'panel'},el('div',{class:'panel-head'},el('h3',{},'Ограничения диагностики')),el('p',{class:'hint'},`Только память текущего процесса: максимум ${diagnostics.retention.maxRuns} запусков за ${diagnostics.retention.maxAgeHours} ч. После перезапуска данные теряются и не объединяются между экземплярами.`),el('p',{class:'hint'},`Снимок: ${date(diagnostics.generatedAt)} · База: ${diagnostics.database.status} · Очередь: ${queue.status}. ${queueText}`));
+  status.append(el('p',{class:'hint'},`Версия backend: ${diagnostics.process.revision} · Процесс: ${diagnostics.process.id||'—'} · Запущен: ${date(diagnostics.process.startedAt)}`));
+  status.append(el('p',{class:'hint'},'PLAN_REJECTED — план не принят; TOOL_COMPLETED — инструмент ответил. Это разные результаты. Числа длительности указаны в секундах, размеры — в байтах.'));
   const filters=el('div',{class:'diagnostics-filters'},el('label',{},'Исход',outcome),el('label',{},'Категория',failure),el('label',{},'Время',age));
   const copy=button('Скопировать отчёт',()=>copied(selected()),'secondary');
   root.replaceChildren(status,filters,el('div',{class:'diagnostics-meta'},count,copy),rows);

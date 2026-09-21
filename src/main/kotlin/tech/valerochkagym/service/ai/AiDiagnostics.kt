@@ -8,19 +8,35 @@ import java.util.ArrayDeque
 import java.util.Collections
 import java.util.UUID
 import java.util.concurrent.CancellationException
+import org.slf4j.LoggerFactory
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.dao.DataAccessException
 import org.springframework.stereotype.Service
 import tech.valerochkagym.controller.advice.ApiException
+import tools.jackson.databind.json.JsonMapper
 
 /**
  * A deliberately small, process-local incident aid. It is not an audit trail: inputs, provider
  * bodies and identities never enter this object.
  */
 @Service
-class AiDiagnostics(private val clock: Clock = Clock.systemUTC()) {
+class AiDiagnostics(
+  private val clock: Clock = Clock.systemUTC(),
+  @Value("\${BUILD_REVISION:unknown}") revision: String = "unknown",
+) {
+  val process =
+    AiDiagnosticProcess(
+      UUID.randomUUID().toString(),
+      clock.instant(),
+      revision.takeIf { it.matches(Regex("[a-f0-9]{40}")) } ?: "unknown",
+    )
+  private val logger = LoggerFactory.getLogger(AiDiagnostics::class.java)
+  private val logJson = JsonMapper.builder().build()
+
   companion object {
     const val maxRuns = 200
     const val maxAgeHours = 24L
+    const val maxEvents = 64
     private const val maxStages = 64
     private const val maxCounter = 10_000
     private const val maxDurationMillis = 86_400_000L
@@ -58,6 +74,9 @@ class AiDiagnostics(private val clock: Clock = Clock.systemUTC()) {
     var durationMs: Long = 0,
     var evicted: Boolean = false,
     val stages: MutableList<StageEntry> = mutableListOf(),
+    val events: MutableList<AiDiagnosticEvent> = mutableListOf(),
+    var droppedEvents: Int = 0,
+    var tool: AiDiagnosticTool? = null,
   )
 
   private val lock = Any()
@@ -126,6 +145,70 @@ class AiDiagnostics(private val clock: Clock = Clock.systemUTC()) {
 
   fun recordFailure(category: AiDiagnosticFailureCategory) {
     current.get()?.let { run -> synchronized(lock) { recordFailure(run, category) } }
+  }
+
+  /** Only enum labels, server-generated field paths and bounded numbers can enter events. */
+  fun event(
+    site: AiDiagnosticSite,
+    reason: AiDiagnosticReason,
+    actual: Long? = null,
+    minimum: Long? = null,
+    maximum: Long? = null,
+    field: String? = null,
+  ) {
+    try {
+      val run = current.get() ?: return
+      synchronized(lock) {
+        if (run.events.size == maxEvents) {
+          run.events.removeAt(0)
+          run.droppedEvents++
+        }
+        val segment =
+          "(?:result|name|exercises|exerciseId|restSeconds|plannedSets|reps|durationSec)"
+        val safeField =
+          field?.takeIf {
+            it.length <= 200 && it.matches(Regex("$segment(?:\\[[0-9]{1,3}\\]|\\.$segment)*"))
+          }
+        fun bounded(value: Long?) = value?.takeIf { it in 0..86_400_000 }
+        run.events +=
+          AiDiagnosticEvent(
+            site,
+            reason,
+            run.rounds,
+            run.tool,
+            bounded(actual),
+            bounded(minimum),
+            bounded(maximum),
+            safeField,
+          )
+      }
+    } catch (_: Exception) {
+      /* Diagnostics must never change planner behavior. */
+    }
+  }
+
+  fun reject(
+    site: AiDiagnosticSite,
+    reason: AiDiagnosticReason,
+    actual: Long? = null,
+    minimum: Long? = null,
+    maximum: Long? = null,
+    field: String? = null,
+  ): Nothing {
+    event(site, reason, actual, minimum, maximum, field)
+    throw aiError("ai_invalid_response")
+  }
+
+  internal fun <T> withTool(name: String, block: () -> T): T {
+    val run = current.get() ?: return block()
+    val previous = run.tool
+    run.tool =
+      AiDiagnosticTool.entries.firstOrNull { it.wireName == name } ?: AiDiagnosticTool.UNKNOWN
+    try {
+      return block()
+    } finally {
+      run.tool = previous
+    }
   }
 
   fun recordRound() = increment { it.rounds++ }
@@ -198,6 +281,27 @@ class AiDiagnostics(private val clock: Clock = Clock.systemUTC()) {
               }
           }
           purge(now)
+          if (previous == null) {
+            // No model text, account IDs, exception messages or tool arguments in this record.
+            logger.info(
+              "AI_DIAGNOSTIC {}",
+              logJson.writeValueAsString(
+                mapOf(
+                  "runId" to run.id.toString(),
+                  "startedAt" to run.startedAt.toString(),
+                  "revision" to process.revision,
+                  "processId" to process.id,
+                  "outcome" to run.outcome,
+                  "category" to run.failure,
+                  "rounds" to run.rounds,
+                  "toolCalls" to run.toolCalls,
+                  "durationMs" to run.durationMs,
+                  "events" to run.events.toList(),
+                  "droppedEvents" to run.droppedEvents,
+                )
+              ),
+            )
+          }
         }
       } catch (_: Exception) {
         // Observation is always best effort.
@@ -253,6 +357,8 @@ class AiDiagnostics(private val clock: Clock = Clock.systemUTC()) {
           )
         }
       ),
+      Collections.unmodifiableList(events.toList()),
+      droppedEvents,
     )
 
   private fun elapsed(startedAt: Instant, endedAt: Instant): Long =
@@ -356,6 +462,7 @@ data class AiDiagnosticsResponse(
   val database: AiDiagnosticDatabase,
   val calendarQueue: AiDiagnosticCalendarQueue,
   val runs: List<AiDiagnosticRun>,
+  val process: AiDiagnosticProcess? = null,
 )
 
 data class AiDiagnosticRetention(
@@ -389,10 +496,78 @@ data class AiDiagnosticRun(
   val rounds: Int,
   val toolCalls: Int,
   val stages: List<AiDiagnosticStageSnapshot>,
+  val events: List<AiDiagnosticEvent> = emptyList(),
+  val droppedEvents: Int = 0,
 )
 
 data class AiDiagnosticStageSnapshot(
   val stage: AiDiagnosticStage,
   val outcome: AiDiagnosticOutcome,
   val durationMs: Long,
+)
+
+data class AiDiagnosticProcess(val id: String, val startedAt: Instant, val revision: String)
+
+enum class AiDiagnosticSite {
+  AGENT_LOOP,
+  TOOL_PROTOCOL,
+  PROVIDER_RESPONSE,
+  PLAN_SCHEMA,
+  PLAN_VALIDATION,
+  FINALIZATION,
+}
+
+enum class AiDiagnosticTool(val wireName: String) {
+  GET_STRENGTH_SKELETON("get_strength_skeleton"),
+  GET_CANDIDATE_DETAILS_AND_HISTORY("get_candidate_details_and_history"),
+  VALIDATE_AND_FINALIZE_PLAN("validate_and_finalize_plan"),
+  UNKNOWN(""),
+}
+
+enum class AiDiagnosticReason {
+  ROUND_BUDGET,
+  TOOL_CALL_BUDGET,
+  TOOL_STARTED,
+  TOOL_COMPLETED,
+  PLAN_ACCEPTED,
+  PLAN_REJECTED,
+  ROUND_LIMIT,
+  TOOL_CALL_LIMIT,
+  TOOL_RESULT_SIZE,
+  TRANSCRIPT_SIZE,
+  EMPTY_TURN,
+  FINAL_WITH_TOOLS,
+  DUPLICATE_TOOL_CALL,
+  INVALID_TOOL_ARGUMENTS,
+  INVALID_TOOL_ID,
+  UNKNOWN_TOOL,
+  TOOL_ARGUMENT_SIZE,
+  INVALID_CANDIDATE_IDS,
+  UNKNOWN_CANDIDATE,
+  UNKNOWN_PATTERN,
+  INVALID_PROVIDER_RESPONSE,
+  SCHEMA_MISMATCH,
+  PATTERN_MISSING,
+  FINALIZATION_MISSING,
+  FINAL_PLAN_MISMATCH,
+  REFINEMENT_UNCHANGED,
+  INVALID_PLAN_SHAPE,
+  UNKNOWN_EXERCISE,
+  DUPLICATE_EXERCISE,
+  INVALID_REST,
+  INVALID_SET_COUNT,
+  INVALID_SET_VALUES,
+  DURATION_TOO_SHORT,
+  DURATION_TOO_LONG,
+}
+
+data class AiDiagnosticEvent(
+  val site: AiDiagnosticSite,
+  val reason: AiDiagnosticReason,
+  val round: Int,
+  val tool: AiDiagnosticTool?,
+  val actual: Long?,
+  val minimum: Long?,
+  val maximum: Long?,
+  val field: String?,
 )

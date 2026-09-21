@@ -294,13 +294,17 @@ class CalendarAiService(
                       call.candidateIds,
                     )
                   "validate_and_finalize_plan" -> {
-                    if (selectedPattern == null) throw aiError("ai_invalid_response")
+                    if (selectedPattern == null)
+                      diagnostics.reject(
+                        AiDiagnosticSite.FINALIZATION,
+                        AiDiagnosticReason.PATTERN_MISSING,
+                      )
                     val requestedPlan = requireNotNull(call.plan)
                     val wrapped =
                       if (requestedPlan.has("result")) requestedPlan
                       else json.valueToTree(mapOf("result" to requestedPlan))
                     try {
-                      val normalized = validator.validatePlanner(wrapped)
+                      val normalized = validatePlannerObserved(wrapped)
                       val validated =
                         validateAndProject(
                           normalized,
@@ -313,6 +317,11 @@ class CalendarAiService(
                           pattern = selectedPattern,
                         )
                       validatedToolOutput = normalized
+                      diagnostics.event(
+                        AiDiagnosticSite.PLAN_VALIDATION,
+                        AiDiagnosticReason.PLAN_ACCEPTED,
+                        actual = PlannerDuration.seconds(validated.exercises),
+                      )
                       json.writeValueAsBytes(
                         mapOf(
                           "valid" to true,
@@ -324,6 +333,10 @@ class CalendarAiService(
                         )
                       )
                     } catch (error: ApiException) {
+                      diagnostics.event(
+                        AiDiagnosticSite.PLAN_VALIDATION,
+                        AiDiagnosticReason.PLAN_REJECTED,
+                      )
                       json.writeValueAsBytes(
                         mapOf(
                           "valid" to false,
@@ -345,11 +358,14 @@ class CalendarAiService(
           .run(candidateIds.toSet(), adaptive.patterns.keys) {
             remainingRefinementMillis(deadlineAt)
           }
-          .also { if (selectedPattern == null) throw aiError("ai_invalid_response") }
+          .also {
+            if (selectedPattern == null)
+              diagnostics.reject(AiDiagnosticSite.FINALIZATION, AiDiagnosticReason.PATTERN_MISSING)
+          }
       } else throw aiError("ai_unavailable")
     remainingRefinementMillis(deadlineAt)
-    val validatedOutput = validator.validatePlanner(output)
-    if (validatedOutput != validatedToolOutput) throw aiError("ai_invalid_response")
+    val validatedOutput = validatePlannerObserved(output)
+    if (validatedOutput != validatedToolOutput) rejectFinalization(validatedToolOutput)
     remainingRefinementMillis(deadlineAt)
     val revised =
       validateAndProject(
@@ -363,7 +379,8 @@ class CalendarAiService(
         pattern = selectedPattern,
       )
     remainingRefinementMillis(deadlineAt)
-    if (revised == base) throw aiError("ai_invalid_response")
+    if (revised == base)
+      diagnostics.reject(AiDiagnosticSite.FINALIZATION, AiDiagnosticReason.REFINEMENT_UNCHANGED)
     remainingRefinementMillis(deadlineAt)
     hooks.beforeRefinementCommit()
     return creator.refine(
@@ -784,13 +801,17 @@ class CalendarAiService(
                       call.candidateIds,
                     )
                   "validate_and_finalize_plan" -> {
-                    if (selectedPattern == null) throw aiError("ai_invalid_response")
+                    if (selectedPattern == null)
+                      diagnostics.reject(
+                        AiDiagnosticSite.FINALIZATION,
+                        AiDiagnosticReason.PATTERN_MISSING,
+                      )
                     val candidatePlan = requireNotNull(call.plan)
                     val wrapped =
                       if (candidatePlan.has("result")) candidatePlan
                       else json.valueToTree(mapOf("result" to candidatePlan))
                     try {
-                      val normalized = validator.validatePlanner(wrapped)
+                      val normalized = validatePlannerObserved(wrapped)
                       val validated =
                         validateAndProject(
                           normalized,
@@ -803,6 +824,11 @@ class CalendarAiService(
                           pattern = selectedPattern,
                         )
                       validatedToolOutput = normalized
+                      diagnostics.event(
+                        AiDiagnosticSite.PLAN_VALIDATION,
+                        AiDiagnosticReason.PLAN_ACCEPTED,
+                        actual = PlannerDuration.seconds(validated.exercises),
+                      )
                       json.writeValueAsBytes(
                         mapOf(
                           "valid" to true,
@@ -814,6 +840,10 @@ class CalendarAiService(
                         )
                       )
                     } catch (error: ApiException) {
+                      diagnostics.event(
+                        AiDiagnosticSite.PLAN_VALIDATION,
+                        AiDiagnosticReason.PLAN_REJECTED,
+                      )
                       json.writeValueAsBytes(
                         mapOf(
                           "valid" to false,
@@ -836,7 +866,13 @@ class CalendarAiService(
             ) {
               attempt.deadlineAt.toEpochMilli() - clock.millis()
             }
-            .also { if (selectedPattern == null) throw aiError("ai_invalid_response") }
+            .also {
+              if (selectedPattern == null)
+                diagnostics.reject(
+                  AiDiagnosticSite.FINALIZATION,
+                  AiDiagnosticReason.PATTERN_MISSING,
+                )
+            }
         } else if (agentic) throw aiError("ai_unavailable")
         else
           provider.generate(
@@ -852,8 +888,8 @@ class CalendarAiService(
           )
       if (Thread.currentThread().isInterrupted || !Instant.now(clock).isBefore(attempt.deadlineAt))
         throw aiError("ai_timeout")
-      output = validator.validatePlanner(output)
-      if (agentic && output != validatedToolOutput) throw aiError("ai_invalid_response")
+      output = validatePlannerObserved(output)
+      if (agentic && output != validatedToolOutput) rejectFinalization(validatedToolOutput)
       var draft =
         validateAndProject(
           output,
@@ -904,7 +940,7 @@ class CalendarAiService(
           )
         draft =
           validateAndProject(
-            validator.validatePlanner(output),
+            validatePlannerObserved(output),
             request,
             candidates,
             projectionFacts,
@@ -1279,6 +1315,22 @@ class CalendarAiService(
     return request
   }
 
+  private fun validatePlannerObserved(raw: JsonNode): JsonNode =
+    validator.validatePlanner(raw) { field ->
+      diagnostics.event(
+        AiDiagnosticSite.PLAN_SCHEMA,
+        AiDiagnosticReason.SCHEMA_MISMATCH,
+        field = field,
+      )
+    }
+
+  private fun rejectFinalization(validated: JsonNode?): Nothing =
+    diagnostics.reject(
+      AiDiagnosticSite.FINALIZATION,
+      if (validated == null) AiDiagnosticReason.FINALIZATION_MISSING
+      else AiDiagnosticReason.FINAL_PLAN_MISMATCH,
+    )
+
   private fun validateAndProject(
     raw: JsonNode,
     request: CalendarDraftRequest,
@@ -1289,7 +1341,12 @@ class CalendarAiService(
     minimumDurationRequired: Boolean = false,
     pattern: PlannerPattern? = null,
   ): ApprovalDraft {
-    val result = raw["result"] ?: throw aiError("ai_invalid_response")
+    val result =
+      raw["result"]
+        ?: diagnostics.reject(
+          AiDiagnosticSite.PLAN_VALIDATION,
+          AiDiagnosticReason.INVALID_PLAN_SHAPE,
+        )
     val exercises = result["exercises"]?.toList().orEmpty()
     if (
       !result["name"].isTextual ||
@@ -1298,11 +1355,13 @@ class CalendarAiService(
         exercises.size !in 1..12 ||
         exercises.sumOf { it["plannedSets"]?.size() ?: 0 } > 40
     )
-      throw aiError("ai_invalid_response")
+      diagnostics.reject(AiDiagnosticSite.PLAN_VALIDATION, AiDiagnosticReason.INVALID_PLAN_SHAPE)
     val candidateTypes = candidates.associate { it["exerciseId"] as String to it["type"] as String }
     val ids = exercises.map { it["exerciseId"]?.asString() }
-    if (ids.any { it == null || it !in candidateTypes } || ids.distinct().size != ids.size)
-      throw aiError("ai_invalid_response")
+    if (ids.any { it == null || it !in candidateTypes })
+      diagnostics.reject(AiDiagnosticSite.PLAN_VALIDATION, AiDiagnosticReason.UNKNOWN_EXERCISE)
+    if (ids.distinct().size != ids.size)
+      diagnostics.reject(AiDiagnosticSite.PLAN_VALIDATION, AiDiagnosticReason.DUPLICATE_EXERCISE)
     val patternBounds =
       pattern
         ?.slots
@@ -1313,9 +1372,17 @@ class CalendarAiService(
       exercises.map { e ->
         val type = candidateTypes.getValue(e["exerciseId"].asString())
         val rest = e["restSeconds"]?.takeUnless(JsonNode::isNull)?.asInt()
-        if (rest != null && rest !in 0..900) throw aiError("ai_invalid_response")
+        if (rest != null && rest !in 0..900)
+          diagnostics.reject(AiDiagnosticSite.PLAN_VALIDATION, AiDiagnosticReason.INVALID_REST)
         val sets = e["plannedSets"]?.toList().orEmpty()
-        if (sets.size !in 1..10) throw aiError("ai_invalid_response")
+        if (sets.size !in 1..10)
+          diagnostics.reject(
+            AiDiagnosticSite.PLAN_VALIDATION,
+            AiDiagnosticReason.INVALID_SET_COUNT,
+            actual = sets.size.toLong(),
+            minimum = 1,
+            maximum = 10,
+          )
         val supplied =
           sets.map { s ->
             val reps = s["reps"]?.takeUnless(JsonNode::isNull)?.asInt()
@@ -1324,7 +1391,10 @@ class CalendarAiService(
               (type == "STRENGTH" && (reps !in 1..100 || duration != null)) ||
                 (type != "STRENGTH" && (reps != null || duration !in 1..7200))
             )
-              throw aiError("ai_invalid_response")
+              diagnostics.reject(
+                AiDiagnosticSite.PLAN_VALIDATION,
+                AiDiagnosticReason.INVALID_SET_VALUES,
+              )
             reps to duration
           }
         val progressedReps =
@@ -1356,12 +1426,24 @@ class CalendarAiService(
         )
       }
     val durationSeconds = PlannerDuration.seconds(planned)
-    if (
-      durationSeconds > request.availableDurationMinutes * 60L ||
-        (minimumDurationRequired &&
-          durationSeconds < PlannerDuration.minimumSeconds(request.availableDurationMinutes))
-    )
-      throw aiError("ai_invalid_response")
+    val maximum = request.availableDurationMinutes * 60L
+    val minimum = PlannerDuration.minimumSeconds(request.availableDurationMinutes)
+    if (durationSeconds > maximum)
+      diagnostics.reject(
+        AiDiagnosticSite.PLAN_VALIDATION,
+        AiDiagnosticReason.DURATION_TOO_LONG,
+        actual = durationSeconds,
+        minimum = if (minimumDurationRequired) minimum else 0,
+        maximum = maximum,
+      )
+    if (minimumDurationRequired && durationSeconds < minimum)
+      diagnostics.reject(
+        AiDiagnosticSite.PLAN_VALIDATION,
+        AiDiagnosticReason.DURATION_TOO_SHORT,
+        actual = durationSeconds,
+        minimum = minimum,
+        maximum = maximum,
+      )
     return ApprovalDraft(
       result["name"].asString(),
       request.gymIds,

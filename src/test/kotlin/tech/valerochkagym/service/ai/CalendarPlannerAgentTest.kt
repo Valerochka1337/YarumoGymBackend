@@ -12,6 +12,74 @@ class CalendarPlannerAgentTest {
   private val candidate = UUID(0, 1).toString()
 
   @Test
+  fun `oversized tool response records its size and tool before rejecting the attempt`() {
+    val diagnostics = AiDiagnostics()
+    val agent =
+      CalendarPlannerAgent(
+        turn = {
+          PlannerTurn(
+            calls =
+              listOf(
+                PlannerToolProtocol.Call(
+                  "details",
+                  "get_candidate_details_and_history",
+                  listOf(candidate),
+                  "{}".encodeToByteArray(),
+                )
+              )
+          )
+        },
+        tool = { ByteArray(16385) },
+        diagnostics = diagnostics,
+      )
+    assertThrows<ApiException> {
+      diagnostics.observe(AiDiagnosticStage.CALENDAR_CREATE) {
+        agent.run(setOf(candidate)) { 45000 }
+      }
+    }
+    val run = diagnostics.snapshot().single()
+    assertEquals(AiDiagnosticOutcome.FAILURE, run.outcome)
+    val failure = run.events.last()
+    assertEquals(AiDiagnosticReason.TOOL_RESULT_SIZE, failure.reason)
+    assertEquals(16385L, failure.actual)
+    assertEquals(16384L, failure.maximum)
+    assertEquals(AiDiagnosticTool.GET_CANDIDATE_DETAILS_AND_HISTORY, failure.tool)
+    assertEquals(AiDiagnosticOutcome.SUCCESS, run.stages.last().outcome)
+  }
+
+  @Test
+  fun `invalid tool references record protocol failure before tool execution`() {
+    val diagnostics = AiDiagnostics()
+    val agent =
+      CalendarPlannerAgent(
+        turn = {
+          PlannerTurn(
+            calls =
+              listOf(
+                PlannerToolProtocol.Call(
+                  "details",
+                  "get_candidate_details_and_history",
+                  listOf(UUID(0, 2).toString()),
+                  "{}".encodeToByteArray(),
+                )
+              )
+          )
+        },
+        tool = { error("Must not execute") },
+        diagnostics = diagnostics,
+      )
+    assertThrows<ApiException> {
+      diagnostics.observe(AiDiagnosticStage.CALENDAR_CREATE) {
+        agent.run(setOf(candidate)) { 45000 }
+      }
+    }
+    val run = diagnostics.snapshot().single()
+    assertEquals(0, run.toolCalls)
+    assertEquals(AiDiagnosticReason.UNKNOWN_CANDIDATE, run.events.last().reason)
+    assertEquals(AiDiagnosticSite.TOOL_PROTOCOL, run.events.last().site)
+  }
+
+  @Test
   fun `three tool rounds reject a fourth provider turn`() {
     var calls = 0
     val arguments = "{\"candidateIds\":[\"$candidate\"]}".encodeToByteArray()

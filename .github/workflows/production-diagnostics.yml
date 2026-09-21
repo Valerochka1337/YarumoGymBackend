@@ -1,6 +1,13 @@
 name: Production diagnostics
 on:
   workflow_dispatch:
+    inputs:
+      hours:
+        description: 'Look back over the last 2, 6 or 24 hours (bounded log samples)'
+        type: choice
+        options: ['2', '6', '24']
+        default: '6'
+        required: true
 permissions:
   contents: read
 jobs:
@@ -16,11 +23,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Read sanitized production diagnostics
         env:
+          DIAGNOSTIC_HOURS: ${{ inputs.hours }}
           DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
         shell: bash
         run: |
           set -euo pipefail
+          case "$DIAGNOSTIC_HOURS" in 2|6|24) ;; *) exit 2 ;; esac
           umask 077
           diagnostic_dir=$(mktemp -d)
           cleanup() { rm -f "$diagnostic_dir/key" "$diagnostic_dir/known_hosts"; rmdir "$diagnostic_dir"; }
@@ -30,4 +39,4 @@ jobs:
           ssh -i "$diagnostic_dir/key" -o IdentitiesOnly=yes -o BatchMode=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$diagnostic_dir/known_hosts" \
             -o ConnectTimeout=10 valerochka@62.84.122.55 \
-            'sudo -n python3 -' < .github/diagnostics/production.py
+            "sudo -n python3 - $DIAGNOSTIC_HOURS" < .github/diagnostics/production.py

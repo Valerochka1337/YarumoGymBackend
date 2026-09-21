@@ -18,6 +18,16 @@ internal class CalendarPlannerAgent(
     var calls = 0
     var bytes = 0
     require(maxRounds in 1..20 && maxCalls in 1..40)
+    diagnostics?.event(
+      AiDiagnosticSite.AGENT_LOOP,
+      AiDiagnosticReason.ROUND_BUDGET,
+      actual = maxRounds.toLong(),
+    )
+    diagnostics?.event(
+      AiDiagnosticSite.AGENT_LOOP,
+      AiDiagnosticReason.TOOL_CALL_BUDGET,
+      actual = maxCalls.toLong(),
+    )
     repeat(maxRounds) {
       if (deadlineMillis() <= 0) throw aiError("ai_timeout")
       diagnostics?.recordRound()
@@ -26,27 +36,53 @@ internal class CalendarPlannerAgent(
           ?: turn(transcript.toList())
       if (deadlineMillis() <= 0) throw aiError("ai_timeout")
       next.final?.let { final ->
-        if (next.calls.isNotEmpty()) throw aiError("ai_invalid_response")
+        if (next.calls.isNotEmpty()) reject(AiDiagnosticReason.FINAL_WITH_TOOLS)
         return final
       }
-      if (next.calls.isEmpty()) throw aiError("ai_invalid_response")
+      if (next.calls.isEmpty()) reject(AiDiagnosticReason.EMPTY_TURN)
       if (next.calls.map { it.id }.distinct().size != next.calls.size)
-        throw aiError("ai_invalid_response")
+        reject(AiDiagnosticReason.DUPLICATE_TOOL_CALL)
       next.calls.forEach { call ->
-        if (++calls > maxCalls) throw aiError("ai_invalid_response")
-        PlannerToolProtocol.validate(call, candidateIds, patternIds)
-        if (deadlineMillis() <= 0) throw aiError("ai_timeout")
-        diagnostics?.recordToolCall()
-        val result =
-          diagnostics?.observe(AiDiagnosticStage.PLANNER_TOOL) { tool(call) } ?: tool(call)
-        if (deadlineMillis() <= 0) throw aiError("ai_timeout")
-        // The aggregate is checked before retaining either half of the exchange.
-        if (result.size !in 1..16_384 || bytes + call.bytes.size + result.size > maxAttemptBytes)
-          throw aiError("ai_invalid_response")
-        bytes += call.bytes.size + result.size
-        transcript += PlannerToolExchange(call, result)
+        val execute = {
+          if (++calls > maxCalls)
+            reject(AiDiagnosticReason.TOOL_CALL_LIMIT, calls.toLong(), maxCalls.toLong())
+          PlannerToolProtocol.validate(call, candidateIds, patternIds) { reason ->
+            diagnostics?.event(AiDiagnosticSite.TOOL_PROTOCOL, reason)
+          }
+          if (deadlineMillis() <= 0) throw aiError("ai_timeout")
+          diagnostics?.recordToolCall()
+          diagnostics?.event(AiDiagnosticSite.TOOL_PROTOCOL, AiDiagnosticReason.TOOL_STARTED)
+          val result =
+            diagnostics?.observe(AiDiagnosticStage.PLANNER_TOOL) { tool(call) } ?: tool(call)
+          diagnostics?.event(
+            AiDiagnosticSite.TOOL_PROTOCOL,
+            AiDiagnosticReason.TOOL_COMPLETED,
+            actual = result.size.toLong(),
+          )
+          if (deadlineMillis() <= 0) throw aiError("ai_timeout")
+          if (result.size !in 1..16_384)
+            reject(AiDiagnosticReason.TOOL_RESULT_SIZE, result.size.toLong(), 16_384)
+          if (bytes.toLong() + call.bytes.size + result.size > maxAttemptBytes)
+            reject(
+              AiDiagnosticReason.TRANSCRIPT_SIZE,
+              bytes.toLong() + call.bytes.size + result.size,
+              maxAttemptBytes.toLong(),
+            )
+          bytes += call.bytes.size + result.size
+          transcript += PlannerToolExchange(call, result)
+        }
+        if (diagnostics != null) diagnostics.withTool(call.name, execute) else execute()
       }
     }
+    reject(AiDiagnosticReason.ROUND_LIMIT, maxRounds.toLong(), maxRounds.toLong())
+  }
+
+  private fun reject(
+    reason: AiDiagnosticReason,
+    actual: Long? = null,
+    maximum: Long? = null,
+  ): Nothing {
+    diagnostics?.event(AiDiagnosticSite.AGENT_LOOP, reason, actual = actual, maximum = maximum)
     throw aiError("ai_invalid_response")
   }
 }
