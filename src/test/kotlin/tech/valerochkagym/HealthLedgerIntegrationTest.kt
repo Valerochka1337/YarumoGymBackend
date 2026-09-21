@@ -22,7 +22,10 @@ import tech.valerochkagym.utils.Crypto
 import tools.jackson.databind.*
 
 @Testcontainers
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(
+  webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+  properties = ["gym.coach-runs.enabled=false", "gym.calendar-jobs.enabled=false"],
+)
 class HealthLedgerIntegrationTest {
   companion object {
     @Container

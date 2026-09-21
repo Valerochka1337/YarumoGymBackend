@@ -36,6 +36,7 @@ import tools.jackson.databind.ObjectMapper
 @SpringBootTest(
   webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
   classes = [Application::class],
+  properties = ["gym.coach-runs.enabled=false", "gym.calendar-jobs.enabled=false"],
 )
 class TrainingProposalIntegrationTest {
   companion object {
