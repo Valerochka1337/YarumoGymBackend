@@ -26,20 +26,33 @@ object PlannerToolProtocol {
     val patternId: String? = null,
   )
 
-  fun validate(call: Call, candidates: Set<String>, patternIds: Set<String> = emptySet()) {
-    if (
-      !call.id.matches(Regex("[A-Za-z0-9_-]{1,128}")) ||
-        call.name !in names ||
-        call.bytes.size !in 1..16_384 ||
+  fun validate(
+    call: Call,
+    candidates: Set<String>,
+    patternIds: Set<String> = emptySet(),
+    onRejected: (AiDiagnosticReason) -> Unit = {},
+  ) {
+    val reason =
+      when {
+        !call.id.matches(Regex("[A-Za-z0-9_-]{1,128}")) -> AiDiagnosticReason.INVALID_TOOL_ID
+        call.name !in names -> AiDiagnosticReason.UNKNOWN_TOOL
+        call.bytes.size !in 1..16_384 -> AiDiagnosticReason.TOOL_ARGUMENT_SIZE
         call.candidateIds.size > maxCandidateIds ||
-        call.candidateIds.distinct().size != call.candidateIds.size ||
-        call.candidateIds.any { it !in candidates } ||
-        (call.name == "get_strength_skeleton" &&
-          (call.patternId == null || call.patternId !in patternIds)) ||
+          call.candidateIds.distinct().size != call.candidateIds.size ->
+          AiDiagnosticReason.INVALID_CANDIDATE_IDS
+        call.candidateIds.any { it !in candidates } -> AiDiagnosticReason.UNKNOWN_CANDIDATE
+        call.name == "get_strength_skeleton" &&
+          (call.patternId == null || call.patternId !in patternIds) ->
+          AiDiagnosticReason.UNKNOWN_PATTERN
         (call.name != "get_strength_skeleton" && call.patternId != null) ||
-        (call.name == "validate_and_finalize_plan" && call.plan == null) ||
-        (call.name != "validate_and_finalize_plan" && call.plan != null)
-    )
+          (call.name == "validate_and_finalize_plan" && call.plan == null) ||
+          (call.name != "validate_and_finalize_plan" && call.plan != null) ->
+          AiDiagnosticReason.INVALID_TOOL_ARGUMENTS
+        else -> null
+      }
+    if (reason != null) {
+      onRejected(reason)
       throw aiError("ai_invalid_response")
+    }
   }
 }

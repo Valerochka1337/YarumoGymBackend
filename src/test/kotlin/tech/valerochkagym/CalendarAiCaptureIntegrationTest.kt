@@ -2098,6 +2098,20 @@ class CalendarAiCaptureIntegrationTest {
     assertEquals(2, provider.calls)
     assertEquals("NONE", explanations.read(owner, response.proposal.proposalId).shortfallReason)
     assertEquals(1, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
+    val diagnostic = diagnostics.snapshot().last()
+    assertEquals(tech.valerochkagym.service.ai.AiDiagnosticOutcome.SUCCESS, diagnostic.outcome)
+    val rejected =
+      diagnostic.events.single {
+        it.reason == tech.valerochkagym.service.ai.AiDiagnosticReason.DURATION_TOO_SHORT
+      }
+    assertEquals(45L, rejected.actual)
+    assertEquals(2160L, rejected.minimum)
+    assertEquals(2700L, rejected.maximum)
+    assertTrue(
+      diagnostic.events.any {
+        it.reason == tech.valerochkagym.service.ai.AiDiagnosticReason.PLAN_ACCEPTED
+      }
+    )
   }
 
   @Test

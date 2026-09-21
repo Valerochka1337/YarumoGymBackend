@@ -49,15 +49,46 @@ class AiDraftValidator(private val json: ObjectMapper) {
     return raw
   }
 
-  fun validatePlanner(raw: JsonNode): JsonNode {
+  fun validatePlanner(raw: JsonNode, onMismatch: (String) -> Unit = {}): JsonNode {
     val schema =
       javaClass.getResourceAsStream("/ai/calendar-planner-output-v3.json")!!.use(json::readTree)
     // Ignore only obsolete explanation metadata, including malformed or contradictory codes.
     // The remaining plan and envelope still have to match the strict provider schema.
     val plan = raw.deepCopy()
     (plan["result"] as? ObjectNode)?.remove("rationale")
-    if (!matches(plan, schema, schema)) throw aiError("ai_invalid_response")
+    if (!matches(plan, schema, schema)) {
+      onMismatch(mismatchPath(plan, schema, schema, ""))
+      throw aiError("ai_invalid_response")
+    }
     return plan
+  }
+
+  /** Paths contain schema-owned keys and bounded array indexes, never supplied property names. */
+  private fun mismatchPath(n: JsonNode, s: JsonNode, root: JsonNode, path: String): String {
+    s["${'$'}ref"]?.let {
+      return mismatchPath(n, resolve(it, root), root, path)
+    }
+    if (n.isObject) {
+      val props = s["properties"] ?: return path
+      for (required in s["required"]?.toList().orEmpty()) {
+        val key = required.asString()
+        if (!n.has(key)) return if (path.isEmpty()) key else "$path.$key"
+      }
+      for (property in n.properties()) {
+        if (!props.has(property.key)) return path
+        if (!matches(property.value, props[property.key], root)) {
+          val next = if (path.isEmpty()) property.key else "$path.${property.key}"
+          return mismatchPath(property.value, props[property.key], root, next)
+        }
+      }
+    }
+    if (n.isArray && s["items"] != null) {
+      n.toList().take(1000).forEachIndexed { index, item ->
+        if (!matches(item, s["items"], root))
+          return mismatchPath(item, s["items"], root, "$path[$index]")
+      }
+    }
+    return path
   }
 
   private fun matches(n: JsonNode, s: JsonNode, root: JsonNode = s): Boolean {

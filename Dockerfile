@@ -1,5 +1,8 @@
 FROM eclipse-temurin:21-jre-alpine@sha256:974b08960c5d96694c780e65b2d5705268ab1e1ca1a0dd0caf4ba6c3fe34d699
 RUN apk add --no-cache curl && addgroup -S gym && adduser -S -G gym gym
+ARG BUILD_REVISION=unknown
+ENV BUILD_REVISION=${BUILD_REVISION}
+LABEL org.opencontainers.image.revision=${BUILD_REVISION}
 WORKDIR /app
 COPY --chown=gym:gym build/libs/app.jar app.jar
 USER gym

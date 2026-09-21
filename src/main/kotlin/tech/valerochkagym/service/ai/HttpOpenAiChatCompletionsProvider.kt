@@ -316,8 +316,16 @@ class HttpOpenAiChatCompletionsProvider(
       if (parsed.map { it.id }.distinct().size != parsed.size) throw aiError("ai_invalid_response")
       return PlannerTurn(calls = parsed)
     } catch (e: ApiException) {
+      diagnostics.event(
+        AiDiagnosticSite.PROVIDER_RESPONSE,
+        AiDiagnosticReason.INVALID_PROVIDER_RESPONSE,
+      )
       throw e
     } catch (_: Exception) {
+      diagnostics.event(
+        AiDiagnosticSite.PROVIDER_RESPONSE,
+        AiDiagnosticReason.INVALID_PROVIDER_RESPONSE,
+      )
       throw aiError("ai_invalid_response")
     }
   }

@@ -300,3 +300,28 @@ test('AI diagnostics shows an explicit empty state',async t=>{
   await until(()=>ui.w.document.getElementById('ai-diagnostics').textContent.includes('Нет диагностических запусков'));
   assert.equal(ui.requests.filter(request=>request.path.endsWith('/ai-diagnostics')).every(request=>request.method==='GET'),true);
 });
+
+test('diagnostic events explain recovered rejection and copied reports omit untrusted fields', async t=>{
+  const now=new Date().toISOString();
+  const event={site:'PLAN_VALIDATION',reason:'DURATION_TOO_SHORT',round:2,tool:'VALIDATE_AND_FINALIZE_PLAN',actual:45,minimum:2160,maximum:2700,field:'result.exercises[0].plannedSets[0].reps',arguments:'secret-arguments'};
+  const data={generatedAt:now,process:{id:'00000000-0000-4000-8000-000000000000',startedAt:now,revision:'a'.repeat(40)},
+    retention:{maxRuns:200,maxAgeHours:24},database:{status:'OK'},calendarQueue:{status:'OK'},
+    runs:[{id:'00000000-0000-4000-8000-000000000001',startedAt:now,outcome:'SUCCESS',failureCategory:'NONE',events:[event,{...event,reason:'secret-reason'},{...event,field:'result.secret-field',actual:-1,maximum:Infinity}],droppedEvents:7}]};
+  const ui=await setup({'GET /admin/api/ai-diagnostics':()=>({data})});t.after(()=>ui.dom.window.close());
+  let copied='';Object.defineProperty(ui.w.navigator,'clipboard',{value:{writeText:async value=>{copied=value;}}});
+  ui.click('ИИ · Диагностика');
+  await until(()=>ui.w.document.getElementById('ai-diagnostics').textContent.includes('DURATION_TOO_SHORT'));
+  const root=ui.w.document.getElementById('ai-diagnostics');
+  assert.ok(root.textContent.includes('минимум 2160'));
+  assert.ok(root.textContent.includes('Ранних событий пропущено: 7'));
+  assert.ok(root.textContent.includes('a'.repeat(40)));
+  ui.click('Скопировать отчёт');await until(()=>copied);
+  const report=JSON.parse(copied);
+  assert.equal(report.runs[0].outcome,'SUCCESS');
+  assert.equal(report.runs[0].events.length,2);
+  assert.equal(report.runs[0].events[0].field,event.field);
+  assert.equal(report.runs[0].events[1].field,null);
+  assert.equal(report.runs[0].events[1].actual,null);
+  assert.equal(copied.includes('secret'),false);
+  assert.equal(ui.errors.length,0);
+});

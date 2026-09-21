@@ -14,6 +14,92 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 
 class AiDiagnosticsTest {
+  @Test
+  fun `events retain rejected checks after recovery without marking the run failed`() {
+    val diagnostics = AiDiagnostics(revision = "a".repeat(40))
+    diagnostics.observe(AiDiagnosticStage.CALENDAR_CREATE) {
+      diagnostics.recordRound()
+      diagnostics.withTool("validate_and_finalize_plan") {
+        diagnostics.event(
+          AiDiagnosticSite.PLAN_VALIDATION,
+          AiDiagnosticReason.DURATION_TOO_SHORT,
+          actual = 45,
+          minimum = 2160,
+          maximum = 2700,
+        )
+        diagnostics.event(AiDiagnosticSite.PLAN_VALIDATION, AiDiagnosticReason.PLAN_REJECTED)
+      }
+      diagnostics.recordRound()
+      diagnostics.event(AiDiagnosticSite.PLAN_VALIDATION, AiDiagnosticReason.PLAN_ACCEPTED)
+    }
+    val run = diagnostics.snapshot().single()
+    assertEquals(AiDiagnosticOutcome.SUCCESS, run.outcome)
+    assertEquals(AiDiagnosticFailureCategory.NONE, run.failureCategory)
+    assertEquals(AiDiagnosticTool.VALIDATE_AND_FINALIZE_PLAN, run.events.first().tool)
+    assertEquals(1, run.events.first().round)
+    assertEquals(2160L, run.events.first().minimum)
+    assertNull(run.events.last().tool)
+    assertEquals("a".repeat(40), diagnostics.process.revision)
+  }
+
+  @Test
+  fun `events are bounded immutable and cannot contain provider controlled fields`() {
+    val diagnostics = AiDiagnostics(revision = "secret")
+    diagnostics.observe(AiDiagnosticStage.CALENDAR_CREATE) {
+      repeat(70) {
+        diagnostics.withTool("secret-tool") {
+          diagnostics.event(
+            AiDiagnosticSite.PLAN_SCHEMA,
+            AiDiagnosticReason.SCHEMA_MISMATCH,
+            actual = -1,
+            maximum = Long.MAX_VALUE,
+            field = "result.secret",
+          )
+        }
+      }
+      val before = diagnostics.snapshot().single()
+      diagnostics.event(
+        AiDiagnosticSite.PLAN_SCHEMA,
+        AiDiagnosticReason.SCHEMA_MISMATCH,
+        field = "result.exercises[2].plannedSets[1].reps",
+      )
+      assertEquals(6, before.droppedEvents)
+      assertTrue(before.events.all { it.field == null && it.actual == null && it.maximum == null })
+      assertThrows<UnsupportedOperationException> { (before.events as MutableList).clear() }
+    }
+    val run = diagnostics.snapshot().single()
+    assertEquals(64, run.events.size)
+    assertEquals(7, run.droppedEvents)
+    assertEquals("result.exercises[2].plannedSets[1].reps", run.events.last().field)
+    assertFalse(run.toString().contains("secret"))
+    assertEquals("unknown", diagnostics.process.revision)
+  }
+
+  @Test
+  fun `service log contains structural failure and omits model and exception content`() {
+    val logger =
+      org.slf4j.LoggerFactory.getLogger(AiDiagnostics::class.java) as ch.qos.logback.classic.Logger
+    val appender = ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>()
+    appender.start()
+    logger.addAppender(appender)
+    try {
+      val diagnostics = AiDiagnostics()
+      assertThrows<tech.valerochkagym.controller.advice.ApiException> {
+        diagnostics.observe(AiDiagnosticStage.CALENDAR_CREATE, "secret-model") {
+          diagnostics.reject(AiDiagnosticSite.FINALIZATION, AiDiagnosticReason.FINAL_PLAN_MISMATCH)
+        }
+      }
+      val line = appender.list.single().formattedMessage
+      assertTrue(line.startsWith("AI_DIAGNOSTIC "))
+      assertTrue(line.contains("FINAL_PLAN_MISMATCH"))
+      assertFalse(line.contains("secret-model"))
+      assertTrue(line.contains(diagnostics.snapshot().single().id))
+    } finally {
+      logger.detachAppender(appender)
+      appender.stop()
+    }
+  }
+
   private class MutableClock(private var now: Instant) : Clock() {
     override fun instant(): Instant = now
 

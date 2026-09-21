@@ -54,6 +54,7 @@ class AiDiagnosticsController(
       database,
       queue,
       diagnostics.snapshot(),
+      diagnostics.process,
     )
   }
 }
