@@ -14,11 +14,14 @@ import java.util.concurrent.TimeUnit
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.ValueSource
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.context.TestConfiguration
@@ -1563,9 +1566,147 @@ class CalendarAiCaptureIntegrationTest {
     )
   }
 
+  @ParameterizedTest
+  @ValueSource(ints = [0, 1])
+  fun `identical independent jobs each produce a visible eligible proposal`(approvedIndex: Int) {
+    val owner = owner()
+    val exercise = exercise(owner)
+    provider.handler = { providerResponse(exercise) }
+    val firstRaw = jobRequest()
+    val secondRequest = json.readTree(firstRaw) as ObjectNode
+    secondRequest.put("requestId", UUID.randomUUID().toString())
+    val secondRaw = json.writeValueAsBytes(secondRequest)
+    val first = jobs.submit(owner, firstRaw)
+    testClock.currentTime++
+    val second = jobs.submit(owner, secondRaw)
+
+    assertEquals("QUEUED", first.state)
+    assertEquals("QUEUED", second.state)
+    assertNotEquals(first.requestId, second.requestId)
+    assertEquals(first, jobs.submit(owner, firstRaw))
+    assertEquals(2, db.queryForObject("SELECT count(*) FROM calendar_draft_jobs", Int::class.java))
+    assertEquals(0, provider.calls)
+
+    jobs.runNext()
+    val firstReady = jobs.status(owner, UUID.fromString(first.requestId))
+    assertEquals("READY", firstReady.state)
+    assertEquals("QUEUED", jobs.status(owner, UUID.fromString(second.requestId)).state)
+    jobs.runNext()
+    val secondReady = jobs.status(owner, UUID.fromString(second.requestId))
+    assertEquals("READY", secondReady.state)
+    assertEquals(firstReady, jobs.submit(owner, firstRaw))
+    assertEquals(secondReady, jobs.submit(owner, secondRaw))
+    jobs.runNext()
+    assertEquals(2, provider.calls)
+    val results = listOf(firstReady.result!!, secondReady.result!!)
+    assertEquals(listOf(first.requestId, second.requestId), results.map { it.requestId })
+    val proposalIds = results.map { it.proposal.proposalId }.toSet()
+    assertEquals(2, proposalIds.size)
+    assertEquals(proposalIds, proposals.list(owner, 50, null).items.map { it.proposalId }.toSet())
+    results.forEach { assertEquals(it.proposal, proposals.detail(owner, it.proposal.proposalId)) }
+
+    // Each parameter has a fresh owner/context, so neither approval bypasses revision validation.
+    val proposal = results[approvedIndex].proposal
+    val request =
+      tech.valerochkagym.controller.model.ApprovalRequest(
+        UUID.randomUUID().toString(),
+        proposal.currentVersion,
+        proposal.snapshot.draft,
+      )
+    val approved =
+      proposals.approve(
+        owner,
+        proposal.proposalId,
+        json.writeValueAsBytes(request),
+        "0".repeat(64),
+        request,
+      )
+    assertEquals(proposal.proposalId, approved.proposalId)
+    assertEquals(18, approved.revision)
+  }
+
+  @Test
+  fun `new ordinary job stays queued while an earlier running job publishes`() {
+    val owner = owner()
+    val exercise = exercise(owner)
+    val first = jobs.submit(owner, jobRequest())
+    val secondRaw = jobRequest()
+    val secondId = UUID.fromString(json.readTree(secondRaw)["requestId"].asString())
+    provider.handler = {
+      provider.handler = { providerResponse(exercise) }
+      assertEquals("RUNNING", jobs.status(owner, UUID.fromString(first.requestId)).state)
+      assertEquals("QUEUED", jobs.submit(owner, secondRaw).state)
+      assertEquals("RUNNING", jobs.status(owner, UUID.fromString(first.requestId)).state)
+      providerResponse(exercise)
+    }
+
+    jobs.runNext()
+    val firstReady = jobs.status(owner, UUID.fromString(first.requestId))
+    assertEquals("READY", firstReady.state)
+    assertEquals("QUEUED", jobs.status(owner, secondId).state)
+    assertEquals(1, provider.calls)
+    jobs.runNext()
+    val secondReady = jobs.status(owner, secondId)
+    assertEquals("READY", secondReady.state)
+    assertEquals(firstReady, jobs.status(owner, UUID.fromString(first.requestId)))
+    assertNotEquals(
+      firstReady.result!!.proposal.proposalId,
+      secondReady.result!!.proposal.proposalId,
+    )
+    assertEquals(2, provider.calls)
+  }
+
+  @Test
+  fun `later job completing first does not overwrite an earlier running result`() {
+    val owner = owner()
+    val exercise = exercise(owner)
+    val first = jobs.submit(owner, jobRequest())
+    testClock.currentTime++
+    val second = jobs.submit(owner, jobRequest())
+    provider.handler = {
+      provider.handler = { providerResponse(exercise) }
+      jobs.runNext()
+      assertEquals("READY", jobs.status(owner, UUID.fromString(second.requestId)).state)
+      assertEquals("RUNNING", jobs.status(owner, UUID.fromString(first.requestId)).state)
+      providerResponse(exercise)
+    }
+
+    jobs.runNext()
+    val firstReady = jobs.status(owner, UUID.fromString(first.requestId))
+    val secondReady = jobs.status(owner, UUID.fromString(second.requestId))
+    assertEquals("READY", firstReady.state)
+    assertEquals("READY", secondReady.state)
+    assertEquals(first.requestId, firstReady.result!!.requestId)
+    assertEquals(second.requestId, secondReady.result!!.requestId)
+    assertNotEquals(firstReady.result.proposal.proposalId, secondReady.result.proposal.proposalId)
+    assertEquals(2, provider.calls)
+    assertEquals(2, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
+  }
+
+  @Test
+  fun `failed job leaves another independent queued job able to finish`() {
+    val owner = owner()
+    val exercise = exercise(owner)
+    val first = jobs.submit(owner, jobRequest())
+    testClock.currentTime++
+    val second = jobs.submit(owner, jobRequest())
+    provider.handler = { throw aiError("ai_invalid_response") }
+    jobs.runNext()
+    val failed = jobs.status(owner, UUID.fromString(first.requestId))
+    assertEquals("FAILED", failed.state)
+    assertEquals("QUEUED", jobs.status(owner, UUID.fromString(second.requestId)).state)
+
+    provider.handler = { providerResponse(exercise) }
+    jobs.runNext()
+    assertEquals("READY", jobs.status(owner, UUID.fromString(second.requestId)).state)
+    assertEquals(failed, jobs.status(owner, UUID.fromString(first.requestId)))
+    assertEquals(1, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
+  }
+
   @Test
   fun `out of order replacement lineage tombstones never restore old requests`() {
     val owner = owner()
+    val unrelated = jobs.submit(owner, jobRequest())
     val a = rawRequest()
     val b = rawRequest()
     val aId = json.readTree(a)["requestId"].asString()
@@ -1576,8 +1717,9 @@ class CalendarAiCaptureIntegrationTest {
     assertEquals("SUPERSEDED", jobs.submit(owner, a).state)
     assertEquals("SUPERSEDED", jobs.submit(owner, b).state)
     assertEquals("QUEUED", jobs.status(owner, UUID.fromString(current.requestId)).state)
+    assertEquals(unrelated, jobs.status(owner, UUID.fromString(unrelated.requestId)))
     assertEquals(
-      1,
+      2,
       db.queryForObject(
         "SELECT count(*) FROM calendar_draft_jobs WHERE current_job",
         Int::class.java,
@@ -1621,28 +1763,44 @@ class CalendarAiCaptureIntegrationTest {
   }
 
   @Test
-  fun `late provider result cannot publish after changing conditions`() {
+  fun `explicit replacement fences a late provider result and leaves another queued job intact`() {
     val owner = owner()
     val exercise = exercise(owner)
     val old = jobs.submit(owner, rawRequest())
+    testClock.currentTime++
+    val unrelated = jobs.submit(owner, jobRequest())
+    val replacementRaw = jobRequest(listOf(old.requestId))
+    val replacementId = UUID.fromString(json.readTree(replacementRaw)["requestId"].asString())
     provider.handler = {
-      jobs.submit(owner, rawRequest())
+      jobs.submit(owner, replacementRaw)
       providerResponse(exercise)
     }
     jobs.runNext()
     assertEquals("SUPERSEDED", jobs.status(owner, UUID.fromString(old.requestId)).state)
     assertEquals(0, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
+    assertEquals(unrelated, jobs.status(owner, UUID.fromString(unrelated.requestId)))
+    assertEquals("QUEUED", jobs.status(owner, replacementId).state)
+    provider.handler = { providerResponse(exercise) }
+    repeat(2) { jobs.runNext() }
+    assertEquals("READY", jobs.status(owner, UUID.fromString(unrelated.requestId)).state)
+    assertEquals("READY", jobs.status(owner, replacementId).state)
+    assertEquals(2, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
   }
 
   @Test
-  fun `ready superseded proposal remains readable but cannot be approved`() {
+  fun `explicit singular replacement preserves another ready job and prevents replaced approval`() {
     val owner = owner()
     val exercise = exercise(owner)
     provider.handler = { providerResponse(exercise) }
     val job = jobs.submit(owner, rawRequest())
     jobs.runNext()
     val ready = jobs.status(owner, UUID.fromString(job.requestId)).result!!
-    jobs.submit(owner, rawRequest())
+    val unrelated = jobs.submit(owner, jobRequest())
+    jobs.runNext()
+    val unrelatedReady = jobs.status(owner, UUID.fromString(unrelated.requestId))
+    val replacement = json.readTree(rawRequest()) as ObjectNode
+    replacement.put("replacesRequestId", job.requestId)
+    jobs.submit(owner, json.writeValueAsBytes(replacement))
     val request =
       tech.valerochkagym.controller.model.ApprovalRequest(
         UUID.randomUUID().toString(),
@@ -1662,8 +1820,11 @@ class CalendarAiCaptureIntegrationTest {
         }
         .code,
     )
-    assertEquals(1, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
+    assertEquals(2, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
     assertEquals("SUPERSEDED", jobs.status(owner, UUID.fromString(job.requestId)).state)
+    assertEquals(ready.proposal, proposals.detail(owner, ready.proposal.proposalId))
+    assertEquals("READY", unrelatedReady.state)
+    assertEquals(unrelatedReady, jobs.status(owner, UUID.fromString(unrelated.requestId)))
   }
 
   @Test
@@ -2150,6 +2311,13 @@ class CalendarAiCaptureIntegrationTest {
     assertEquals(2, provider.calls)
     assertEquals(2610, explanation.estimatedSeconds.toInt())
     assertEquals("NONE", explanation.shortfallReason)
+  }
+
+  private fun jobRequest(replacesRequestIds: List<String> = emptyList()): ByteArray {
+    val request = json.readTree(rawRequest()) as ObjectNode
+    val replacements = request.putArray("replacesRequestIds")
+    replacesRequestIds.forEach { replacements.add(it) }
+    return json.writeValueAsBytes(request)
   }
 
   private fun rawRequest(

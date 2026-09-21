@@ -183,10 +183,6 @@ class CalendarDraftJobService(
           request.expectedRevision,
           request.expectedCatalogRevision,
         )
-        jdbc.update(
-          "UPDATE calendar_draft_jobs SET current_job=false,state='SUPERSEDED' WHERE owner_id=? AND current_job",
-          identity.userId,
-        )
       }
       val state =
         when {

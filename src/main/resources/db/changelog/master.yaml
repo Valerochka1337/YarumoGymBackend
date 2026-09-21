@@ -98,3 +98,6 @@ databaseChangeLog:
   - include:
       file: 032-planner-exercise-accents.sql
       relativeToChangelogFile: true
+  - include:
+      file: 033-concurrent-calendar-draft-jobs.sql
+      relativeToChangelogFile: true
