@@ -241,6 +241,7 @@ test('AI diagnostics renders only sanitized fields, filters locally, and copies 
   };
   const ui=await setup({'GET /admin/api/ai-diagnostics':()=>({data:diagnostics})});
   t.after(()=>ui.dom.window.close());
+  ui.w.Date.now=()=>Date.parse(diagnostics.generatedAt);
   let copied='';Object.defineProperty(ui.w.navigator,'clipboard',{value:{writeText:async value=>{copied=value;}}});
   ui.click('ИИ · Диагностика');
   await until(()=>ui.w.document.getElementById('ai-diagnostics').textContent.includes('Ограничения диагностики'));

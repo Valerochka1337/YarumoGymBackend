@@ -85,14 +85,18 @@ class AiDiagnosticsTest {
       val ids =
         listOf(AiDiagnosticStage.CALENDAR_JOB, AiDiagnosticStage.CALENDAR_REFINE)
           .map { stage ->
-            pool.submit<String> {
-              diagnostics.observe(stage) {}
-              diagnostics.snapshot().last { it.stages.first().stage == stage }.id
+            pool.submit<List<String>> {
+              (1..50).map {
+                diagnostics.observe(stage) {}
+                val snapshot = diagnostics.snapshot()
+                assertTrue(snapshot.all { it.stages.isNotEmpty() })
+                snapshot.last { it.stages.first().stage == stage }.id
+              }
             }
           }
-          .map { it.get() }
+          .flatMap { it.get() }
           .toSet()
-      assertEquals(2, ids.size)
+      assertEquals(100, ids.size)
     } finally {
       pool.shutdownNow()
     }

@@ -68,16 +68,14 @@ class AiDiagnostics(private val clock: Clock = Clock.systemUTC()) {
   fun open(stage: AiDiagnosticStage, model: String? = null): Scope {
     val previous = current.get()
     val now = clock.instant()
-    val run =
-      synchronized(lock) {
-        purge(now)
+    return synchronized(lock) {
+      purge(now)
+      val run =
         previous
           ?: RunEntry(UUID.randomUUID(), now, safeModel(model)).also {
             runs.addLast(it)
             trim()
           }
-      }
-    synchronized(lock) {
       if (run.model == null) run.model = safeModel(model)
       val index =
         if (run.stages.size < maxStages) {
@@ -85,7 +83,7 @@ class AiDiagnostics(private val clock: Clock = Clock.systemUTC()) {
           run.stages.lastIndex
         } else -1
       current.set(run)
-      return Scope(run, previous, index)
+      Scope(run, previous, index)
     }
   }
 
