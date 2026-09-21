@@ -432,14 +432,17 @@ plus optional `replacesRequestId: UUID?` and `replacesRequestIds: UUID[]` (at mo
 The response is HTTP 202 `{requestId,state,errorCode,result}`. `result`, when present,
 is the existing typed `CalendarDraftResponse`; no program or calendar event is created.
 The exact same request bytes and UUID must be retried after a lost acknowledgement;
-changing bytes for a known UUID returns `ai_request_conflict`. A new intentional
-calculation uses a new UUID and includes all locally superseded/in-flight ancestors.
-Do not truncate that lineage silently. Tombstones prevent reordered delivery from
-restoring older work, including cancellation before its POST arrives.
+changing bytes for a known UUID returns `ai_request_conflict`. Each new intentional
+calculation uses a fresh UUID and an empty replacement list. Multiple jobs for one owner
+remain independent, including identical conditions; accepting a job never implicitly
+supersedes the owner's other jobs. Explicit replacement lists supersede only the named
+jobs. Do not truncate an explicit replacement lineage silently. Tombstones prevent
+reordered delivery from restoring replaced work, including cancellation before its POST arrives.
 
 `GET /v1/ai/calendar-draft-jobs/{requestId}` returns the same response envelope.
 States are `QUEUED`, `RUNNING`, `READY`, `FAILED`, `SUPERSEDED`, `STALE`, `EXPIRED`.
-Only `READY` is current and eligible for the existing explicit proposal approval.
+Each non-superseded `READY` job is eligible for the existing explicit proposal approval
+while its context, date and session remain valid; multiple READY jobs may coexist.
 A prior typed result remains available on stale/superseded jobs for viewing; approval
 rejects it as `proposal_stale`. Status checks revalidate owner/catalog revision and date.
 `DELETE /v1/ai/calendar-draft-jobs/{requestId}` returns 204 and durably supersedes the
@@ -458,6 +461,10 @@ A lease fence and proposal/result transaction prohibit late publication and dupl
 proposals. The original synchronous calendar endpoint remains available for old clients.
 Clients should use bounded polling/WorkManager backoff; accepting a job does not promise
 immediate execution. Past requested dates become `EXPIRED`, never silently rescheduled.
+Migration 033 removes the single-current-job-per-owner unique index without deleting
+existing jobs. Deploy this server migration and behavior before the Android client that
+stores and displays multiple independent calculations. Existing clients' explicit
+replacement requests retain their previous behavior.
 
 ## Промпт Live Coach
 
