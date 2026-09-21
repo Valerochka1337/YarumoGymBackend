@@ -35,6 +35,8 @@ import tech.valerochkagym.service.ai.AiActionService
 import tech.valerochkagym.service.ai.AiContextReader
 import tech.valerochkagym.service.ai.AiProviderInput
 import tech.valerochkagym.service.ai.CalendarAiExecutionHooks
+import tech.valerochkagym.service.ai.PlannerConfigurationService
+import tech.valerochkagym.service.ai.PlannerExerciseAccent
 import tech.valerochkagym.service.ai.PlannerToolCallingProvider
 import tech.valerochkagym.service.ai.aiError
 import tech.valerochkagym.service.model.Identity
@@ -172,6 +174,7 @@ class CalendarAiCaptureIntegrationTest {
   lateinit var proposals: tech.valerochkagym.service.trainingproposal.TrainingProposalService
   @Autowired lateinit var testClock: MutableCalendarClock
   @Autowired lateinit var actions: AiActionService
+  @Autowired lateinit var plannerConfiguration: PlannerConfigurationService
   @Autowired lateinit var explanations: tech.valerochkagym.service.ai.PlannerExplanationStore
   @Autowired lateinit var contexts: AiContextReader
   @Autowired lateinit var provider: FakeProvider
@@ -188,6 +191,7 @@ class CalendarAiCaptureIntegrationTest {
       "TRUNCATE sessions,refresh_tokens,email_challenges,google_nonces,rate_limits,users,standard_records CASCADE"
     )
     db.update("UPDATE catalog_state SET revision=9,active=false")
+    db.update("DELETE FROM planner_configuration WHERE id=1")
     provider.calls = 0
     provider.available = true
     provider.repairRejected = false
@@ -1215,6 +1219,105 @@ class CalendarAiCaptureIntegrationTest {
         Int::class.java,
       ),
     )
+  }
+
+  @Test
+  fun `configured defaults and v2 normal override govern legacy generation agentic generation and refinement`() {
+    val owner = owner()
+    val excluded = UUID.randomUUID()
+    val allowed = UUID.randomUUID()
+    val fallback = UUID.randomUUID()
+    val gym = UUID.randomUUID()
+    db.update("UPDATE catalog_state SET active=true")
+    fun standard(id: UUID, equipment: List<String> = emptyList()) =
+      db.update(
+        "INSERT INTO standard_records(kind,id,revision,archived,payload) VALUES ('exercise',?,0,false,?::jsonb)",
+        id,
+        json.writeValueAsString(
+          mapOf(
+            "name" to id.toString(),
+            "type" to "STRENGTH",
+            "muscles" to listOf(mapOf("muscle" to "UPPER_CHEST", "contribution" to 100)),
+            "equipmentIds" to equipment,
+            "equipmentRequirementState" to "KNOWN",
+          )
+        ),
+      )
+    standard(excluded, equipment = listOf("bench"))
+    standard(allowed)
+    standard(fallback)
+    db.update(
+      "INSERT INTO standard_records(kind,id,revision,archived,payload) VALUES ('gym',?,9,false,?::jsonb)",
+      gym,
+      json.writeValueAsString(
+        mapOf(
+          "name" to "Hard exclusion gym",
+          "updatedAt" to capturedAt,
+          "exerciseIds" to emptyList<String>(),
+          "inventoryConfigured" to true,
+          "equipmentIds" to emptyList<String>(),
+        )
+      ),
+    )
+    plannerConfiguration.save(
+      plannerConfiguration
+        .snapshot()
+        .copy(defaultExerciseAccents = listOf(PlannerExerciseAccent(excluded.toString(), "NEVER")))
+    )
+    provider.handler = { input ->
+      assertFalse(input.context.contains(excluded.toString()))
+      providerResponse(allowed)
+    }
+    actions.calendar(owner, rawRequest())
+    assertEquals(1, provider.calls)
+
+    val accentId =
+      UUID.nameUUIDFromBytes(
+        "ValerochkaGym.planner-default-accents.v2:${owner.userId}".toByteArray(Charsets.UTF_8)
+      )
+    record(
+      owner,
+      "planner_exercise_accents",
+      accentId,
+      mapOf(
+        "schemaVersion" to 1,
+        "preferences" to
+          listOf(mapOf("exerciseId" to excluded.toString(), "preference" to "NORMAL")),
+      ),
+    )
+    provider.handler = { input ->
+      assertTrue(input.context.contains(excluded.toString()))
+      if (input.context.contains("planningContext")) refinedProviderResponse(excluded, allowed)
+      else providerResponse(excluded)
+    }
+    val created = actions.calendarV2(owner, rawRequest())
+    actions.refineCalendar(owner, created.proposal.proposalId, refinementRequest(UUID.randomUUID()))
+    assertEquals(3, provider.calls)
+
+    db.update(
+      "UPDATE records SET payload=?::jsonb WHERE user_id=? AND kind='planner_exercise_accents' AND id=?",
+      json.writeValueAsString(
+        mapOf(
+          "schemaVersion" to 1,
+          "preferences" to
+            listOf(mapOf("exerciseId" to excluded.toString(), "preference" to "MORE")),
+        )
+      ),
+      owner.userId,
+      accentId,
+    )
+    provider.handler = { input ->
+      assertFalse(input.context.contains(excluded.toString()))
+      if (input.context.contains("planningContext")) refinedProviderResponse(allowed, fallback)
+      else providerResponse(allowed)
+    }
+    val hardExcluded = actions.calendarV2(owner, rawRequest(gymIds = listOf(gym.toString())))
+    actions.refineCalendar(
+      owner,
+      hardExcluded.proposal.proposalId,
+      refinementRequest(UUID.randomUUID()),
+    )
+    assertEquals(5, provider.calls)
   }
 
   private fun owner(): Identity {

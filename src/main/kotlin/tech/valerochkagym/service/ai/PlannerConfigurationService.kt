@@ -1,9 +1,11 @@
 package tech.valerochkagym.service.ai
 
+import java.util.UUID
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import tech.valerochkagym.controller.advice.bad
+import tech.valerochkagym.repository.catalog.StandardRepository
 import tools.jackson.databind.ObjectMapper
 
 data class PlannerConfiguration(
@@ -17,7 +19,10 @@ data class PlannerConfiguration(
   val timeoutSeconds: Int = 45,
   val weightStepKg: Double = 2.5,
   val collections: List<PlannerPatternCollection> = PlannerPatternDefaults.collections(),
+  val defaultExerciseAccents: List<PlannerExerciseAccent> = emptyList(),
 )
+
+data class PlannerExerciseAccent(val exerciseId: String, val accent: String)
 
 data class PlannerPatternCollection(
   val id: String,
@@ -52,7 +57,11 @@ data class PlannerPatternSlot(
  * A single current server configuration. Published versions and lifecycle states are unnecessary.
  */
 @Service
-class PlannerConfigurationService(private val jdbc: JdbcTemplate, private val json: ObjectMapper) {
+class PlannerConfigurationService(
+  private val jdbc: JdbcTemplate,
+  private val json: ObjectMapper,
+  private val standard: StandardRepository,
+) {
   @Transactional
   fun snapshot(): PlannerConfiguration {
     jdbc.update(
@@ -69,15 +78,58 @@ class PlannerConfigurationService(private val jdbc: JdbcTemplate, private val js
 
   @Transactional
   fun save(value: PlannerConfiguration): PlannerConfiguration {
-    validate(value)
+    validateRawAccentList(value.defaultExerciseAccents)
+    val canonical = canonical(value)
+    val existingAccents = snapshot().defaultExerciseAccents.associate { it.exerciseId to it.accent }
+    validate(canonical, existingAccents)
     jdbc.update(
       "INSERT INTO planner_configuration (id, payload) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload",
-      json.writeValueAsString(value),
+      json.writeValueAsString(canonical),
     )
-    return value
+    return canonical
   }
 
-  private fun validate(value: PlannerConfiguration) {
+  private fun validateRawAccentList(accents: List<PlannerExerciseAccent>) {
+    if (accents.size > 1000) bad("Слишком много акцентов")
+    val ids =
+      accents.map { accent ->
+        val id = runCatching { UUID.fromString(accent.exerciseId).toString() }.getOrNull()
+        if (id != accent.exerciseId || accent.accent !in setOf("MORE", "NORMAL", "LESS", "NEVER"))
+          bad("Некорректный акцент упражнения")
+        id
+      }
+    if (ids.distinct().size != ids.size) bad("Акценты упражнений повторяются")
+  }
+
+  private fun canonical(value: PlannerConfiguration): PlannerConfiguration =
+    value.copy(
+      defaultExerciseAccents =
+        value.defaultExerciseAccents.filter { it.accent != "NORMAL" }.sortedBy { it.exerciseId }
+    )
+
+  private fun validate(
+    value: PlannerConfiguration,
+    retainedDefaultAccents: Map<String, String> = emptyMap(),
+  ) {
+    val liveStandardExercises =
+      standard
+        .findAllByOrderByKindAscIdAsc()
+        .filter { it.kind == "exercise" && !it.archived }
+        .mapTo(mutableSetOf()) { it.id.toString() }
+    val defaultIds =
+      value.defaultExerciseAccents.map { accent ->
+        val id = runCatching { UUID.fromString(accent.exerciseId).toString() }.getOrNull()
+        if (
+          id != accent.exerciseId ||
+            accent.accent !in setOf("MORE", "LESS", "NEVER") ||
+            (id !in liveStandardExercises && retainedDefaultAccents[id] != accent.accent)
+        )
+          bad("Акцент требует доступное стандартное упражнение")
+        id
+      }
+    if (defaultIds.distinct().size != defaultIds.size || defaultIds != defaultIds.sorted())
+      bad("Акценты должны быть канонически упорядочены")
+
     fun text(s: String, max: Int, empty: Boolean = false) =
       (empty || s.isNotBlank()) && s.length <= max && '\u0000' !in s
     fun id(s: String) = s.matches(Regex("[a-zA-Z0-9_-]{1,80}"))

@@ -38,6 +38,8 @@ data class CalendarCapturedContext(
   val detailDays: Int = 7,
   val strengthPriorities: Map<String, String> = emptyMap(),
   val plannerPreferences: Map<String, String> = emptyMap(),
+  /** null means the v2 aggregate has not been written; an empty map is authoritative. */
+  val plannerAccents: Map<String, String>? = null,
 )
 
 data class CalendarCandidateSource(
@@ -320,6 +322,39 @@ class AiContextReader(
               .toMap()
           }
           .orEmpty()
+      val plannerAccentRows =
+        jdbc.query(
+          "SELECT id,payload::text,octet_length(payload::text) FROM records WHERE user_id=? AND kind='planner_exercise_accents' AND NOT deleted ORDER BY id LIMIT 2",
+          { rs, _ ->
+            Triple(
+              rs.getObject(1, java.util.UUID::class.java),
+              json.readTree(rs.getString(2)),
+              rs.getInt(3),
+            )
+          },
+          identity.userId,
+        )
+      if (plannerAccentRows.size > 1) throw aiError("ai_context_too_large")
+      val plannerAccents =
+        plannerAccentRows.singleOrNull()?.let { (id, payload, bytes) ->
+          account("planner_exercise_accents", id, bytes)
+          payload["preferences"]
+            ?.toList()
+            .orEmpty()
+            .mapNotNull { row ->
+              val exerciseId = row["exerciseId"]?.asString()
+              val preference = row["preference"]?.asString()
+              if (
+                exerciseId != null &&
+                  preference in setOf("MORE", "NORMAL", "LESS", "NEVER") &&
+                  runCatching { java.util.UUID.fromString(exerciseId).toString() == exerciseId }
+                    .getOrDefault(false)
+              )
+                exerciseId to requireNotNull(preference)
+              else null
+            }
+            .toMap()
+        }
       val capturedAt = now.toEpochMilli()
       // Planner-admin history may narrow the approved 28-day egress window, never widen it.
       val effectiveHistoryDays = historyDays.coerceIn(7, 28)
@@ -543,6 +578,7 @@ class AiContextReader(
         effectiveDetailDays,
         strengthPriorities,
         plannerPreferences,
+        plannerAccents,
       )
     }!!
 

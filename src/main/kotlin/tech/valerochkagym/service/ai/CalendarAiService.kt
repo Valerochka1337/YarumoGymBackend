@@ -196,13 +196,27 @@ class CalendarAiService(
         captured.facts,
         captured.profile?.trainingGoal,
       )
+    val sourceById = captured.candidates.associateBy { it.id }
+    val preferences =
+      AgenticPlannerPolicy.resolvePreferences(
+        captured.strengthPriorities.keys.associateWith { "MORE" } + captured.plannerPreferences,
+        captured.plannerAccents,
+        runtime.defaultExerciseAccents.associate { it.exerciseId to it.accent },
+        sourceById,
+      )
+    val priorities =
+      AgenticPlannerPolicy.effectiveStrengthPriorities(
+        captured.strengthPriorities,
+        preferences,
+        captured.plannerAccents != null,
+      )
     val candidates =
       AgenticPlannerPolicy.select(
-        eligible,
-        captured.strengthPriorities,
-        captured.plannerPreferences,
+        eligible.filter { preferences[it.getValue("exerciseId") as String] != "NEVER" },
+        priorities,
+        preferences,
         captured.facts + captured.olderFacts,
-        captured.candidates.associateBy { it.id },
+        sourceById,
       )
     if (candidates.isEmpty()) throw aiError("ai_context_stale")
     val candidateIds = candidates.map { it["exerciseId"] as String }
@@ -564,19 +578,37 @@ class CalendarAiService(
         )
       val isStrength = captured.profile?.trainingGoal == "STRENGTH"
       val eligibleById = eligible.associateBy { it["exerciseId"] as String }
+      val sourceById = captured.candidates.associateBy { it.id }
+      val legacyPreferences =
+        captured.strengthPriorities.keys.associateWith { "MORE" } + captured.plannerPreferences
+      val effectivePreferences =
+        AgenticPlannerPolicy.resolvePreferences(
+          legacyPreferences,
+          captured.plannerAccents,
+          runtime.defaultExerciseAccents.associate { it.exerciseId to it.accent },
+          sourceById,
+        )
+      val effectiveEligible =
+        eligible.filter { effectivePreferences[it.getValue("exerciseId") as String] != "NEVER" }
+      val effectivePriorities =
+        AgenticPlannerPolicy.effectiveStrengthPriorities(
+          captured.strengthPriorities,
+          effectivePreferences,
+          captured.plannerAccents != null,
+        )
       val strengthKeys =
-        captured.strengthPriorities.filterKeys { eligibleById[it]?.get("type") == "STRENGTH" }
+        effectivePriorities.filterKeys { eligibleById[it]?.get("type") == "STRENGTH" }
       val rankingFacts = captured.facts + captured.olderFacts
       val agenticEligible =
         if (agentic)
           AgenticPlannerPolicy.select(
-            eligible,
-            captured.strengthPriorities,
-            captured.plannerPreferences,
+            effectiveEligible,
+            effectivePriorities,
+            effectivePreferences,
             rankingFacts,
-            captured.candidates.associateBy { it.id },
+            sourceById,
           )
-        else eligible
+        else effectiveEligible
       val keyHistory =
         if (isStrength && strengthKeys.isNotEmpty())
           contexts
@@ -616,7 +648,7 @@ class CalendarAiService(
         else if (agentic) agenticEligible
         else
           CalendarCandidateSelector.select(
-            eligible,
+            effectiveEligible,
             rankingFacts,
             listOfNotNull(
                 request.preferences,

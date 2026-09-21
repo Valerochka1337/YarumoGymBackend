@@ -42,8 +42,10 @@ class SyncService(
     const val strengthPlannerCapability = "strength-planner-personalization"
     const val workoutRirCapability = "workout-rir-v1"
     const val agenticPlannerCapability = "ai-planner-agentic-v1"
+    const val plannerDefaultAccentsCapability = "planner-default-accents-v2"
     private const val strengthPlannerProfileKind = "strength_planner_profile"
     private const val plannerExercisePreferencesKind = "planner_exercise_preferences"
+    private const val plannerExerciseAccentsKind = "planner_exercise_accents"
     private const val workoutEffortKind = "workout_effort"
   }
 
@@ -65,6 +67,11 @@ class SyncService(
   private fun plannerExercisePreferencesId(owner: UUID): UUID =
     UUID.nameUUIDFromBytes(
       "ValerochkaGym.planner-exercise-preferences.v1:$owner".toByteArray(Charsets.UTF_8)
+    )
+
+  private fun plannerExerciseAccentsId(owner: UUID): UUID =
+    UUID.nameUUIDFromBytes(
+      "ValerochkaGym.planner-default-accents.v2:$owner".toByteArray(Charsets.UTF_8)
     )
 
   private fun records(user: UUID): List<Record> =
@@ -124,6 +131,17 @@ class SyncService(
         "capability_required",
         "Требуется возможность $strengthPlannerCapability",
       )
+    if (
+      plannerDefaultAccentsCapability !in capabilities &&
+        incoming.changes.any { it.kind == plannerExerciseAccentsKind }
+    )
+      throw ApiException(
+        426,
+        "capability_required",
+        "Требуется возможность $plannerDefaultAccentsCapability",
+      )
+    if (incoming.changes.any { it.kind == plannerExerciseAccentsKind && it.deleted })
+      bad("Акценты планировщика нельзя удалить; сохраните пустой список")
     if (
       agenticPlannerCapability !in capabilities &&
         incoming.changes.any { it.kind == plannerExercisePreferencesKind }
@@ -223,6 +241,10 @@ class SyncService(
         if (change.kind == plannerExercisePreferencesKind) {
           if (change.id != plannerExercisePreferencesId(user))
             bad("Настройки планировщика не соответствуют владельцу")
+        }
+        if (change.kind == plannerExerciseAccentsKind) {
+          if (change.deleted || change.id != plannerExerciseAccentsId(user))
+            bad("Акценты планировщика не соответствуют владельцу")
         }
         if (change.kind == workoutEffortKind) {
           if (
@@ -406,7 +428,8 @@ class SyncService(
       ("profile" in capabilities || kind != "profile") &&
       (strengthPlannerCapability in capabilities ||
         kind !in setOf(strengthPlannerProfileKind, workoutEffortKind)) &&
-      (agenticPlannerCapability in capabilities || kind != plannerExercisePreferencesKind)
+      (agenticPlannerCapability in capabilities || kind != plannerExercisePreferencesKind) &&
+      (plannerDefaultAccentsCapability in capabilities || kind != plannerExerciseAccentsKind)
 
   private fun hasSetNotes(payload: tools.jackson.databind.JsonNode?): Boolean =
     payload?.get("exercises")?.any { section ->

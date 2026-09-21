@@ -200,6 +200,7 @@ test('planner settings edit drafts and save server configuration without startin
   const data={model:'text',instructions:'Черновик',historyDays:28,detailDays:7,maxRounds:6,maxToolCalls:12,timeoutSeconds:45,weightStepKg:2.5,collections:[{id:'fitness',goal:'GENERAL_FITNESS',name:'Общая форма',sequence:['fitness-a'],patterns:[{id:'fitness-a',name:'Всё тело',focus:'FULL_BODY',description:'<b>Не HTML</b>',slots:[slot]}]}]};
   const ui=await setup({
     'GET /admin/api/planner-settings':()=>({data}),
+    'GET /admin/api/planner-exercises':()=>({data:[{id:'00000000-0000-0000-0000-000000000010',name:'Присед'}]}),
     'PUT /admin/api/planner-settings':body=>({data:body}),
   });
   t.after(()=>ui.dom.window.close());
@@ -213,6 +214,9 @@ test('planner settings edit drafts and save server configuration without startin
   assert.equal(field('История, дней (до 28)').max,'28');
   assert.equal(field('Подробно, дней (до 7)').max,'7');
   assert.equal(form.querySelector('.planner-pattern b'),null);
+  const accent=[...form.querySelectorAll('input[type=radio]')].filter(x=>x.name==='accent-00000000-0000-0000-0000-000000000010');
+  assert.deepEqual(accent.map(x=>x.value),['MORE','NORMAL','LESS','NEVER']);
+  const more=accent.find(x=>x.value==='MORE');more.checked=true;more.dispatchEvent(new ui.w.Event('change',{bubbles:true}));
   form.dispatchEvent(new ui.w.Event('submit',{bubbles:true,cancelable:true}));
   await until(()=>ui.requests.some(r=>r.method==='PUT'));
   const write=ui.requests.find(r=>r.method==='PUT');
@@ -220,23 +224,54 @@ test('planner settings edit drafts and save server configuration without startin
   assert.equal(write.headers['X-CSRF-Token'],'test-csrf');
   assert.equal(write.body.model,'planner-model');
   assert.equal(write.body.collections[0].patterns[0].slots[0].sets,4);
+  assert.deepEqual(write.body.defaultExerciseAccents,[{exerciseId:'00000000-0000-0000-0000-000000000010',accent:'MORE'}]);
   assert.equal(write.body.collections[0].patterns[0].id,'fitness-a');
   assert.equal(write.body.collections[0].patterns[0].description,'<b>Не HTML</b>');
   assert.deepEqual(write.body.collections[0].sequence,['fitness-a']);
   assert.equal(ui.requests.some(r=>/calendar|proposal|generate/.test(r.path)),false);
   await until(()=>ui.w.document.getElementById('notice').textContent==='Настройки планировщика сохранены');
+  const savedForm=ui.w.document.querySelector('.planner-settings');
+  const normal=[...savedForm.querySelectorAll('input[type=radio]')].find(x=>x.value==='NORMAL');
+  normal.checked=true;normal.dispatchEvent(new ui.w.Event('change',{bubbles:true}));
+  savedForm.dispatchEvent(new ui.w.Event('submit',{bubbles:true,cancelable:true}));
+  await until(()=>ui.requests.filter(r=>r.method==='PUT').length===2);
+  assert.deepEqual(ui.requests.filter(r=>r.method==='PUT').at(-1).body.defaultExerciseAccents,[]);
+  assert.equal(ui.w.document.querySelectorAll('input[type=radio][name="accent-00000000-0000-0000-0000-000000000010"]').length,4);
+  assert.equal(ui.errors.length,0);
+});
+
+test('planner settings keep stale default read-only and allow its reset',async t=>{
+  const stale='00000000-0000-0000-0000-000000000099';
+  const data={model:'text',instructions:'Черновик',historyDays:28,detailDays:7,maxRounds:6,maxToolCalls:12,timeoutSeconds:45,weightStepKg:2.5,defaultExerciseAccents:[{exerciseId:stale,accent:'NEVER'}],collections:[{id:'fitness',goal:'GENERAL_FITNESS',name:'Общая форма',sequence:['fitness-a'],patterns:[{id:'fitness-a',name:'Всё тело',focus:'FULL_BODY',description:'',slots:[{role:'PRIMARY',movement:'Жим',exerciseType:'STRENGTH',exerciseCount:1,sets:3,repsMin:6,repsMax:12,restSeconds:120,durationSeconds:0}]}]}]};
+  const ui=await setup({
+    'GET /admin/api/planner-settings':()=>({data}),
+    'GET /admin/api/planner-exercises':()=>({data:[]}),
+    'PUT /admin/api/planner-settings':body=>({data:body}),
+  });
+  t.after(()=>ui.dom.window.close());
+  ui.w.document.querySelector('[data-view=planner]').click();
+  await until(()=>ui.w.document.querySelector('.planner-settings'));
+  const form=ui.w.document.querySelector('.planner-settings');
+  const radios=[...form.querySelectorAll('input[type=radio][name="accent-'+stale+'"]')];
+  assert.equal(radios.length,1);assert.equal(radios[0].value,'NEVER');assert.equal(radios[0].disabled,true);
+  const reset=[...form.querySelectorAll('button')].find(x=>x.getAttribute('aria-label')==='Удалённое упражнение · '+stale+' · сбросить до обычного');
+  assert.ok(reset);reset.click();
+  form.dispatchEvent(new ui.w.Event('submit',{bubbles:true,cancelable:true}));
+  await until(()=>ui.requests.some(r=>r.method==='PUT'));
+  assert.deepEqual(ui.requests.find(r=>r.method==='PUT').body.defaultExerciseAccents,[]);
   assert.equal(ui.errors.length,0);
 });
 
 test('AI diagnostics renders only sanitized fields, filters locally, and copies without writes',async t=>{
   const attack='<img src=x onerror="window.compromised=true">';
+  const now=Date.now();
   const diagnostics={
-    generatedAt:'2026-09-20T10:00:00Z',
+    generatedAt:new Date(now).toISOString(),
     retention:{maxRuns:200,maxAgeHours:24,processLocal:true,lostOnRestart:true},
     database:{status:'OK'},calendarQueue:{status:'ERROR',queued:null,running:null,failed:null,ready:null},
     runs:[
-      {id:'00000000-0000-4000-8000-000000000001',startedAt:'2026-09-20T09:59:00Z',durationMs:12,outcome:'FAILURE',failureCategory:'UPSTREAM_REJECTED',model:attack,httpStatus:400,upstreamCode:'<script>secret</script>',upstreamType:'invalid_request_error',upstreamParam:'tools',rounds:1,toolCalls:2,stages:[{stage:'PLANNER_TOOL',outcome:'FAILURE',durationMs:2}],ownerId:'must-not-copy'},
-      {id:'00000000-0000-4000-8000-000000000002',startedAt:'2026-09-20T09:58:00Z',durationMs:4,outcome:'SUCCESS',failureCategory:'NONE',model:null,httpStatus:null,upstreamCode:null,upstreamType:null,upstreamParam:null,rounds:0,toolCalls:0,stages:[]},
+      {id:'00000000-0000-4000-8000-000000000001',startedAt:new Date(now-60_000).toISOString(),durationMs:12,outcome:'FAILURE',failureCategory:'UPSTREAM_REJECTED',model:attack,httpStatus:400,upstreamCode:'<script>secret</script>',upstreamType:'invalid_request_error',upstreamParam:'tools',rounds:1,toolCalls:2,stages:[{stage:'PLANNER_TOOL',outcome:'FAILURE',durationMs:2}],ownerId:'must-not-copy'},
+      {id:'00000000-0000-4000-8000-000000000002',startedAt:new Date(now-120_000).toISOString(),durationMs:4,outcome:'SUCCESS',failureCategory:'NONE',model:null,httpStatus:null,upstreamCode:null,upstreamType:null,upstreamParam:null,rounds:0,toolCalls:0,stages:[]},
     ],
   };
   const ui=await setup({'GET /admin/api/ai-diagnostics':()=>({data:diagnostics})});

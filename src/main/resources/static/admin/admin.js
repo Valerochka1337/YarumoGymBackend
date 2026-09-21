@@ -115,7 +115,7 @@ async function load() {
   $('refresh').disabled=true; $('table-wrap').setAttribute('aria-busy','true');
   try {
     if(view==='ai') { $('ai-settings').replaceChildren(); const data=await api('/ai-settings'); if(version===requestVersion) renderAiSettings(data); return; }
-    if(view==='planner') { $('ai-settings').replaceChildren(); const data=await api('/planner-settings'); if(version===requestVersion) renderPlannerSettings(data); return; }
+    if(view==='planner') { $('ai-settings').replaceChildren(); const [data,exercises]=await Promise.all([api('/planner-settings'),api('/planner-exercises')]); if(version===requestVersion) renderPlannerSettings(data,exercises); return; }
     if(view==='ai-diagnostics') { $('ai-diagnostics').replaceChildren(el('p',{class:'empty'},'Загружаем диагностику…')); const data=await api('/ai-diagnostics'); if(version===requestVersion) renderDiagnostics(data); return; }
     if(isStandard()) { await loadStandard(version); return; }
     if(view==='overview') { const data=await api('/summary'); if(version===requestVersion) renderOverview(data); return; }
@@ -509,7 +509,7 @@ function renderAiSettings(data) {
   $('ai-settings').replaceChildren(form);
 }
 
-function renderPlannerSettings(source) {
+function renderPlannerSettings(source, exercises=[]) {
   const data=structuredClone(source);
   const form=el('form',{class:'planner-settings'});
   form.append(el('p',{class:'muted'},'Серверные настройки. Сохранение применяется к новым запросам из приложения. Каждый запрос использует свой снимок настроек.'));
@@ -536,6 +536,39 @@ function renderPlannerSettings(source) {
     ['timeoutSeconds','Таймаут, секунд',15,120,1],['weightStepKg','Шаг веса по умолчанию, кг',0.25,20,0.25],
   ]) field(numbers,data,key,label,'number',{min,max,step,required:true});
   settings.append(numbers); form.append(settings);
+  const accents=el('fieldset',{},el('legend',{},'Акценты стандартных упражнений'));
+  const accentSearch=el('input',{type:'search',placeholder:'Найти упражнение','aria-label':'Найти стандартное упражнение'});
+  const selectedOnly=el('input',{type:'checkbox'});
+  const accentChoices=el('div',{class:'choices'});
+  const accentState=[['MORE','Акцент'],['NORMAL','Обычный'],['LESS','Реже'],['NEVER','Исключить']];
+  const selectedLabel=el('label',{},selectedOnly,'Только выбранные');
+  function drawAccents(){
+    const current=new Map((data.defaultExerciseAccents||[]).map(x=>[x.exerciseId,x.accent]));
+    const liveIds=new Set(exercises.map(x=>x.id));
+    const stale=[...current.keys()].filter(id=>!liveIds.has(id)).map(id=>({id,name:'Удалённое упражнение · '+id}));
+    const q=accentSearch.value.toLocaleLowerCase('ru');
+    const rows=[...exercises,...stale].filter(x=>x.name.toLocaleLowerCase('ru').includes(q) && (!selectedOnly.checked || current.has(x.id)));
+    accentChoices.replaceChildren(...rows.map(item=>{
+      const group=el('fieldset',{},el('legend',{},item.name));
+      const selected=current.get(item.id)||'NORMAL';
+      const isStale=!liveIds.has(item.id);
+      if(isStale){
+        const input=el('input',{type:'radio',name:'accent-'+item.id,value:selected,checked:true,disabled:true,'aria-label':item.name+' · '+accentState.find(([value])=>value===selected)[1]+' (недоступно)'});
+        const reset=button('Сбросить до обычного',()=>{const next=new Map((data.defaultExerciseAccents||[]).map(x=>[x.exerciseId,x.accent]));next.delete(item.id);data.defaultExerciseAccents=[...next].sort(([a],[b])=>a.localeCompare(b)).map(([exerciseId,accent])=>({exerciseId,accent}));drawAccents();},'secondary');
+        reset.setAttribute('aria-label',item.name+' · сбросить до обычного');
+        group.append(el('label',{},input,accentState.find(([value])=>value===selected)[1]),reset);
+        return group;
+      }
+      accentState.forEach(([value,label])=>{
+        const input=el('input',{type:'radio',name:'accent-'+item.id,value,checked:selected===value,'aria-label':item.name+' · '+label});
+        input.onchange=()=>{if(!input.checked)return;const next=new Map((data.defaultExerciseAccents||[]).map(x=>[x.exerciseId,x.accent])); if(value==='NORMAL')next.delete(item.id);else next.set(item.id,value);data.defaultExerciseAccents=[...next].sort(([a],[b])=>a.localeCompare(b)).map(([exerciseId,accent])=>({exerciseId,accent}));drawAccents();};
+        group.append(el('label',{},input,label));
+      });
+      return group;
+    }));
+    if(!rows.length) accentChoices.append(el('p',{class:'hint'},'Ничего не найдено'));
+  }
+  accentSearch.oninput=drawAccents;selectedOnly.onchange=drawAccents;accents.append(accentSearch,selectedLabel,accentChoices);drawAccents();form.append(accents);
   const collections=el('div'); form.append(collections);
   const goalOptions=[['STRENGTH','Сила'],['MUSCLE_GAIN','Набор мышц'],['FAT_LOSS','Похудение'],['GENERAL_FITNESS','Общая форма'],['ENDURANCE','Выносливость'],['OTHER','Другое']];
   const focusOptions=[['FULL_BODY','Всё тело'],['UPPER','Верх'],['LOWER','Низ'],['PUSH','Жим'],['PULL','Тяга'],['CARDIO','Кардио'],['MIXED','Смешанная']];
@@ -595,7 +628,7 @@ function renderPlannerSettings(source) {
   form.addEventListener('submit',async event=>{
     event.preventDefault(); if(!form.reportValidity()) return;
     const version=requestVersion; submit.disabled=true; error.textContent='';
-    try {const saved=await api('/planner-settings','PUT',data);if(version===requestVersion){renderPlannerSettings(saved);notice('Настройки планировщика сохранены');}}
+    try {const saved=await api('/planner-settings','PUT',data);if(version===requestVersion){renderPlannerSettings(saved,exercises);notice('Настройки планировщика сохранены');}}
     catch(e){if(version===requestVersion) error.textContent=e.message;}
     finally{submit.disabled=false;}
   });

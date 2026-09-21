@@ -170,4 +170,77 @@ class AgenticPlannerPolicyTest {
         .map { it.getValue("exerciseId") },
     )
   }
+
+  @Test
+  fun `v2 normal overrides legacy high and a personal override does not inherit a standard default`() {
+    val sources =
+      mapOf(
+        standard to CalendarCandidateSource(standard, json.readTree("{}"), curatedCanonical = true),
+        custom to CalendarCandidateSource(custom, json.readTree("{}"), curatedCanonical = false),
+      )
+    val effective =
+      AgenticPlannerPolicy.resolvePreferences(
+        legacy = mapOf(standard to "MORE"),
+        accents = mapOf(standard to "NORMAL"),
+        defaults = mapOf(standard to "NEVER", custom to "MORE"),
+        sources = sources,
+      )
+    assertEquals("NORMAL", effective[standard])
+    assertEquals(null, effective[custom])
+    assertEquals(
+      emptyMap<String, String>(),
+      AgenticPlannerPolicy.effectiveStrengthPriorities(mapOf(standard to "HIGH"), effective, true),
+    )
+  }
+
+  @Test
+  fun `admin more retains personal high and otherwise normalizes a strength priority`() {
+    val sources =
+      mapOf(
+        standard to CalendarCandidateSource(standard, json.readTree("{}"), curatedCanonical = true)
+      )
+    val effective =
+      AgenticPlannerPolicy.resolvePreferences(
+        emptyMap(),
+        emptyMap(),
+        mapOf(standard to "MORE"),
+        sources,
+      )
+    assertEquals(
+      mapOf(standard to "HIGH"),
+      AgenticPlannerPolicy.effectiveStrengthPriorities(mapOf(standard to "HIGH"), effective, true),
+    )
+    assertEquals(
+      mapOf(standard to "NORMAL"),
+      AgenticPlannerPolicy.effectiveStrengthPriorities(emptyMap(), effective, false),
+    )
+  }
+
+  @Test
+  fun `legacy key overrides an admin never only before an authoritative v2 empty record`() {
+    val sources =
+      mapOf(
+        standard to CalendarCandidateSource(standard, json.readTree("{}"), curatedCanonical = true)
+      )
+    val fallback =
+      AgenticPlannerPolicy.resolvePreferences(
+        legacy = mapOf(standard to "MORE"),
+        accents = null,
+        defaults = mapOf(standard to "NEVER"),
+        sources = sources,
+      )
+    assertEquals("MORE", fallback[standard])
+    val v2Empty =
+      AgenticPlannerPolicy.resolvePreferences(
+        legacy = mapOf(standard to "MORE"),
+        accents = emptyMap(),
+        defaults = mapOf(standard to "NEVER"),
+        sources = sources,
+      )
+    assertEquals("NEVER", v2Empty[standard])
+    assertEquals(
+      emptyMap<String, String>(),
+      AgenticPlannerPolicy.effectiveStrengthPriorities(mapOf(standard to "HIGH"), emptyMap(), true),
+    )
+  }
 }
