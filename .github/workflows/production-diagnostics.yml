@@ -21,6 +21,8 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Test diagnostic log filters
+        run: python3 -m unittest discover -s .github/diagnostics -p 'test_*.py'
       - name: Read sanitized production diagnostics
         env:
           DIAGNOSTIC_HOURS: ${{ inputs.hours }}
