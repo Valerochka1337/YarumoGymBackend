@@ -89,7 +89,7 @@ def summarize(logs):
     # No class names supplied by arbitrary messages, SQL, URLs or exception text are exported.
     return {
         'error_lines': len(re.findall(r'\bERROR\b', logs)),
-        'oom_mentions': len(re.findall(r'OutOfMemoryError|out of memory', logs, re.I)),
+        'oom_mentions': len(re.findall(r'\bOutOfMemoryError\b|\bout of memory\b', logs, re.I)),
         'sql_states': dict(collections.Counter(re.findall(r'SQLState:\s*([0-9A-Z]{5})\b', logs))),
         'planner_error_codes': dict(collections.Counter(re.findall(
             r'\b(ai_(?:unavailable|timeout|busy|interrupted|invalid_response|context_stale|context_too_large))\b', logs))),
