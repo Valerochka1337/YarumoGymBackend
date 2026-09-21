@@ -77,11 +77,13 @@ class BackendIntegrationTest {
   fun `planner settings require admin csrf and preserve edited patterns on read`() {
     val path = "/api/planner-settings"
     assertEquals(401, adminCall("GET", path).status)
+    assertEquals(401, adminCall("GET", "/api/planner-exercises").status)
     val ordinary = account()
     assertEquals(401, adminCall("GET", path, bearer = ordinary["accessToken"].asString()).status)
     val browser = administrator()
     val initial = adminCall("GET", path, browser = browser)
     assertEquals(200, initial.status)
+    assertEquals(200, adminCall("GET", "/api/planner-exercises", browser = browser).status)
     val config =
       json.treeToValue(initial.body, tech.valerochkagym.service.ai.PlannerConfiguration::class.java)
     val edited = config.copy(model = "planner-test", maxRounds = 3)
@@ -2894,7 +2896,7 @@ class BackendIntegrationTest {
 
   @Test
   fun `Liquibase has applied auth sync and admin changesets`() {
-    assertEquals(34, db.queryForObject("SELECT count(*) FROM databasechangelog", Int::class.java))
+    assertEquals(35, db.queryForObject("SELECT count(*) FROM databasechangelog", Int::class.java))
   }
 
   @Test
@@ -3269,5 +3271,177 @@ class BackendIntegrationTest {
       adminCall("GET", "/api/users/${browser.userId}", browser = browser).response.body()
     assertFalse(userDetail.contains("password_hash"))
     assertFalse(userDetail.contains("argon2"))
+  }
+
+  @Test
+  fun `planner exercise accents require negotiated capability and preserve an authoritative empty singleton`() {
+    val owner = account()
+    val token = owner["accessToken"].asString()
+    val ownerId = owner["userId"].asString()
+    val singleton =
+      UUID.nameUUIDFromBytes(
+          "ValerochkaGym.planner-default-accents.v2:$ownerId".toByteArray(Charsets.UTF_8)
+        )
+        .toString()
+    fun payload(entries: List<Map<String, String>>) =
+      mapOf("schemaVersion" to 1, "preferences" to entries)
+    fun request(
+      id: String = singleton,
+      revision: Long = 0,
+      entries: List<Map<String, String>> = emptyList(),
+      deleted: Boolean = false,
+    ) =
+      mapOf(
+        "operationId" to UUID.randomUUID(),
+        "changes" to
+          listOf(
+            change(
+              id,
+              revision,
+              if (deleted) null else payload(entries),
+              "planner_exercise_accents",
+            )
+          ),
+      )
+    val unknown = UUID.randomUUID().toString()
+    val one = listOf(mapOf("exerciseId" to unknown, "preference" to "MORE"))
+    assertEquals(426, call("POST", "/sync", request(entries = one), token).status)
+    assertEquals(
+      200,
+      call(
+          "POST",
+          "/sync",
+          request(entries = one),
+          token,
+          capabilities = "planner-default-accents-v2",
+        )
+        .status,
+    )
+    assertFalse(
+      call("GET", "/sync", token = token).body!!["records"].any {
+        it["kind"].asString() == "planner_exercise_accents"
+      }
+    )
+    val visible = call("GET", "/sync", token = token, capabilities = "planner-default-accents-v2")
+    assertEquals("planner-default-accents-v2", visible.capabilities)
+    assertEquals(
+      one,
+      json.convertValue(
+        visible.body!!["records"]
+          .single { it["kind"].asString() == "planner_exercise_accents" }["payload"]["preferences"],
+        List::class.java,
+      ),
+    )
+    assertEquals(
+      400,
+      call(
+          "POST",
+          "/sync",
+          request(singleton, 1, deleted = true),
+          token,
+          capabilities = "planner-default-accents-v2",
+        )
+        .status,
+    )
+    assertEquals(
+      one,
+      json.convertValue(
+        call("GET", "/sync", token = token, capabilities = "planner-default-accents-v2")
+          .body!!["records"]
+          .single { it["kind"].asString() == "planner_exercise_accents" }["payload"]["preferences"],
+        List::class.java,
+      ),
+    )
+    assertEquals(
+      400,
+      call(
+          "POST",
+          "/sync",
+          request(UUID.randomUUID().toString(), 1),
+          token,
+          capabilities = "planner-default-accents-v2",
+        )
+        .status,
+    )
+    val six =
+      (1..6)
+        .map { mapOf("exerciseId" to UUID.randomUUID().toString(), "preference" to "LESS") }
+        .sortedBy { it["exerciseId"] }
+    assertEquals(
+      200,
+      call(
+          "POST",
+          "/sync",
+          request(singleton, 1, six),
+          token,
+          capabilities = "planner-default-accents-v2",
+        )
+        .status,
+    )
+    val tooMany =
+      (1..1001)
+        .map { mapOf("exerciseId" to UUID.randomUUID().toString(), "preference" to "MORE") }
+        .sortedBy { it["exerciseId"] }
+    assertEquals(
+      400,
+      call(
+          "POST",
+          "/sync",
+          request(singleton, 2, tooMany),
+          token,
+          capabilities = "planner-default-accents-v2",
+        )
+        .status,
+    )
+    assertEquals(
+      400,
+      call(
+          "POST",
+          "/sync",
+          request(singleton, 2, listOf(six.first(), six.first())),
+          token,
+          capabilities = "planner-default-accents-v2",
+        )
+        .status,
+    )
+    assertEquals(
+      400,
+      call(
+          "POST",
+          "/sync",
+          request(singleton, 2, six.reversed()),
+          token,
+          capabilities = "planner-default-accents-v2",
+        )
+        .status,
+    )
+    assertEquals(
+      200,
+      call(
+          "POST",
+          "/sync",
+          request(singleton, 2, emptyList()),
+          token,
+          capabilities = "planner-default-accents-v2",
+        )
+        .status,
+    )
+  }
+
+  @Test
+  fun `planner default accents fixture pins the v2 singleton identity`() {
+    val fixture =
+      json.readTree(javaClass.getResourceAsStream("/planner-exercise-accents-sync-contract.json"))
+    val owner = fixture["owner"].asText()
+    assertEquals("planner-default-accents-v2", fixture["capability"].asText())
+    assertEquals("planner_exercise_accents", fixture["kind"].asText())
+    assertEquals(
+      fixture["id"].asText(),
+      UUID.nameUUIDFromBytes(
+          "ValerochkaGym.planner-default-accents.v2:$owner".toByteArray(Charsets.UTF_8)
+        )
+        .toString(),
+    )
+    assertEquals(0, fixture["emptyPayload"]["preferences"].size())
   }
 }

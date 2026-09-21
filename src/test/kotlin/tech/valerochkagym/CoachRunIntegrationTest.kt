@@ -1165,7 +1165,7 @@ class CoachRunIntegrationTest {
     runs.session(owner, workout, sessionBody(workout, 1, true, input["snapshot"]))
     runs.submit(owner, json.writeValueAsBytes(input))
     provider.onCall = {
-      db.update("UPDATE coach_sessions SET updated_at=now()-interval '121 seconds'")
+      db.update("UPDATE coach_sessions SET updated_at=TIMESTAMPTZ '2000-01-01 00:00:00+00'")
     }
     runs.runNext()
     assertEquals("SUPERSEDED", runs.status(owner, id)["state"].asString())

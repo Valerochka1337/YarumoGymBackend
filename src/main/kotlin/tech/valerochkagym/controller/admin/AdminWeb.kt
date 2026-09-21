@@ -13,6 +13,7 @@ import tech.valerochkagym.controller.model.AdminAction
 import tech.valerochkagym.controller.model.AdminCredentials
 import tech.valerochkagym.controller.model.AdminEdit
 import tech.valerochkagym.repository.catalog.EquipmentRepository
+import tech.valerochkagym.repository.catalog.StandardRepository
 import tech.valerochkagym.security.ADMIN_COOKIE
 import tech.valerochkagym.security.RateLimiter
 import tech.valerochkagym.security.adminCookie
@@ -33,6 +34,7 @@ class AdminController(
   private val auth: AuthService,
   private val limits: RateLimiter,
   private val equipment: tech.valerochkagym.repository.catalog.EquipmentRepository,
+  private val standard: StandardRepository,
   private val json: tools.jackson.databind.ObjectMapper,
 ) {
   private fun cookie(response: HttpServletResponse, value: String, age: Duration) {
@@ -128,6 +130,15 @@ class AdminController(
 
   @GetMapping("/users/{id}/exercise-options")
   fun exerciseOptions(@PathVariable id: UUID) = admin.exerciseOptions(id)
+
+  @GetMapping("/planner-exercises")
+  fun plannerExercises() =
+    standard
+      .findAllByOrderByKindAscIdAsc()
+      .filter { it.kind == "exercise" && !it.archived }
+      .map {
+        mapOf("id" to it.id.toString(), "name" to json.readTree(it.payload)["name"].asString())
+      }
 
   @GetMapping("/catalog")
   fun catalog() =

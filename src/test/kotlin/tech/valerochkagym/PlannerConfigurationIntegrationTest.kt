@@ -123,4 +123,58 @@ class PlannerConfigurationIntegrationTest {
     service.save(edited)
     assertEquals(edited, service.snapshot())
   }
+
+  @Test
+  fun `defaults retain only live standard exercises and normal is sparse`() {
+    val id = java.util.UUID.randomUUID()
+    jdbc.update(
+      "INSERT INTO standard_records(kind,id,revision,archived,payload) VALUES ('exercise',?,1,false,'{}'::jsonb)",
+      id,
+    )
+    val initial = service.snapshot()
+    val more = tech.valerochkagym.service.ai.PlannerExerciseAccent(id.toString(), "MORE")
+    val normal = tech.valerochkagym.service.ai.PlannerExerciseAccent(id.toString(), "NORMAL")
+    assertThrows<ApiException> {
+      service.save(initial.copy(defaultExerciseAccents = listOf(more, normal)))
+    }
+    assertEquals(initial, service.snapshot())
+    val saved = service.save(initial.copy(defaultExerciseAccents = listOf(more)))
+    assertEquals(listOf(more), saved.defaultExerciseAccents)
+    assertTrue(
+      service
+        .save(saved.copy(defaultExerciseAccents = listOf(normal)))
+        .defaultExerciseAccents
+        .isEmpty()
+    )
+    assertEquals(saved, service.save(saved))
+    jdbc.update("UPDATE standard_records SET archived=true WHERE kind='exercise' AND id=?", id)
+    assertEquals(saved, service.save(saved))
+    assertThrows<ApiException> {
+      service.save(
+        saved.copy(
+          defaultExerciseAccents =
+            listOf(tech.valerochkagym.service.ai.PlannerExerciseAccent(id.toString(), "NEVER"))
+        )
+      )
+    }
+    assertTrue(
+      service
+        .save(saved.copy(defaultExerciseAccents = emptyList()))
+        .defaultExerciseAccents
+        .isEmpty()
+    )
+    assertThrows<ApiException> {
+      service.save(
+        saved.copy(
+          defaultExerciseAccents =
+            listOf(
+              tech.valerochkagym.service.ai.PlannerExerciseAccent(
+                java.util.UUID.randomUUID().toString(),
+                "MORE",
+              )
+            )
+        )
+      )
+    }
+  }
 }

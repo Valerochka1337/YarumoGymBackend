@@ -36,6 +36,7 @@ class RecordValidator(
         "profile",
         "strength_planner_profile",
         "planner_exercise_preferences",
+        "planner_exercise_accents",
         "workout_effort",
       ) + calendarKinds
     val measurementFields =
@@ -455,11 +456,29 @@ class RecordValidator(
       bad("Настройки планировщика должны быть канонически упорядочены")
   }
 
+  private fun plannerExerciseAccents(n: JsonNode) {
+    val fields = setOf("schemaVersion", "preferences")
+    shape(n, fields)
+    if (fields.any { !n.has(it) }) bad("Акценты планировщика требуют все поля")
+    number(n, "schemaVersion", true, true, min = 1.0, max = 1.0)
+    val values = array(n, "preferences", 1000)
+    val ids =
+      values.map {
+        shape(it, setOf("exerciseId", "preference"))
+        val id = calendarUuid(it["exerciseId"]).toString()
+        enum(it, "preference", setOf("MORE", "NORMAL", "LESS", "NEVER"))
+        id
+      }
+    if (ids.distinct().size != ids.size || ids != ids.sorted())
+      bad("Акценты планировщика должны быть канонически упорядочены")
+  }
+
   fun validate(kind: String, n: JsonNode) {
     when (kind) {
       "profile" -> profile(n)
       "strength_planner_profile" -> strengthPlannerProfile(n)
       "planner_exercise_preferences" -> plannerExercisePreferences(n)
+      "planner_exercise_accents" -> plannerExerciseAccents(n)
       "workout_effort" -> workoutEffort(n)
       "exercise_hint" -> {
         shape(n, setOf("text", "updatedAt"))

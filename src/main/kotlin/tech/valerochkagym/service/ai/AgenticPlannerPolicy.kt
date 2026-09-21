@@ -16,6 +16,37 @@ internal object AgenticPlannerPolicy {
     val curatedCanonical: Boolean,
   )
 
+  fun resolvePreferences(
+    legacy: Map<String, String>,
+    accents: Map<String, String>?,
+    defaults: Map<String, String>,
+    sources: Map<String, CalendarCandidateSource>,
+  ): Map<String, String> {
+    val result = mutableMapOf<String, String>()
+    sources.forEach { (id, source) ->
+      if (source.curatedCanonical) defaults[id]?.let { result[id] = it }
+    }
+    if (accents != null) result.putAll(accents) else result.putAll(legacy)
+    return result
+  }
+
+  fun effectiveStrengthPriorities(
+    priorities: Map<String, String>,
+    preferences: Map<String, String>,
+    accentsAuthoritative: Boolean,
+  ): Map<String, String> = buildMap {
+    priorities.forEach { (id, priority) ->
+      when (preferences[id]) {
+        "MORE" -> put(id, if (priority == "HIGH") "HIGH" else "NORMAL")
+        "NORMAL",
+        "LESS",
+        "NEVER" -> Unit
+        null -> if (!accentsAuthoritative) put(id, priority)
+      }
+    }
+    preferences.filterValues { it == "MORE" }.keys.forEach { id -> putIfAbsent(id, "NORMAL") }
+  }
+
   fun select(
     eligible: List<Map<String, Any>>,
     keyExercises: Map<String, String>,

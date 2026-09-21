@@ -315,6 +315,23 @@ payload строго `{schemaVersion:1,preferences}`. `preferences` — кано
 single-record lookup, а POST возвращает `426 capability_required` до ledger; клиент сохраняет
 локальные данные и outbox до следующего согласования.
 
+### Личные акценты и admin defaults — capability `planner-default-accents-v2`
+
+`planner_exercise_accents` — owner-scoped singleton с ID
+`UUID.nameUUIDFromBytes(UTF8("ValerochkaGym.planner-default-accents.v2:" + ownerUuid))`.
+Payload всегда `{schemaVersion:1,preferences}`; список содержит 0…1000 отсортированных
+уникальных lowercase UUID и значения `MORE`, `NORMAL`, `LESS`, `NEVER`. Пустой список
+authoritative и записывается как обычный record; tombstone этого kind сервер отклоняет. Kind
+принимается и выдаётся только с capability `planner-default-accents-v2`, старый
+`planner_exercise_preferences` и `ai-planner-agentic-v1` остаются без изменений.
+
+Администратор редактирует defaults в `/admin` → «ИИ · Паттерны тренировок»: поиск показывает
+только живой стандартный каталог, а NORMAL удаляет запись. Сервер хранит sparse,
+канонически отсортированные `defaultExerciseAccents` и отклоняет private, missing и archived IDs.
+Во время расчёта личный v2 override перекрывает default; v2 empty suppresses legacy fallback.
+Defaults применяются лишь когда кандидатом остаётся стандартная запись, поэтому личная запись
+с тем же ID их не наследует.
+
 `POST /v1/ai/calendar-drafts-v2` принимает в точности тот же строгий
 `CalendarDraftRequest`, что и legacy `/v1/ai/calendar-drafts`: все 13 полей обязательны,
 неизвестные и повторённые JSON-поля, BOM, trailing data и не-UTF-8 отклоняются. Успех возвращает
