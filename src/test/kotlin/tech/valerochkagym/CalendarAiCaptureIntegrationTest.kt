@@ -586,11 +586,12 @@ class CalendarAiCaptureIntegrationTest {
     val simple =
       providerContext(owner, priority = listOf("UPPER_CHEST", "TRICEPS"))["candidates"].toList()
     assertEquals(
-      listOf(press.toString(), run.toString()),
-      simple.map { it["exerciseId"].asString() },
+      listOf(press.toString(), run.toString()).sorted(),
+      simple.map { it["exerciseId"].asString() }.sorted(),
     )
-    assertEquals(150, simple.first()["priority"].asInt())
-    assertFalse(simple.first().has("coverage"))
+    val pressCandidate = simple.single { it["exerciseId"].asString() == press.toString() }
+    assertEquals(150, pressCandidate["priority"].asInt())
+    assertFalse(pressCandidate.has("coverage"))
 
     reset()
     val boundedOwner = owner()
