@@ -125,7 +125,7 @@ class HttpOpenAiChatCompletionsProvider(
     }
 
   private fun generatePlannerTurnHttp(input: AiProviderInput): PlannerTurn {
-    val requestDeadlineMillis = minOf(deadlineMillis, input.timeoutMillis ?: deadlineMillis)
+    val requestDeadlineMillis = minOf(120_000L, input.timeoutMillis ?: deadlineMillis)
     if (requestDeadlineMillis <= 0) throw aiError("ai_timeout")
     var pending: CompletableFuture<HttpResponse<ByteArray>>? = null
     try {
@@ -168,9 +168,9 @@ class HttpOpenAiChatCompletionsProvider(
           "max_completion_tokens" to 2048,
           "messages" to messages,
           "tools" to plannerTools(input.schema),
-          "tool_choice" to "auto",
-          // A model may choose tools on intermediate turns, but its stop turn is still constrained
-          // to the exact calendar draft schema before server-side projection validation.
+          "tool_choice" to "required",
+          // Planning requires tools and terminates on server validation. Keep the response schema
+          // as a defensive constraint for compatible providers that still emit final content.
           "response_format" to
             mapOf(
               "type" to "json_schema",
