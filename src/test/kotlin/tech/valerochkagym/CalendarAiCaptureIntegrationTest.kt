@@ -2251,9 +2251,16 @@ class CalendarAiCaptureIntegrationTest {
     val owner = owner()
     val exercises = (1..6).map { exercise(owner) }
     provider.repairRejected = true
-    provider.handler = {
+    provider.handler = { input ->
       if (provider.calls == 1) shortProviderResponse(exercises.first())
-      else providerResponse(exercises.first())
+      else {
+        val feedback = json.readTree(input.plannerTranscript.last().result)
+        assertEquals("DURATION_TOO_SHORT", feedback["details"]["reason"].asString())
+        assertEquals(45L, feedback["details"]["actual"].asLong())
+        assertEquals(2160L, feedback["details"]["minimum"].asLong())
+        assertEquals(2700L, feedback["details"]["maximum"].asLong())
+        providerResponse(exercises.first())
+      }
     }
     val response = actions.calendar(owner, rawRequest())
     assertEquals(2, provider.calls)

@@ -163,7 +163,7 @@ class HttpOpenAiChatCompletionsProviderTest {
       "#/${'$'}defs/ProviderOutput",
       finalizeParameters["properties"]["plan"]["\u0024ref"].asString(),
     )
-    assertEquals("auto", body["tool_choice"].asString())
+    assertEquals("required", body["tool_choice"].asString())
     assertEquals(2, body["messages"].size())
   }
 
@@ -194,6 +194,17 @@ class HttpOpenAiChatCompletionsProviderTest {
           .code,
       )
     }
+  }
+
+  @Test
+  fun `planner uses remaining attempt budget instead of the ordinary request cap`() {
+    handler = {
+      Thread.sleep(150)
+      respond(it, envelope())
+    }
+    org.junit.jupiter.api.Assertions.assertNotNull(
+      provider(50).generatePlannerTurn(plannerInput().copy(timeoutMillis = 2000)).final
+    )
   }
 
   @Test

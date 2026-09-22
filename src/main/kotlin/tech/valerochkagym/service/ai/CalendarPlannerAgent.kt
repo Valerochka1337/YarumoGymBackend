@@ -8,6 +8,7 @@ internal class CalendarPlannerAgent(
   private val maxRounds: Int = PlannerToolProtocol.defaultMaxRounds,
   private val maxCalls: Int = PlannerToolProtocol.defaultMaxCalls,
   private val diagnostics: AiDiagnostics? = null,
+  private val acceptedPlan: () -> tools.jackson.databind.JsonNode? = { null },
 ) {
   fun run(
     candidateIds: Set<String>,
@@ -46,14 +47,32 @@ internal class CalendarPlannerAgent(
         val execute = {
           if (++calls > maxCalls)
             reject(AiDiagnosticReason.TOOL_CALL_LIMIT, calls.toLong(), maxCalls.toLong())
-          PlannerToolProtocol.validate(call, candidateIds, patternIds) { reason ->
-            diagnostics?.event(AiDiagnosticSite.TOOL_PROTOCOL, reason)
+          var protocolIssue: AiDiagnosticReason? = null
+          try {
+            PlannerToolProtocol.validate(call, candidateIds, patternIds) { reason ->
+              protocolIssue = reason
+              diagnostics?.event(AiDiagnosticSite.TOOL_PROTOCOL, reason)
+            }
+          } catch (error: tech.valerochkagym.controller.advice.ApiException) {
+            if (
+              protocolIssue !in
+                setOf(
+                  AiDiagnosticReason.UNKNOWN_CANDIDATE,
+                  AiDiagnosticReason.UNKNOWN_PATTERN,
+                  AiDiagnosticReason.INVALID_CANDIDATE_IDS,
+                )
+            )
+              throw error
           }
           if (deadlineMillis() <= 0) throw aiError("ai_timeout")
           diagnostics?.recordToolCall()
           diagnostics?.event(AiDiagnosticSite.TOOL_PROTOCOL, AiDiagnosticReason.TOOL_STARTED)
           val result =
-            diagnostics?.observe(AiDiagnosticStage.PLANNER_TOOL) { tool(call) } ?: tool(call)
+            if (protocolIssue != null) {
+              tools.jackson.databind.json.JsonMapper.builder()
+                .build()
+                .writeValueAsBytes(PlannerValidationIssue(requireNotNull(protocolIssue)).response())
+            } else diagnostics?.observe(AiDiagnosticStage.PLANNER_TOOL) { tool(call) } ?: tool(call)
           diagnostics?.event(
             AiDiagnosticSite.TOOL_PROTOCOL,
             AiDiagnosticReason.TOOL_COMPLETED,
@@ -72,6 +91,11 @@ internal class CalendarPlannerAgent(
           transcript += PlannerToolExchange(call, result)
         }
         if (diagnostics != null) diagnostics.withTool(call.name, execute) else execute()
+        // Only server-side validation can supply this value; model-provided valid:true is ignored.
+        if (call.name == "validate_and_finalize_plan")
+          acceptedPlan()?.let {
+            return it
+          }
       }
     }
     reject(AiDiagnosticReason.ROUND_LIMIT, maxRounds.toLong(), maxRounds.toLong())

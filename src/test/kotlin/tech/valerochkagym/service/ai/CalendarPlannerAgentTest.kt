@@ -12,6 +12,136 @@ class CalendarPlannerAgentTest {
   private val candidate = UUID(0, 1).toString()
 
   @Test
+  fun `accepted tool plan finishes on the last round without another model response`() {
+    val plan = json.readTree("{\"result\":{\"name\":\"accepted\"}}")
+    var accepted: tools.jackson.databind.JsonNode? = null
+    var turns = 0
+    val agent =
+      CalendarPlannerAgent(
+        turn = {
+          turns++
+          check(turns == 1) { "Must not ask the model to repeat the validated plan" }
+          PlannerTurn(
+            calls =
+              listOf(
+                PlannerToolProtocol.Call(
+                  "finish",
+                  "validate_and_finalize_plan",
+                  bytes = "{}".encodeToByteArray(),
+                  plan = plan,
+                )
+              )
+          )
+        },
+        tool = {
+          accepted = plan
+          "{\"valid\":true}".encodeToByteArray()
+        },
+        acceptedPlan = { accepted },
+        maxRounds = 1,
+      )
+    assertEquals(plan, agent.run(setOf(candidate)) { 45000 })
+    assertEquals(1, turns)
+  }
+
+  @Test
+  fun `unknown candidate is explained and can be corrected without executing it`() {
+    var executed = 0
+    var turns = 0
+    val agent =
+      CalendarPlannerAgent(
+        turn = { transcript ->
+          turns++
+          if (turns == 2) {
+            val feedback = json.readTree(transcript.single().result)
+            assertEquals(false, feedback["valid"].asBoolean())
+            assertEquals("UNKNOWN_CANDIDATE", feedback["details"]["reason"].asString())
+          }
+          if (turns == 3) PlannerTurn(final = json.readTree("{}"))
+          else
+            PlannerTurn(
+              calls =
+                listOf(
+                  PlannerToolProtocol.Call(
+                    "details-$turns",
+                    "get_candidate_details_and_history",
+                    listOf(if (turns == 1) UUID(0, 2).toString() else candidate),
+                    "{}".encodeToByteArray(),
+                  )
+                )
+            )
+        },
+        tool = {
+          executed++
+          "{}".encodeToByteArray()
+        },
+      )
+    agent.run(setOf(candidate)) { 45000 }
+    assertEquals(1, executed)
+    assertEquals(3, turns)
+  }
+
+  @Test
+  fun `provider success flag alone cannot finalize a plan`() {
+    var turns = 0
+    val agent =
+      CalendarPlannerAgent(
+        turn = {
+          turns++
+          PlannerTurn(
+            calls =
+              listOf(
+                PlannerToolProtocol.Call(
+                  "finish-$turns",
+                  "validate_and_finalize_plan",
+                  bytes = "{}".encodeToByteArray(),
+                  plan = json.readTree("{}"),
+                )
+              )
+          )
+        },
+        tool = { "{\"valid\":true}".encodeToByteArray() },
+        maxRounds = 1,
+      )
+    assertEquals(
+      "ai_invalid_response",
+      assertThrows<ApiException> { agent.run(setOf(candidate)) { 45000 } }.code,
+    )
+  }
+
+  @Test
+  fun `accepted plan cannot bypass an expired attempt deadline`() {
+    var remaining = 1L
+    var accepted: tools.jackson.databind.JsonNode? = null
+    val agent =
+      CalendarPlannerAgent(
+        turn = {
+          PlannerTurn(
+            calls =
+              listOf(
+                PlannerToolProtocol.Call(
+                  "finish",
+                  "validate_and_finalize_plan",
+                  bytes = "{}".encodeToByteArray(),
+                  plan = json.readTree("{}"),
+                )
+              )
+          )
+        },
+        tool = {
+          accepted = json.readTree("{}")
+          remaining = 0
+          "{}".encodeToByteArray()
+        },
+        acceptedPlan = { accepted },
+      )
+    assertEquals(
+      "ai_timeout",
+      assertThrows<ApiException> { agent.run(setOf(candidate)) { remaining } }.code,
+    )
+  }
+
+  @Test
   fun `oversized tool response records its size and tool before rejecting the attempt`() {
     val diagnostics = AiDiagnostics()
     val agent =
@@ -74,9 +204,18 @@ class CalendarPlannerAgentTest {
       }
     }
     val run = diagnostics.snapshot().single()
-    assertEquals(0, run.toolCalls)
-    assertEquals(AiDiagnosticReason.UNKNOWN_CANDIDATE, run.events.last().reason)
-    assertEquals(AiDiagnosticSite.TOOL_PROTOCOL, run.events.last().site)
+    assertEquals(
+      PlannerToolProtocol.defaultMaxCalls.coerceAtMost(PlannerToolProtocol.defaultMaxRounds),
+      run.toolCalls,
+    )
+    assertEquals(
+      true,
+      run.events.any {
+        it.reason == AiDiagnosticReason.UNKNOWN_CANDIDATE &&
+          it.site == AiDiagnosticSite.TOOL_PROTOCOL
+      },
+    )
+    assertEquals(AiDiagnosticReason.ROUND_LIMIT, run.events.last().reason)
   }
 
   @Test
