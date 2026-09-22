@@ -137,15 +137,13 @@ class WebAuthController(
   }
 
   @PostMapping("/register")
-  fun register(
-    @RequestBody body: Credentials,
-    request: HttpServletRequest,
-    response: HttpServletResponse,
-  ): Map<String, String> {
+  fun register(request: HttpServletRequest, response: HttpServletResponse): Map<String, String> {
     guard(request, response)
-    limited(body.email)
-    auth.register(body.email, body.password)
-    return mapOf("status" to "check_email")
+    throw ApiException(
+      403,
+      "registration_disabled",
+      "Регистрация на сайте недоступна. Сайт в разработке.",
+    )
   }
 
   @PostMapping("/verify/request", "/password/request")
@@ -209,7 +207,10 @@ class WebAuthController(
   ): Map<String, Any> {
     guard(request, response)
     val account = google.verify(body.idToken, body.nonce)
-    return browser(auth.google(account.subject, account.email, body.deviceName), response)
+    return browser(
+      auth.google(account.subject, account.email, body.deviceName, allowRegistration = false),
+      response,
+    )
   }
 }
 

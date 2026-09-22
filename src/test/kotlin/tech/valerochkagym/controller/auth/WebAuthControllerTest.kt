@@ -16,10 +16,11 @@ import tech.valerochkagym.service.auth.GoogleVerifier
 
 class WebAuthControllerTest {
   private val auth = mock(AuthService::class.java)
+  private val google = mock(GoogleVerifier::class.java)
   private val controller =
     WebAuthController(
       auth,
-      mock(GoogleVerifier::class.java),
+      google,
       mock(GoogleIdentity::class.java),
       mock(RateLimiter::class.java),
       "https://api.valerochkagym.tech",
@@ -35,6 +36,50 @@ class WebAuthControllerTest {
         Cookie(WebAuthController.REFRESH, "refresh"),
       )
     }
+
+  @Test
+  fun `browser registration is disabled without touching auth`() {
+    val response = MockHttpServletResponse()
+    val error = assertThrows(ApiException::class.java) { controller.register(request(), response) }
+    assertEquals(403, error.status)
+    assertEquals("no-store", response.getHeader("Cache-Control"))
+    verifyNoInteractions(auth)
+  }
+
+  @Test
+  fun `browser password login remains available`() {
+    val body =
+      tech.valerochkagym.controller.model.Credentials("test@example.com", "password", "Web")
+    `when`(auth.login(body.email, body.password, body.deviceName))
+      .thenReturn(Tokens(UUID.randomUUID(), body.email, "access", "refresh"))
+    assertEquals(
+      "access",
+      controller.login(body, request(), MockHttpServletResponse())["accessToken"],
+    )
+  }
+
+  @Test
+  fun `browser google login forbids account creation`() {
+    `when`(google.verify("id-token", "nonce"))
+      .thenReturn(tech.valerochkagym.service.model.GoogleAccount("subject", "test@example.com"))
+    `when`(auth.google("subject", "test@example.com", "Web", allowRegistration = false))
+      .thenReturn(Tokens(UUID.randomUUID(), "test@example.com", "access", "refresh"))
+    val body = tech.valerochkagym.controller.model.GoogleRequest("id-token", "nonce", "Web")
+    assertEquals(
+      "access",
+      controller.google(body, request(), MockHttpServletResponse())["accessToken"],
+    )
+    verify(auth).google("subject", "test@example.com", "Web", allowRegistration = false)
+  }
+
+  @Test
+  fun `app registration remains available`() {
+    val app =
+      AuthController(auth, google, mock(GoogleIdentity::class.java), mock(RateLimiter::class.java))
+    val body = tech.valerochkagym.controller.model.Credentials("test@example.com", "password")
+    assertEquals("check_email", app.register(body)["status"])
+    verify(auth).register(body.email, body.password)
+  }
 
   @Test
   fun `rejects missing Origin before touching auth`() {
