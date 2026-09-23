@@ -160,7 +160,13 @@ class AuthService(
     }!!
   }
 
-  fun google(subject: String, rawEmail: String, device: String, link: Identity? = null): Tokens {
+  fun google(
+    subject: String,
+    rawEmail: String,
+    device: String,
+    link: Identity? = null,
+    allowRegistration: Boolean = true,
+  ): Tokens {
     val email = email(rawEmail)
     return tx.execute {
       postgres.lockIdentityCreation()
@@ -184,6 +190,12 @@ class AuthService(
           409,
           "link_required",
           "Войдите с паролем и подключите Google в настройках аккаунта",
+        )
+      if (!allowRegistration)
+        throw ApiException(
+          403,
+          "registration_disabled",
+          "Регистрация на сайте недоступна. Сайт в разработке.",
         )
       val user =
         users.saveAndFlush(UserEntity(email = email, emailVerified = true, googleSubject = subject))
