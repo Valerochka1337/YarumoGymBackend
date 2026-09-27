@@ -21,6 +21,17 @@ data class WorkoutSnapshot(
   val profile: CoachProfile = CoachProfile(),
   val observedAtMillis: Long = System.currentTimeMillis(),
   val autoregulationOptions: AutoregulationOptions = AutoregulationOptions(),
+  val originalPlan: List<SnapshotExercise> = emptyList(),
+  val originalPlanComplete: Boolean = false,
+  val weeklyLoad: SnapshotWeeklyLoad? = null,
+)
+
+data class SnapshotWeeklyLoad(
+  val fromMillis: Long,
+  val untilMillis: Long,
+  val complete: Boolean,
+  val completedWorkoutCount: Int,
+  val effectiveSetsPerWeek: Map<String, Double>,
 )
 
 data class CoachProfile(
@@ -74,6 +85,8 @@ data class SnapshotSet(
   val reportedFeelings: Set<String> = emptySet(),
   val actualRir: Int? = null,
   val actualRirAtLeastFour: Boolean = false,
+  val note: String = "",
+  val planProvenance: String = "UNKNOWN",
 )
 
 data class SnapshotHistory(
@@ -90,6 +103,7 @@ data class SnapshotHistory(
   val actualRir: Int? = null,
   val actualRirAtLeastFour: Boolean = false,
   val interrupted: Boolean = false,
+  val note: String = "",
 )
 
 data class SnapshotPulse(val bpm: Int, val measuredAtMillis: Long)

@@ -198,6 +198,13 @@ object AutoregulationEngine {
           val capacity = ((minutes.coerceAtLeast(0) * 60L + rest) / secondsPerSet).toInt()
           if (capacity < remaining.size) {
             val removed = remaining.drop(capacity)
+            if (snapshot.originalPlanComplete)
+              return clarify(
+                "time_priorities_unknown",
+                "Осталось $minutes мин и ${remaining.size} подходов.",
+                "Оценка времени не определяет приоритеты всей программы. Уточните, что важнее сохранить.",
+                MissingData.INTENT,
+              )
             return result(
               "time_capacity",
               RecommendationKind.ADJUST,
@@ -285,6 +292,39 @@ object AutoregulationEngine {
       val drop =
         if (sameWeight && previousReps != null && currentReps != null) previousReps - currentReps
         else null
+      val originalSets =
+        snapshot.originalPlan.firstOrNull { it.sectionId == section.sectionId }?.sets.orEmpty()
+      val originalPrevious = originalSets.firstOrNull { it.syncId == previous?.syncId }
+      val originalLatest = originalSets.firstOrNull { it.syncId == latest.syncId }
+      val plannedPrevious = originalPrevious?.reps ?: previous?.targetReps ?: previous?.originalReps
+      val plannedLatest = originalLatest?.reps ?: latest.targetReps ?: latest.originalReps
+      if (
+        snapshot.originalPlanComplete &&
+          drop != null &&
+          plannedPrevious != null &&
+          plannedLatest != null &&
+          plannedLatest < plannedPrevious
+      )
+        return result(
+          "planned_rep_reduction",
+          RecommendationKind.NO_CHANGE,
+          "Снижение повторений было в исходном плане.",
+          "Сохраняем оставшуюся тренировку.",
+        )
+      if (
+        snapshot.originalPlanComplete &&
+          drop != null &&
+          drop > 2 &&
+          options.observedRestSeconds != null &&
+          rest != null &&
+          options.observedRestSeconds < rest
+      )
+        return result(
+          "short_rest",
+          RecommendationKind.NO_CHANGE,
+          "Отдых был короче запланированного ($rest с).",
+          "Сначала выдержите предусмотренный отдых; снижение повторений пока не требует правки плана.",
+        )
 
       if (
         !harderConfirmed &&
