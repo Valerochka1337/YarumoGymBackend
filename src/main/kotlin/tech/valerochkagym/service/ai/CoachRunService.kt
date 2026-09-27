@@ -167,6 +167,37 @@ class CoachRunService(
       bad("Некорректная тренировка")
     if (snapshot["exercises"]?.isArray != true || snapshot["exercises"].size() > 100)
       bad("Некорректные упражнения")
+    if (
+      snapshot.has("snapshot_schema_version") &&
+        (snapshot["snapshot_schema_version"]?.isIntegralNumber != true ||
+          snapshot["snapshot_schema_version"].asInt() !in 1..2)
+    )
+      bad("Неподдерживаемая версия снимка")
+    if (snapshot["snapshot_schema_version"]?.asInt() == 2) {
+      val plan = snapshot["original_plan"]
+      val complete = plan?.get("complete")?.asBoolean() == true
+      if (
+        plan?.get("exercises")?.isArray != true ||
+          plan["exercises"].size() > 100 ||
+          snapshot["decision_mode"]?.asString() != (if (complete) "V2" else "LEGACY")
+      )
+        bad("Некорректный исходный план")
+      if (complete) {
+        val sections = plan["exercises"].toList()
+        val ids =
+          sections.flatMap { section ->
+            uuid(section["section_id"])
+            uuid(section["exercise_id"])
+            section["sets"]?.toList().orEmpty().map { set -> uuid(set["set_id"]).toString() }
+          }
+        if (
+          sections.map { it["section_id"].asString() }.distinct().size != sections.size ||
+            ids.size != ids.distinct().size ||
+            sections.any { it["sets"]?.isArray != true || it["sets"].size() > 100 }
+        )
+          bad("Некорректные подходы исходного плана")
+      }
+    }
   }
 
   fun submit(identity: Identity, raw: ByteArray): JsonNode {
@@ -496,6 +527,20 @@ class CoachRunService(
       }
       if (previous != null && sequence <= previous.first)
         return@execute acknowledge(false, previous.first)
+      if (previous != null) {
+        val old = previous.second
+        val incoming = input["snapshot"]
+        val legacyUpgrade =
+          old["original_plan"] == null &&
+            incoming["original_plan"]?.get("complete")?.asBoolean() == false &&
+            incoming["decision_mode"]?.asString() == "LEGACY"
+        if (
+          !legacyUpgrade &&
+            (old["original_plan"] != incoming["original_plan"] ||
+              old["decision_mode"] != incoming["decision_mode"])
+        )
+          bad("Исходный план или режим сессии изменился")
+      }
       val semantic = semanticVersion(input["snapshot"])
       val active = input["active"]?.asBoolean() ?: true
       val initiative = input["initiativeEnabled"]?.asBoolean() ?: false
@@ -510,8 +555,9 @@ class CoachRunService(
         active,
       )
       jdbc.update(
-        "UPDATE coach_sessions SET semantic_version=? WHERE owner_id=? AND workout_id=?",
+        "UPDATE coach_sessions SET semantic_version=?,schema_version=? WHERE owner_id=? AND workout_id=?",
         semantic,
+        input["snapshot"]["snapshot_schema_version"]?.asInt() ?: 1,
         identity.userId,
         workout,
       )

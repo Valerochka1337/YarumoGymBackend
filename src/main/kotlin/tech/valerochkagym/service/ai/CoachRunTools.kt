@@ -141,6 +141,13 @@ internal class CoachRunTools(private val json: ObjectMapper) {
     val sets =
       sections.values.flatMap { it["sets"].toList() }.associateBy { it["set_id"].asString() }
     val edited = mutableSetOf<String>()
+    val structuralSections = mutableSetOf<String>()
+    fun reserveSection(id: String) {
+      require(structuralSections.add(id)) { "Конфликт операций секции" }
+      require(sections.getValue(id)["sets"].toList().none { it["set_id"].asString() in edited }) {
+        "Конфликт операций подхода и секции"
+      }
+    }
     fun section(value: JsonNode?): String =
       uuid(value).also { require(it in sections) { "Неизвестная секция" } }
     fun set(value: JsonNode?): String =
@@ -153,12 +160,28 @@ internal class CoachRunTools(private val json: ObjectMapper) {
       when (action) {
         "add_exercise" -> {
           fields("exercise_id", "position")
-          require(knownExercise(uuid(op["exercise_id"]))) { "Упражнение недоступно" }
+          val exerciseId = uuid(op["exercise_id"])
+          require(
+            knownExercise(exerciseId) &&
+              snapshot["excluded_exercise_ids"]?.none { it.asString() == exerciseId } != false
+          ) {
+            "Упражнение недоступно"
+          }
           op["position"]?.let { int(it, max = sections.size.toLong()) }
         }
         "remove_remaining" -> {
           fields("section_id")
-          section(op["section_id"])
+          val id = section(op["section_id"])
+          reserveSection(id)
+          require(
+            sections
+              .getValue(id)["sets"]
+              .toList()
+              .filter { it["completed"]?.asBoolean() != true }
+              .none { it["note"]?.asString()?.isNotBlank() == true }
+          ) {
+            "Оставшиеся подходы с заметками нельзя удалить без уточнения приоритета"
+          }
         }
         "move_exercise" -> {
           fields("section_id", "position")
@@ -178,7 +201,14 @@ internal class CoachRunTools(private val json: ObjectMapper) {
         "replace_remaining" -> {
           fields("section_id", "exercise_id", "remaining_set_ids", "weight_kg")
           val target = section(op["section_id"])
-          require(knownExercise(uuid(op["exercise_id"]))) { "Упражнение недоступно" }
+          reserveSection(target)
+          val exerciseId = uuid(op["exercise_id"])
+          require(
+            knownExercise(exerciseId) &&
+              snapshot["excluded_exercise_ids"]?.none { it.asString() == exerciseId } != false
+          ) {
+            "Упражнение недоступно"
+          }
           val remaining =
             sections
               .getValue(target)["sets"]
@@ -186,6 +216,15 @@ internal class CoachRunTools(private val json: ObjectMapper) {
               .filter { it["completed"]?.asBoolean() != true }
               .map { it["set_id"].asString() }
               .toSet()
+          require(
+            sections
+              .getValue(target)["sets"]
+              .toList()
+              .filter { it["set_id"].asString() in remaining }
+              .none { it["note"]?.asString()?.isNotBlank() == true }
+          ) {
+            "Оставшиеся подходы с заметками нельзя заменить без уточнения приоритета"
+          }
           require(ids(op["remaining_set_ids"]).toSet() == remaining && remaining.isNotEmpty()) {
             "Нужно передать все оставшиеся подходы секции"
           }
@@ -193,7 +232,7 @@ internal class CoachRunTools(private val json: ObjectMapper) {
         }
         "add_set" -> {
           fields("section_id")
-          section(op["section_id"])
+          reserveSection(section(op["section_id"]))
         }
         "delete_set" -> {
           fields("set_id")
@@ -201,12 +240,31 @@ internal class CoachRunTools(private val json: ObjectMapper) {
           require(sets.getValue(id)["completed"]?.asBoolean() != true) {
             "Выполненный подход нельзя удалить"
           }
+          require(sets.getValue(id)["note"]?.asString()?.isNotBlank() != true) {
+            "Подход с заметкой нельзя удалить без уточнения приоритета"
+          }
+          require(
+            sections.values.none { section ->
+              section["section_id"].asString() in structuralSections &&
+                section["sets"].any { it["set_id"].asString() == id }
+            }
+          ) {
+            "Конфликт операций подхода и секции"
+          }
           require(edited.add(id)) { "Конфликт операций подхода" }
         }
         "edit_set",
         "record_result" -> {
           fields("set_id", "values")
           val id = set(op["set_id"])
+          require(
+            sections.values.none { section ->
+              section["section_id"].asString() in structuralSections &&
+                section["sets"].any { it["set_id"].asString() == id }
+            }
+          ) {
+            "Конфликт операций подхода и секции"
+          }
           require(edited.add(id)) { "Конфликт операций подхода" }
           if (action == "edit_set")
             require(sets.getValue(id)["completed"]?.asBoolean() != true) {
@@ -383,56 +441,99 @@ internal class CoachRunTools(private val json: ObjectMapper) {
     fun JsonNode.integer(key: String) = get(key)?.takeIf { it.isIntegralNumber }?.asInt()
     fun JsonNode.strings(key: String) = get(key)?.toList().orEmpty().map { it.asString() }.toSet()
     val profile = node["profile"]
+    fun exercises(value: JsonNode?): List<SnapshotExercise> =
+      value?.toList().orEmpty().map { e ->
+        SnapshotExercise(
+          sectionId = e["section_id"].asString(),
+          exerciseId = e["exercise_id"].asString(),
+          exerciseSyncId = e["exercise_id"].asString(),
+          name = e["name"]?.asString().orEmpty(),
+          position = e["position"]?.asInt() ?: 0,
+          muscleIds = e.strings("muscles"),
+          equipmentIds = e.strings("equipment"),
+          type = e["type"]?.asString(),
+          sets =
+            e["sets"]?.toList().orEmpty().map { s ->
+              SnapshotSet(
+                syncId = s["set_id"].asString(),
+                setIndex = s["index"].asInt(),
+                completed = s["completed"]?.asBoolean() ?: false,
+                weightKg = s.num("weight_kg"),
+                reps = s.integer("reps"),
+                durationSec = s.integer("duration_sec"),
+                completedAt = s["completed_at"]?.asLong(),
+                speedKmh = s.num("speed_kmh"),
+                inclinePct = s.num("incline_pct"),
+                setType = s["set_type"]?.asString() ?: "UNKNOWN",
+                originalWeightKg = s.num("original_weight_kg"),
+                originalReps = s.integer("original_reps"),
+                originalDurationSec = s.integer("original_duration_sec"),
+                originalSpeedKmh = s.num("original_speed_kmh"),
+                originalInclinePct = s.num("original_incline_pct"),
+                targetWeightKg = s.num("target_weight_kg"),
+                targetReps = s.integer("target_reps"),
+                targetDurationSec = s.integer("target_duration_sec"),
+                targetSpeedKmh = s.num("target_speed_kmh"),
+                targetInclinePct = s.num("target_incline_pct"),
+                actualWeightKg = s.num("actual_weight_kg"),
+                actualReps = s.integer("actual_reps"),
+                actualDurationSec = s.integer("actual_duration_sec"),
+                actualSpeedKmh = s.num("actual_speed_kmh"),
+                actualInclinePct = s.num("actual_incline_pct"),
+                actualRir = s.integer("actual_rir"),
+                actualRirAtLeastFour = s["actual_rir_at_least_four"]?.asBoolean() ?: false,
+                reportedFeelings = s.strings("reported_feelings"),
+                note = s["note"]?.asString().orEmpty(),
+                planProvenance = s["plan_provenance"]?.asString() ?: "UNKNOWN",
+              )
+            },
+          history =
+            e["history"]?.toList().orEmpty().map { h ->
+              SnapshotHistory(
+                completedAt = h["completed_at"]?.asLong() ?: 0,
+                setIndex = h["set_index"]?.asInt() ?: 0,
+                weightKg = h.num("weight_kg"),
+                reps = h.integer("reps"),
+                durationSec = h.integer("duration_sec"),
+                speedKmh = h.num("speed_kmh"),
+                inclinePct = h.num("incline_pct"),
+                setType = h["set_type"]?.asString() ?: "UNKNOWN",
+                workoutId = h["workout_id"]?.asString().orEmpty(),
+                setSyncId = h["set_id"]?.asString().orEmpty(),
+                actualRir = h.integer("actual_rir"),
+                actualRirAtLeastFour = h["actual_rir_at_least_four"]?.asBoolean() ?: false,
+                interrupted = h["interrupted"]?.asBoolean() ?: false,
+                note = h["note"]?.asString().orEmpty(),
+              )
+            },
+        )
+      }
     return WorkoutSnapshot(
       accountId = owner.toString(),
       workoutId = node["workout_id"].asString(),
       revision = node["revision"].asLong(),
-      exercises =
-        node["exercises"].toList().map { e ->
-          SnapshotExercise(
-            sectionId = e["section_id"].asString(),
-            exerciseId = e["exercise_id"].asString(),
-            exerciseSyncId = e["exercise_id"].asString(),
-            name = e["name"]?.asString().orEmpty(),
-            type = e["type"]?.asString(),
-            sets =
-              e["sets"].toList().map { s ->
-                SnapshotSet(
-                  syncId = s["set_id"].asString(),
-                  setIndex = s["index"].asInt(),
-                  completed = s["completed"].asBoolean(),
-                  weightKg = s.num("weight_kg"),
-                  reps = s.integer("reps"),
-                  durationSec = s.integer("duration_sec"),
-                  completedAt = s["completed_at"]?.asLong(),
-                  setType = s["set_type"]?.asString() ?: "UNKNOWN",
-                  actualWeightKg = s.num("actual_weight_kg"),
-                  actualReps = s.integer("actual_reps"),
-                  actualRir = s.integer("actual_rir"),
-                  actualRirAtLeastFour = s["actual_rir_at_least_four"]?.asBoolean() ?: false,
-                  reportedFeelings = s.strings("reported_feelings"),
-                )
-              },
-            history =
-              e["history"]
-                ?.toList()
-                ?.map { h ->
-                  SnapshotHistory(
-                    completedAt = h["completed_at"]?.asLong() ?: 0,
-                    setIndex = h["set_index"]?.asInt() ?: 0,
-                    weightKg = h.num("weight_kg"),
-                    reps = h.integer("reps"),
-                    durationSec = h.integer("duration_sec"),
-                    setType = h["set_type"]?.asString() ?: "UNKNOWN",
-                    workoutId = h["workout_id"]?.asString().orEmpty(),
-                    setSyncId = h["set_id"]?.asString().orEmpty(),
-                    interrupted = h["interrupted"]?.asBoolean() ?: false,
-                  )
-                }
+      exercises = exercises(node["exercises"]),
+      originalPlan = exercises(node["original_plan"]?.get("exercises")),
+      originalPlanComplete = node["original_plan"]?.get("complete")?.asBoolean() ?: false,
+      weeklyLoad =
+        node["weekly_load"]?.let { weekly ->
+          SnapshotWeeklyLoad(
+            fromMillis = weekly["from_millis"]?.asLong() ?: 0,
+            untilMillis = weekly["until_millis"]?.asLong() ?: 0,
+            complete = weekly["complete"]?.asBoolean() ?: false,
+            completedWorkoutCount = weekly["completed_workout_count"]?.asInt() ?: 0,
+            effectiveSetsPerWeek =
+              weekly["effective_sets_per_week"]
+                ?.properties()
+                ?.associate { it.key to it.value.asDouble() }
                 .orEmpty(),
           )
         },
-      feelings = node.strings("reported_feelings"),
+      feelings = node.strings("feelings"),
+      currentSetId = node["current_set_id"]?.asString(),
+      previousSetId = node["previous_set_id"]?.asString(),
+      nextSetId = node["next_set_id"]?.asString(),
+      elapsedSeconds = node["elapsed_seconds"]?.asLong() ?: 0,
       availableTimeMinutes = node.integer("available_time_minutes"),
       futureRestSeconds = node.integer("future_rest_seconds"),
       excludedExerciseIds = node.strings("excluded_exercise_ids"),
@@ -443,12 +544,20 @@ internal class CoachRunTools(private val json: ObjectMapper) {
             it["start_id"].asString(),
             it.integer("planned_seconds"),
             it.integer("remaining_seconds"),
-            0,
+            it["started_at_millis"]?.asLong() ?: 0,
+            it["ends_at_millis"]?.asLong(),
           )
+        },
+      pulse =
+        node["pulse"]?.let { pulse ->
+          SnapshotPulse(pulse["bpm"].asInt(), pulse["measured_at_millis"].asLong())
         },
       profile =
         CoachProfile(
           trainingGoal = profile?.get("training_goal")?.asString(),
+          experienceLevel = profile?.get("experience_level")?.asString(),
+          constraints = profile?.get("constraints")?.asString(),
+          equipmentIds = profile?.strings("equipment_preferences").orEmpty(),
           preferredRepMin = profile?.integer("preferred_rep_min"),
           preferredRepMax = profile?.integer("preferred_rep_max"),
         ),
@@ -533,8 +642,13 @@ internal class CoachRunTools(private val json: ObjectMapper) {
     val changed = latest?.second?.let { it != oldSets[it["set_id"]?.asString()] } ?: false
     val minutes = current["available_time_minutes"]?.takeIf { it.isNumber }?.asInt()
     val oldMinutes = previous?.get("available_time_minutes")?.takeIf { it.isNumber }?.asInt()
-    val timeChanged = minutes != null && minutes <= 5 && minutes != oldMinutes
-    if (!changed && !timeChanged) return null
+    val completePlan = current["original_plan"]?.get("complete")?.asBoolean() == true
+    val timeChanged = minutes != null && minutes != oldMinutes && (completePlan || minutes <= 5)
+    val equipmentChanged =
+      completePlan &&
+        previous != null &&
+        current["excluded_exercise_ids"] != previous?.get("excluded_exercise_ids")
+    if (!changed && !timeChanged && !equipmentChanged) return null
     val assessment = calculation(UUID(0, 0), current, options(json.createObjectNode(), current))
     if (assessment.missingData.any { it == MissingData.SET_TYPE || it == MissingData.ACTUAL_RIR })
       return null

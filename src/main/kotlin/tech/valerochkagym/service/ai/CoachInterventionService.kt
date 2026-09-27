@@ -152,6 +152,7 @@ class CoachInterventionService(
           "kind" to "proposal",
           "text" to text,
           "decision" to decision,
+          "sourceSets" to CoachSourceEvidence.capture(json, snapshot, operations),
           "proposal" to
             mapOf(
               "proposalId" to proposalId,
@@ -185,6 +186,9 @@ class CoachInterventionService(
     val decision = assessment(owner, planningSnapshot(owner, workout, snapshot))
     when (decision["reason_code"].asString()) {
       "confirmed_harder_adjustment" -> {
+        // Complete-plan sessions go through the model's full remaining-workout review.
+        // The deterministic next-set calculation remains available as context, not a final packet.
+        if (snapshot["original_plan"]?.get("complete")?.asBoolean() == true) return false
         publish(owner, workout, snapshot, context, decision)
         return true
       }
@@ -217,12 +221,19 @@ class CoachInterventionService(
         val questionId = UUID.randomUUID()
         val expires = clock.millis() + 300_000
         val harder = withAnswer(snapshot, latest["set_id"].asString(), "HARDER_THAN_EXPECTED")
+        val harderDecision = assessment(owner, harder)
+        if (
+          harderDecision["kind"]?.asString() != "ADJUST" ||
+            harderDecision["operations"]?.isEmpty != false
+        )
+          return false
         val payload =
           tree(
             mapOf(
               "kind" to "question",
               "text" to "Почему изменился результат подхода?",
               "decision" to decision,
+              "sourceSets" to CoachSourceEvidence.capture(json, snapshot),
               "question" to
                 mapOf(
                   "questionId" to questionId,
@@ -238,7 +249,7 @@ class CoachInterventionService(
                     ),
                   "branches" to
                     mapOf(
-                      "HARDER_THAN_EXPECTED" to assessment(owner, harder),
+                      "HARDER_THAN_EXPECTED" to harderDecision,
                       "PLANNED_EFFORT" to mapOf("kind" to "KEEP"),
                       "INTERRUPTED" to mapOf("kind" to "KEEP"),
                     ),
