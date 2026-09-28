@@ -196,10 +196,11 @@ test('AI settings keep the stored key write-only and save with CSRF and revision
 });
 
 test('planner settings edit drafts and save server configuration without starting a workout',async t=>{
-  const slot={role:'PRIMARY',movement:'Жим',exerciseType:'STRENGTH',exerciseCount:1,sets:3,repsMin:6,repsMax:12,restSeconds:120,durationSeconds:0};
+  const slot={role:'PRIMARY',movement:'Жим',movementClass:'HORIZONTAL_PUSH',slotId:'push',preferredSetCount:3,preferredRestSeconds:120,targetTotalReps:27,targetIntensityBasisPoints:7000,allowedRestSeconds:[120],allowedActiveSeconds:[],exerciseType:'STRENGTH',exerciseCount:1,sets:3,repsMin:6,repsMax:12,restSeconds:120,durationSeconds:0};
   const data={model:'text',instructions:'Черновик',historyDays:28,detailDays:7,maxRounds:6,maxToolCalls:12,timeoutSeconds:45,weightStepKg:2.5,collections:[{id:'fitness',goal:'GENERAL_FITNESS',name:'Общая форма',sequence:['fitness-a'],patterns:[{id:'fitness-a',name:'Всё тело',focus:'FULL_BODY',description:'<b>Не HTML</b>',slots:[slot]}]}]};
   const ui=await setup({
     'GET /admin/api/planner-settings':()=>({data}),
+    'GET /admin/api/planner-exercise-mappings':()=>({data:{items:[]}}),
     'GET /admin/api/planner-exercises':()=>({data:[{id:'00000000-0000-0000-0000-000000000010',name:'Присед'}]}),
     'PUT /admin/api/planner-settings':body=>({data:body}),
   });
@@ -209,7 +210,8 @@ test('planner settings edit drafts and save server configuration without startin
   const form=ui.w.document.querySelector('.planner-settings');
   const field=label=>[...form.querySelectorAll('label')].find(x=>x.firstChild?.textContent===label).querySelector('input,select,textarea');
   const change=(input,value)=>{input.value=value;input.dispatchEvent(new ui.w.Event('input',{bubbles:true}));};
-  change(field('Модель (пусто — текущая модель текста)'),'planner-model');
+  assert.equal([...form.querySelectorAll('label')].some(x=>/Модель|Раунды|Инструкции/.test(x.firstChild?.textContent||'')),false);
+  change(field('Предпочтительно подходов'),'4');
   change(field('Подходов'),'4');
   assert.equal(field('История, дней (до 28)').max,'28');
   assert.equal(field('Подробно, дней (до 7)').max,'7');
@@ -222,7 +224,8 @@ test('planner settings edit drafts and save server configuration without startin
   const write=ui.requests.find(r=>r.method==='PUT');
   assert.equal(write.path,'/admin/api/planner-settings');
   assert.equal(write.headers['X-CSRF-Token'],'test-csrf');
-  assert.equal(write.body.model,'planner-model');
+  assert.equal(write.body.model,'text');
+  assert.equal(write.body.collections[0].patterns[0].slots[0].preferredSetCount,4);
   assert.equal(write.body.collections[0].patterns[0].slots[0].sets,4);
   assert.deepEqual(write.body.defaultExerciseAccents,[{exerciseId:'00000000-0000-0000-0000-000000000010',accent:'MORE'}]);
   assert.equal(write.body.collections[0].patterns[0].id,'fitness-a');
@@ -242,9 +245,10 @@ test('planner settings edit drafts and save server configuration without startin
 
 test('planner settings keep stale default read-only and allow its reset',async t=>{
   const stale='00000000-0000-0000-0000-000000000099';
-  const data={model:'text',instructions:'Черновик',historyDays:28,detailDays:7,maxRounds:6,maxToolCalls:12,timeoutSeconds:45,weightStepKg:2.5,defaultExerciseAccents:[{exerciseId:stale,accent:'NEVER'}],collections:[{id:'fitness',goal:'GENERAL_FITNESS',name:'Общая форма',sequence:['fitness-a'],patterns:[{id:'fitness-a',name:'Всё тело',focus:'FULL_BODY',description:'',slots:[{role:'PRIMARY',movement:'Жим',exerciseType:'STRENGTH',exerciseCount:1,sets:3,repsMin:6,repsMax:12,restSeconds:120,durationSeconds:0}]}]}]};
+  const data={model:'text',instructions:'Черновик',historyDays:28,detailDays:7,maxRounds:6,maxToolCalls:12,timeoutSeconds:45,weightStepKg:2.5,defaultExerciseAccents:[{exerciseId:stale,accent:'NEVER'}],collections:[{id:'fitness',goal:'GENERAL_FITNESS',name:'Общая форма',sequence:['fitness-a'],patterns:[{id:'fitness-a',name:'Всё тело',focus:'FULL_BODY',description:'',slots:[{role:'PRIMARY',movement:'Жим',movementClass:'HORIZONTAL_PUSH',slotId:'push',preferredSetCount:3,preferredRestSeconds:120,targetTotalReps:27,targetIntensityBasisPoints:7000,allowedRestSeconds:[120],allowedActiveSeconds:[],exerciseType:'STRENGTH',exerciseCount:1,sets:3,repsMin:6,repsMax:12,restSeconds:120,durationSeconds:0}]}]}]};
   const ui=await setup({
     'GET /admin/api/planner-settings':()=>({data}),
+    'GET /admin/api/planner-exercise-mappings':()=>({data:{items:[]}}),
     'GET /admin/api/planner-exercises':()=>({data:[]}),
     'PUT /admin/api/planner-settings':body=>({data:body}),
   });
@@ -323,5 +327,36 @@ test('diagnostic events explain recovered rejection and copied reports omit untr
   assert.equal(report.runs[0].events[1].field,null);
   assert.equal(report.runs[0].events[1].actual,null);
   assert.equal(copied.includes('secret'),false);
+  assert.equal(ui.errors.length,0);
+});
+
+test('planner classification editor saves explicit movement roles and goals for selected built in exercise',async t=>{
+  const id='00000000-0000-0000-0000-000000000010';
+  const settings={historyDays:28,detailDays:7,weightStepKg:2.5,collections:[]};
+  const ui=await setup({
+    'GET /admin/api/planner-settings':()=>({data:settings}),
+    'GET /admin/api/planner-exercises':()=>({data:[{id,name:'Explicit press',type:'STRENGTH',equipmentIds:['barbell']}]}),
+    'GET /admin/api/planner-exercise-mappings':()=>({data:{items:[]}}),
+    ['PUT /admin/api/planner-exercise-mappings/'+id]:body=>({data:{...body,revision:1}}),
+  });
+  t.after(()=>ui.dom.window.close());
+  ui.w.document.querySelector('[data-view=planner]').click();
+  await until(()=>ui.w.document.querySelector('.planner-settings'));
+  const box=[...ui.w.document.querySelectorAll('details')].find(x=>x.querySelector('summary')?.textContent.includes('Explicit press'));
+  assert.ok(box);assert.match(box.querySelector('summary').textContent,/требуется классификация/);
+  const movement=box.querySelector('select');movement.value='HORIZONTAL_PUSH';movement.dispatchEvent(new ui.w.Event('change',{bubbles:true}));
+  for(const label of ['Основное','Сила']){
+    const input=[...box.querySelectorAll('label')].find(x=>x.textContent===label).querySelector('input');
+    input.checked=true;input.dispatchEvent(new ui.w.Event('change',{bubbles:true}));
+  }
+  [...box.querySelectorAll('button')].find(x=>x.textContent==='Сохранить классификацию').click();
+  await until(()=>ui.requests.some(x=>x.method==='PUT'));
+  const write=ui.requests.find(x=>x.method==='PUT');
+  assert.equal(write.path,'/admin/api/planner-exercise-mappings/'+id);
+  assert.deepEqual(write.body,{exerciseId:id,movementClass:'HORIZONTAL_PUSH',roles:['PRIMARY'],supportedGoals:['STRENGTH'],exerciseType:'STRENGTH',equipmentIds:['barbell']});
+  assert.equal(write.headers['X-CSRF-Token'],'test-csrf');
+  await until(()=>ui.w.document.getElementById('notice').textContent==='Классификация сохранена');
+  const saved=[...ui.w.document.querySelectorAll('details')].find(x=>x.querySelector('summary')?.textContent==='Explicit press');
+  assert.ok(saved);assert.equal(saved.querySelector('select').value,'HORIZONTAL_PUSH');
   assert.equal(ui.errors.length,0);
 });

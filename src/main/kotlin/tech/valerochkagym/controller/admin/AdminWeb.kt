@@ -137,7 +137,12 @@ class AdminController(
       .findAllByOrderByKindAscIdAsc()
       .filter { it.kind == "exercise" && !it.archived }
       .map {
-        mapOf("id" to it.id.toString(), "name" to json.readTree(it.payload)["name"].asString())
+        mapOf(
+          "id" to it.id.toString(),
+          "name" to json.readTree(it.payload)["name"].asString(),
+          "type" to json.readTree(it.payload)["type"].asString(),
+          "equipmentIds" to json.readTree(it.payload)["equipmentIds"],
+        )
       }
 
   @GetMapping("/catalog")

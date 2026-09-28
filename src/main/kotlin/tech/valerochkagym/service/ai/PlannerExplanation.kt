@@ -96,6 +96,18 @@ class PlannerExplanationStore(
     )
   }
 
+  fun readRaw(identity: Identity, proposalId: UUID): tools.jackson.databind.JsonNode {
+    val proposal = proposals.detail(identity, proposalId)
+    return db
+      .query(
+        "SELECT payload::text FROM planner_explanations WHERE proposal_id=? AND version=?",
+        { rs, _ -> json.readTree(rs.getString(1)) },
+        proposalId,
+        proposal.currentVersion,
+      )
+      .singleOrNull() ?: throw ApiException(404, "explanation_unavailable", "Пояснение недоступно")
+  }
+
   fun read(identity: Identity, proposalId: UUID): PlannerExplanation {
     val proposal = proposals.detail(identity, proposalId)
     return db

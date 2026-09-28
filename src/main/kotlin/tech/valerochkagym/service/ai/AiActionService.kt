@@ -77,18 +77,17 @@ class AiActionService(
     }
   }
 
-  fun calendar(identity: Identity, raw: ByteArray): CalendarDraftResponse = admitted {
+  fun calendar(identity: Identity, raw: ByteArray): CalendarDraftResponse = run {
     calendar.create(identity, raw, agentic = true)
   }
 
-  fun calendarV2(identity: Identity, raw: ByteArray): CalendarDraftV2Response = admitted {
+  fun calendarV2(identity: Identity, raw: ByteArray): CalendarDraftV2Response = run {
     calendar.createV2(identity, raw)
   }
 
-  fun refineCalendar(identity: Identity, proposalId: UUID, raw: ByteArray): ProposalResponse =
-    admitted {
-      calendar.refine(identity, proposalId, raw)
-    }
+  fun refineCalendar(identity: Identity, proposalId: UUID, raw: ByteArray): ProposalResponse = run {
+    calendar.refine(identity, proposalId, raw)
+  }
 
   fun cancelCalendar(identity: Identity, raw: ByteArray) = calendar.cancel(identity, raw)
 

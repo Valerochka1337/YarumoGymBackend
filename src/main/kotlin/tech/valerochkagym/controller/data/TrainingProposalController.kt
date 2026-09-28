@@ -31,21 +31,41 @@ class TrainingProposalController(
     @AuthenticationPrincipal identity: Identity,
     @RequestParam(defaultValue = "20") limit: Int,
     @RequestParam(required = false) cursor: String?,
-  ) = service.list(identity, limit, cursor)
+    request: HttpServletRequest,
+  ) =
+    service.list(
+      identity,
+      limit,
+      cursor,
+      if (request.getHeader("X-Planner-Protocol") == "2") 2 else 1,
+    )
 
   @GetMapping("/{proposalId}")
-  fun detail(@AuthenticationPrincipal identity: Identity, @PathVariable proposalId: UUID) =
-    service.detail(identity, proposalId)
+  fun detail(
+    @AuthenticationPrincipal identity: Identity,
+    @PathVariable proposalId: UUID,
+    request: HttpServletRequest,
+  ) = visible(identity, proposalId, request)
 
   @GetMapping("/{proposalId}/planner-explanation")
   fun plannerExplanation(
     @AuthenticationPrincipal identity: Identity,
     @PathVariable proposalId: UUID,
-  ) = explanations.read(identity, proposalId)
+    request: HttpServletRequest,
+  ): Any {
+    visible(identity, proposalId, request)
+    return explanations.readRaw(identity, proposalId)
+  }
 
   @GetMapping("/{proposalId}/accepted-result")
-  fun acceptedResult(@AuthenticationPrincipal identity: Identity, @PathVariable proposalId: UUID) =
-    service.acceptedResult(identity, proposalId)
+  fun acceptedResult(
+    @AuthenticationPrincipal identity: Identity,
+    @PathVariable proposalId: UUID,
+    request: HttpServletRequest,
+  ): Any {
+    visible(identity, proposalId, request)
+    return service.acceptedResult(identity, proposalId)
+  }
 
   @PostMapping("/{proposalId}/approve")
   fun approve(
@@ -54,6 +74,7 @@ class TrainingProposalController(
     request: HttpServletRequest,
     response: HttpServletResponse,
   ): Any {
+    visible(identity, proposalId, request)
     capability(request, response)
     val raw = raw(request)
     val hash = sha256(raw)
@@ -65,7 +86,21 @@ class TrainingProposalController(
     @AuthenticationPrincipal identity: Identity,
     @PathVariable proposalId: UUID,
     request: HttpServletRequest,
-  ) = service.reject(identity, proposalId, validator.reject(tree(raw(request))))
+  ): Any {
+    visible(identity, proposalId, request)
+    return service.reject(identity, proposalId, validator.reject(tree(raw(request))))
+  }
+
+  private fun visible(
+    identity: Identity,
+    proposalId: UUID,
+    request: HttpServletRequest,
+  ): tech.valerochkagym.controller.model.ProposalResponse {
+    val proposal = service.detail(identity, proposalId)
+    if (request.getHeader("X-Planner-Protocol") != "2" && proposal.source != "AI")
+      throw ApiException(404, "proposal_not_found", "Предложение не найдено")
+    return proposal
+  }
 
   private fun capability(request: HttpServletRequest, response: HttpServletResponse) {
     val accepted =
@@ -76,7 +111,14 @@ class TrainingProposalController(
         ?.toSet()
         ?.intersect(setOf("calendar-plans"))
         .orEmpty()
-    response.setHeader("X-Gym-Capabilities", accepted.joinToString(","))
+    response.setHeader(
+      "X-Gym-Capabilities",
+      (accepted +
+          if (request.getHeader("X-Planner-Protocol") == "2")
+            setOf("deterministic-workout-planner-v2")
+          else emptySet())
+        .joinToString(","),
+    )
     if ("calendar-plans" !in accepted)
       throw ApiException(426, "capability_required", "Требуется возможность calendar-plans")
   }

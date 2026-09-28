@@ -34,14 +34,14 @@ import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.postgresql.PostgreSQLContainer
 import tech.valerochkagym.controller.advice.ApiException
+import tech.valerochkagym.controller.model.*
+import tech.valerochkagym.service.ai.*
 import tech.valerochkagym.service.ai.AiActionService
 import tech.valerochkagym.service.ai.AiContextReader
 import tech.valerochkagym.service.ai.AiProviderInput
 import tech.valerochkagym.service.ai.CalendarAiExecutionHooks
 import tech.valerochkagym.service.ai.PlannerConfigurationService
-import tech.valerochkagym.service.ai.PlannerExerciseAccent
 import tech.valerochkagym.service.ai.PlannerToolCallingProvider
-import tech.valerochkagym.service.ai.aiError
 import tech.valerochkagym.service.model.Identity
 import tools.jackson.databind.JsonNode
 import tools.jackson.databind.ObjectMapper
@@ -172,6 +172,7 @@ class CalendarAiCaptureIntegrationTest {
     @Bean @Primary fun fixedCalendarClock() = MutableCalendarClock()
   }
 
+  @Autowired lateinit var mappings: PlannerMovementMappingService
   @Autowired lateinit var jobs: tech.valerochkagym.service.ai.CalendarDraftJobService
   @Autowired
   lateinit var proposals: tech.valerochkagym.service.trainingproposal.TrainingProposalService
@@ -206,6 +207,7 @@ class CalendarAiCaptureIntegrationTest {
     hooks.beforeRefinementCommit = null
     hooks.afterReserve = null
     hooks.afterCapture = null
+    configure()
   }
 
   @Test
@@ -320,20 +322,9 @@ class CalendarAiCaptureIntegrationTest {
       capturedAt - 1,
       sets(tupleTarget, 1, completedAt = factTime, actual = 20.0, actualReps = 8),
     )
-    provider.handler = { providerResponse(tupleTarget) }
-    val firstSet =
-      actions
-        .calendar(tupleOwner, rawRequest())
-        .proposal
-        .snapshot
-        .draft
-        .exercises
-        .single()
-        .plannedSets
-        .first()
-    // The descending ten-set plan starts at ten reps, projected from the canonical 20 kg x 8 set.
-    assertEquals(10, firstSet.reps)
-    assertEquals(17.5, firstSet.weightKg)
+    val firstSet = ready(tupleOwner).proposal.snapshot.draft.exercises.single().plannedSets.first()
+    assertEquals(12, firstSet.reps)
+    assertEquals(15.0, firstSet.weightKg)
   }
 
   @Test
@@ -361,9 +352,9 @@ class CalendarAiCaptureIntegrationTest {
       context["candidates"].toList().map { it["exerciseId"].asString() },
     )
     provider.handler = { providerResponse(exercise) }
-    val accepted = jobs.submit(owner, rawRequest(gymIds = listOf(gym.toString())))
+    val accepted = submitPlanner(owner, rawRequest(gymIds = listOf(gym.toString())))
     jobs.runNext()
-    val result = jobs.status(owner, UUID.fromString(accepted.requestId))
+    val result = jobs.statusV2(owner, UUID.fromString(accepted.requestId))
     assertEquals("READY", result.state, result.errorCode)
     assertEquals(listOf(gym.toString()), result.result!!.proposal.snapshot.draft.gymIds)
   }
@@ -411,7 +402,7 @@ class CalendarAiCaptureIntegrationTest {
     assertEquals(
       "ai_context_stale",
       assertThrows<ApiException> {
-          actions.calendar(owner, rawRequest(gymIds = listOf(gym.toString())))
+          submitPlanner(owner, rawRequest(gymIds = listOf(gym.toString())))
         }
         .code,
     )
@@ -420,7 +411,7 @@ class CalendarAiCaptureIntegrationTest {
     assertEquals(
       "ai_context_stale",
       assertThrows<ApiException> {
-          actions.calendar(owner, rawRequest(gymIds = listOf(gym.toString())))
+          submitPlanner(owner, rawRequest(gymIds = listOf(gym.toString())))
         }
         .code,
     )
@@ -778,24 +769,30 @@ class CalendarAiCaptureIntegrationTest {
   }
 
   @Test
-  fun `succeeded replay survives later revisions while changed body conflicts`() {
+  fun `legacy succeeded replay survives later revisions while changed body conflicts`() {
     val owner = owner()
     val exercise = exercise(owner)
-    val request = rawRequest()
-    provider.handler = { providerResponse(exercise) }
-    val receipt = actions.calendar(owner, request)
-
+    val raw = rawRequest()
+    val proposal = refinableProposal(owner, exercise)
+    val receipt =
+      CalendarDraftResponse(
+        json.readTree(raw)["requestId"].asString(),
+        CalendarDraftContext(17, 9, capturedAt),
+        proposal,
+      )
+    reserveProcessing(owner, raw, capturedAt + 60000)
+    db.update(
+      "UPDATE calendar_ai_attempts SET state='SUCCEEDED',receipt=?::jsonb",
+      json.writeValueAsString(receipt),
+    )
     db.update("UPDATE sync_heads SET revision=18 WHERE user_id=?", owner.userId)
     db.update("UPDATE catalog_state SET revision=10")
-
-    assertEquals(receipt, actions.calendar(owner, request))
-    val changed = json.readTree(request) as ObjectNode
-    changed.put("expectedRevision", 18)
+    assertEquals(receipt, actions.calendar(owner, raw))
     assertEquals(
       "ai_request_conflict",
-      assertThrows<ApiException> { actions.calendar(owner, json.writeValueAsBytes(changed)) }.code,
+      assertThrows<ApiException> { actions.calendar(owner, raw + byteArrayOf(32)) }.code,
     )
-    assertEquals(1, provider.calls)
+    assertEquals(0, provider.calls)
   }
 
   @Test
@@ -822,505 +819,259 @@ class CalendarAiCaptureIntegrationTest {
   }
 
   @Test
-  fun `capture and strict provider failures terminalize the reserved attempt`() {
+  fun `capture admission and atomic publication failures leave no partial proposal`() {
     val owner = owner()
-    val request = rawRequest()
     repeat(65) { offset ->
       workout(owner, UUID.randomUUID(), capturedAt - offset - 1, capturedAt - offset, emptyList())
     }
-
-    assertEquals(
-      "ai_context_too_large",
-      assertThrows<ApiException> { actions.calendar(owner, request) }.code,
-    )
-    assertEquals(0, provider.calls)
-    assertEquals(
-      "FAILED",
-      db.queryForObject("SELECT state FROM calendar_ai_attempts", String::class.java),
-    )
-
+    assertEquals("ai_context_too_large", assertThrows<ApiException> { submitPlanner(owner) }.code)
+    assertEquals(0, db.queryForObject("SELECT count(*) FROM calendar_draft_jobs", Int::class.java))
     reset()
-    val providerOwner = owner()
-    val exercise = exercise(providerOwner)
-    provider.handler = {
-      json.readTree(
-        """{"result":{"name":"bad","exercises":[{"exerciseId":"$exercise","restSeconds":0,"plannedSets":[{"reps":8,"durationSec":null,"weightKg":1}]}]}}"""
-      )
-    }
-    assertEquals(
-      "ai_invalid_response",
-      assertThrows<ApiException> { actions.calendar(providerOwner, rawRequest()) }.code,
-    )
-    assertEquals(1, provider.calls)
-    assertEquals(
-      "FAILED",
-      db.queryForObject("SELECT state FROM calendar_ai_attempts", String::class.java),
-    )
+    val second = owner()
+    exercise(second)
+    hooks.failProposalInsert = true
+    val job = submitPlanner(second)
+    jobs.runNext()
+    assertEquals("FAILED", jobs.statusV2(second, UUID.fromString(job.requestId)).state)
     assertEquals(0, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
+    assertEquals(0, provider.calls)
   }
 
   @Test
   fun `known cardio duration above the slot fails without creating a proposal`() {
     val owner = owner()
-    val exercise = exercise(owner, type = "CARDIO")
-    provider.handler = {
-      json.readTree(
-        """{"result":{"name":"too long","exercises":[{"exerciseId":"$exercise","restSeconds":60,"plannedSets":[{"reps":null,"durationSec":2700},{"reps":null,"durationSec":1}]}]}}"""
-      )
-    }
-
-    assertEquals(
-      "ai_invalid_response",
-      assertThrows<ApiException> { actions.calendar(owner, rawRequest()) }.code,
-    )
-    assertEquals(1, provider.calls)
-    assertEquals(
-      "FAILED",
-      db.queryForObject("SELECT state FROM calendar_ai_attempts", String::class.java),
-    )
+    exercise(owner, type = "CARDIO")
+    configure("CARDIO", 1800)
+    val job = submitPlanner(owner)
+    jobs.runNext()
+    assertEquals("IMPOSSIBLE", jobs.statusV2(owner, UUID.fromString(job.requestId)).state)
     assertEquals(0, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
   }
 
   @Test
-  fun `agentic planner rejects a tiny sixty minute plan before persistence`() {
+  fun `soft minimum shortfall publishes complete bounded plan without filler`() {
     val owner = owner()
-    val exercise = exercise(owner)
-    val request = json.readTree(rawRequest()) as ObjectNode
-    request.put("availableDurationMinutes", 60)
-    provider.handler = { shortProviderResponse(exercise) }
-
-    assertEquals(
-      "ai_invalid_response",
-      assertThrows<ApiException> { actions.calendar(owner, json.writeValueAsBytes(request)) }.code,
-    )
-    assertEquals(1, provider.calls)
-    assertEquals(0, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
+    exercise(owner)
+    val raw = json.readTree(rawRequest()) as ObjectNode
+    raw.put("availableDurationMinutes", 60)
+    val result = ready(owner, json.writeValueAsBytes(raw))
+    val explanation = explanations.readRaw(owner, result.proposal.proposalId)
+    assertEquals("CONSTRAINTS", explanation["shortfallReason"].asString())
+    assertTrue(explanation["estimatedSeconds"].asLong() < explanation["minimumSeconds"].asLong())
+    assertEquals(3, result.proposal.snapshot.draft.exercises.single().plannedSets.size)
   }
 
   @Test
-  fun `provider strict shape rejects malformed rows and accepts exact timed fit`() {
+  fun `typed timed execution accepts declared duration and rejects provider fields`() {
     val owner = owner()
-    val strength = exercise(owner)
-    val invalid =
-      listOf(
-        """{"result":{"name":"x","exercises":[]}}""",
-        """{"result":{"name":"x","exercises":[{"exerciseId":"$strength","restSeconds":"0","plannedSets":[{"reps":8,"durationSec":null}]}]}}""",
-        """{"result":{"name":"x","exercises":[{"exerciseId":"$strength","restSeconds":0,"plannedSets":[{"reps":8,"durationSec":null}],"extra":true}]}}""",
-      )
-    invalid.forEach { body ->
-      provider.handler = { json.readTree(body) }
-      assertEquals(
-        "ai_invalid_response",
-        assertThrows<ApiException> { actions.calendar(owner, rawRequest()) }.code,
-      )
-    }
-
-    reset()
-    val timedOwner = owner()
-    val timed = exercise(timedOwner, type = "TIMED")
-    provider.handler = {
-      json.readTree(
-        """{"result":{"name":"fit","exercises":[{"exerciseId":"$timed","restSeconds":0,"plannedSets":[{"reps":null,"durationSec":2700}]}]}}"""
-      )
-    }
-    assertEquals(1, actions.calendar(timedOwner, rawRequest()).proposal.currentVersion)
-
-    reset()
-    val cardioOwner = owner()
-    val cardio = exercise(cardioOwner, type = "CARDIO")
-    provider.handler = {
-      json.readTree(
-        """{"result":{"name":"cardio fit","exercises":[{"exerciseId":"$cardio","restSeconds":0,"plannedSets":[{"reps":null,"durationSec":2700}]}]}}"""
-      )
-    }
-    val cardioResponse = json.valueToTree<JsonNode>(actions.calendar(cardioOwner, rawRequest()))
-    val set = cardioResponse["proposal"]["snapshot"]["draft"]["exercises"][0]["plannedSets"][0]
-    assertEquals(2700, set["durationSec"].asInt())
-    assertTrue(set["speedKmh"].isNull)
-    assertTrue(set["inclinePct"].isNull)
+    val timed = exercise(owner, type = "TIMED")
+    configure("TIMED", 45)
+    val result = ready(owner)
+    assertEquals(timed.toString(), result.proposal.snapshot.draft.exercises.single().exerciseId)
+    assertTrue(
+      result.proposal.snapshot.draft.exercises.single().plannedSets.all {
+        it.durationSec == 45 && it.reps == null
+      }
+    )
+    val malformed = v2Raw().toString(Charsets.UTF_8).dropLast(1) + ",\"providerOutput\":{}}"
+    assertThrows<ApiException> { jobs.submitV2(owner, malformed.toByteArray()) }
   }
 
   @Test
-  fun `agentic provider context excludes notes even when the caller opts in`() {
+  fun `V2 notes opt in is rejected rather than sent to a provider`() {
     val owner = owner()
-    val selected = exercise(owner)
-    val excluded = exercise(owner)
-    record(owner, "exercise_hint", selected, mapOf("updatedAt" to capturedAt - 1, "text" to "keep"))
-    record(owner, "exercise_hint", excluded, mapOf("updatedAt" to capturedAt - 1, "text" to "drop"))
-    val raw = rawRequest(excludedExercises = listOf(excluded.toString()), includeNotes = true)
-    var context: JsonNode? = null
-    provider.handler = { input ->
-      context = json.readTree(input.context)
-      throw aiError("ai_invalid_response")
-    }
+    exercise(owner)
+    val raw = json.readTree(v2Raw()) as ObjectNode
+    raw.put("includeNotes", true)
     assertEquals(
-      "ai_invalid_response",
-      assertThrows<ApiException> { actions.calendar(owner, raw) }.code,
+      "invalid_request",
+      assertThrows<ApiException> { jobs.submitV2(owner, json.writeValueAsBytes(raw)) }.code,
     )
-    assertFalse(requireNotNull(context).has("notes"))
+    assertEquals(0, provider.calls)
   }
 
   @Test
   fun `request digest conflict processing replay and expired lease never admit a provider`() {
-    val owner = owner()
-    val request = rawRequest()
-    reserveProcessing(owner, request, capturedAt + 60_000)
-
-    assertEquals(
-      "ai_request_conflict",
-      assertThrows<ApiException> { actions.calendar(owner, request + byteArrayOf(32)) }.code,
-    )
-    assertEquals(
-      "ai_in_progress",
-      assertThrows<ApiException> { actions.calendar(owner, request) }.code,
-    )
-    assertEquals(0, provider.calls)
-    assertEquals(
-      "PROCESSING",
-      db.queryForObject("SELECT state FROM calendar_ai_attempts", String::class.java),
-    )
-
-    reset()
-    val crashedOwner = owner()
-    val crashed = rawRequest()
-    reserveProcessing(crashedOwner, crashed, capturedAt - 1)
-    assertEquals(
-      "ai_interrupted",
-      assertThrows<ApiException> { actions.calendar(crashedOwner, crashed) }.code,
-    )
-    assertEquals(0, provider.calls)
-    assertEquals(
-      "INTERRUPTED",
-      db.queryForObject("SELECT state FROM calendar_ai_attempts", String::class.java),
-    )
+    for (lease in listOf(capturedAt + 60000, capturedAt - 1)) {
+      reset()
+      val owner = owner()
+      val raw = rawRequest()
+      reserveProcessing(owner, raw, lease)
+      assertEquals(
+        "ai_request_conflict",
+        assertThrows<ApiException> { actions.calendar(owner, raw + byteArrayOf(32)) }.code,
+      )
+      assertEquals(
+        "ai_invalid_request",
+        assertThrows<ApiException> { actions.calendar(owner, raw) }.code,
+      )
+      assertEquals(
+        "FAILED",
+        db.queryForObject("SELECT state FROM calendar_ai_attempts", String::class.java),
+      )
+      assertEquals(0, provider.calls)
+    }
   }
 
   @Test
-  fun `cancellation during provider work wins before final proposal commit`() {
-    val owner = owner()
-    val exercise = exercise(owner)
-    val request = rawRequest()
-    provider.handler = {
-      actions.cancelCalendar(owner, request)
-      providerResponse(exercise)
+  fun `cancellation during deterministic work wins before final proposal commit`() {
+    lateinit var job: CalendarDraftJobResponse
+    lateinit var identity: Identity
+    blockedExecution { owner, current ->
+      identity = owner
+      job = current
+      jobs.cancel(owner, UUID.fromString(current.requestId), 2)
     }
-
-    assertEquals("ai_timeout", assertThrows<ApiException> { actions.calendar(owner, request) }.code)
-    assertEquals(1, provider.calls)
-    assertEquals(
-      "CANCELLED",
-      db.queryForObject("SELECT state FROM calendar_ai_attempts", String::class.java),
-    )
+    assertEquals("SUPERSEDED", jobs.statusV2(identity, UUID.fromString(job.requestId)).state)
     assertEquals(0, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
   }
 
   @Test
   fun `owner deletion before final guard leaves no attempt or proposal`() {
-    val owner = owner()
-    val exercise = exercise(owner)
-    provider.handler = {
-      db.update("DELETE FROM users WHERE id=?", owner.userId)
-      providerResponse(exercise)
-    }
-
-    assertEquals(
-      "unauthorized",
-      assertThrows<ApiException> { actions.calendar(owner, rawRequest()) }.code,
-    )
-    assertEquals(1, provider.calls)
-    assertEquals(0, db.queryForObject("SELECT count(*) FROM calendar_ai_attempts", Int::class.java))
+    blockedExecution { owner, _ -> db.update("DELETE FROM users WHERE id=?", owner.userId) }
     assertEquals(0, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
+    assertEquals(0, db.queryForObject("SELECT count(*) FROM calendar_draft_jobs", Int::class.java))
   }
 
   @Test
-  fun `owner deletion after reserve or capture prevents provider admission`() {
-    val reservedOwner = owner()
-    hooks.afterReserve = { db.update("DELETE FROM users WHERE id=?", reservedOwner.userId) }
-    assertEquals(
-      "unauthorized",
-      assertThrows<ApiException> { actions.calendar(reservedOwner, rawRequest()) }.code,
-    )
-    assertEquals(0, provider.calls)
-    assertEquals(0, db.queryForObject("SELECT count(*) FROM calendar_ai_attempts", Int::class.java))
-
-    reset()
-    val capturedOwner = owner()
-    exercise(capturedOwner)
-    hooks.afterCapture = { db.update("DELETE FROM users WHERE id=?", capturedOwner.userId) }
-    assertEquals(
-      "unauthorized",
-      assertThrows<ApiException> { actions.calendar(capturedOwner, rawRequest()) }.code,
-    )
-    assertEquals(0, provider.calls)
-    assertEquals(0, db.queryForObject("SELECT count(*) FROM calendar_ai_attempts", Int::class.java))
-  }
-
-  @Test
-  fun `concurrent first refinement claim binds one proposal before provider work`() {
+  fun `owner deletion after immutable capture prevents execution publication`() {
     val owner = owner()
-    val focus = exercise(owner)
-    val accessory = exercise(owner)
-    allowRefinementCandidates(owner, focus, accessory)
-    val first = refinableProposal(owner, focus)
-    val second = refinableProposal(owner, focus)
-    val request = refinementRequest(UUID.randomUUID())
-    val providerGate = Gate()
-    provider.handler = {
-      providerGate.await()
-      refinedProviderResponse(focus, accessory)
-    }
-    val start = CountDownLatch(1)
+    exercise(owner)
+    val job = submitPlanner(owner)
+    db.update("DELETE FROM users WHERE id=?", owner.userId)
+    jobs.runNext()
+    assertEquals(0, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
+    assertEquals(0, provider.calls)
+    assertEquals(
+      404,
+      assertThrows<ApiException> { jobs.statusV2(owner(), UUID.fromString(job.requestId)) }.status,
+    )
+  }
+
+  @Test
+  fun `concurrent typed refinement identity binds exactly one base proposal`() {
+    val owner = owner()
+    val target = exercise(owner)
+    val first = ready(owner).proposal
+    val second = ready(owner).proposal
+    val raw = refineBytes(first, target)
+    val gate = CountDownLatch(1)
     val pool = Executors.newFixedThreadPool(2)
     try {
       val outcomes =
-        listOf(first.proposalId, second.proposalId).map { proposalId ->
+        listOf(first, second).map { p ->
           pool.submit<String> {
-            start.await(5, TimeUnit.SECONDS)
-            runCatching { actions.refineCalendar(owner, proposalId, request) }
-              .fold({ "success:${it.proposalId}" }, { "error:${(it as ApiException).code}" })
+            gate.await()
+            runCatching { jobs.submitV2Refinement(owner, p.proposalId, raw) }
+              .fold({ it.state }, { (it as ApiException).code })
           }
         }
-      start.countDown()
-      assertTrue(providerGate.reached.await(5, TimeUnit.SECONDS))
-      providerGate.open()
-
-      val result = outcomes.map { it.get(10, TimeUnit.SECONDS) }
-      assertEquals(1, result.count { it.startsWith("success:") })
-      assertEquals(1, result.count { it == "error:ai_request_conflict" })
-      assertEquals(1, provider.calls)
-      assertEquals(
-        1,
-        db.queryForObject(
-          "SELECT count(*) FROM calendar_planner_refinements WHERE owner_id=? AND request_id=?",
-          Int::class.java,
-          owner.userId,
-          UUID.fromString(json.readTree(request)["requestId"].asString()),
-        ),
-      )
+      gate.countDown()
+      val actual = outcomes.map { it.get(5, TimeUnit.SECONDS) }
+      assertEquals(1, actual.count { it == "QUEUED" })
+      assertEquals(1, actual.count { it == "ai_request_conflict" })
     } finally {
       pool.shutdownNow()
     }
+    assertEquals(0, provider.calls)
   }
 
   @Test
-  fun `failed refinement keeps raw receipt binding terminal without another provider call`() {
+  fun `legacy refinement preserves byte binding and terminalizes without a provider`() {
     val owner = owner()
-    val focus = exercise(owner)
-    allowRefinementCandidates(owner, focus)
-    val proposal = refinableProposal(owner, focus)
-    val request = refinementRequest(UUID.randomUUID())
-    provider.handler = { throw aiError("ai_invalid_response") }
-
+    val target = exercise(owner)
+    val proposal = refinableProposal(owner, target)
+    val raw = refinementRequest(UUID.randomUUID())
     assertEquals(
-      "ai_invalid_response",
-      assertThrows<ApiException> { actions.refineCalendar(owner, proposal.proposalId, request) }
-        .code,
+      "ai_invalid_request",
+      assertThrows<ApiException> { actions.refineCalendar(owner, proposal.proposalId, raw) }.code,
     )
-    assertEquals(1, provider.calls)
-    provider.calls = 0
-
     assertEquals(
-      "ai_interrupted",
-      assertThrows<ApiException> { actions.refineCalendar(owner, proposal.proposalId, request) }
-        .code,
+      "ai_invalid_request",
+      assertThrows<ApiException> { actions.refineCalendar(owner, proposal.proposalId, raw) }.code,
     )
-    assertEquals(0, provider.calls)
-
-    val rebound = json.readTree(request) as ObjectNode
-    rebound.put("refinement", "Другой текст")
     assertEquals(
       "ai_request_conflict",
       assertThrows<ApiException> {
-          actions.refineCalendar(owner, proposal.proposalId, json.writeValueAsBytes(rebound))
+          actions.refineCalendar(owner, proposal.proposalId, raw + byteArrayOf(32))
         }
         .code,
     )
-    assertEquals(0, provider.calls)
-    assertEquals(
-      1,
-      db.queryForObject(
-        "SELECT count(*) FROM calendar_planner_refinements WHERE owner_id=? AND request_id=?",
-        Int::class.java,
-        owner.userId,
-        UUID.fromString(json.readTree(request)["requestId"].asString()),
-      ),
-    )
-  }
-
-  @Test
-  fun `refinement provider deadline crossing writes no version or success receipt`() {
-    val owner = owner()
-    val focus = exercise(owner)
-    val accessory = exercise(owner)
-    allowRefinementCandidates(owner, focus, accessory)
-    val proposal = refinableProposal(owner, focus)
-    val request = refinementRequest(UUID.randomUUID())
-    provider.handler = {
-      testClock.currentTime += 45_000
-      refinedProviderResponse(focus, accessory)
-    }
-
-    assertEquals(
-      "ai_timeout",
-      assertThrows<ApiException> { actions.refineCalendar(owner, proposal.proposalId, request) }
-        .code,
-    )
-    assertEquals(1, provider.calls)
-    assertEquals(
-      1,
-      db.queryForObject(
-        "SELECT count(*) FROM training_proposal_versions WHERE proposal_id=?",
-        Int::class.java,
-        proposal.proposalId,
-      ),
-    )
-    assertEquals(
-      0,
-      db.queryForObject(
-        "SELECT count(*) FROM calendar_planner_refinements WHERE receipt IS NOT NULL",
-        Int::class.java,
-      ),
-    )
-    provider.calls = 0
-    assertEquals(
-      "ai_interrupted",
-      assertThrows<ApiException> { actions.refineCalendar(owner, proposal.proposalId, request) }
-        .code,
-    )
-    assertEquals(0, provider.calls)
-  }
-
-  @Test
-  fun `refinement commit fence rejects a lease that expires after provider validation`() {
-    val owner = owner()
-    val focus = exercise(owner)
-    val accessory = exercise(owner)
-    allowRefinementCandidates(owner, focus, accessory)
-    val proposal = refinableProposal(owner, focus)
-    val request = refinementRequest(UUID.randomUUID())
-    provider.handler = { refinedProviderResponse(focus, accessory) }
-    hooks.beforeRefinementCommit = { testClock.currentTime += 45_000 }
-
-    assertEquals(
-      "ai_interrupted",
-      assertThrows<ApiException> { actions.refineCalendar(owner, proposal.proposalId, request) }
-        .code,
-    )
-    assertEquals(1, provider.calls)
-    assertEquals(
-      1,
-      db.queryForObject(
-        "SELECT count(*) FROM training_proposal_versions WHERE proposal_id=?",
-        Int::class.java,
-        proposal.proposalId,
-      ),
-    )
-    assertEquals(
-      0,
-      db.queryForObject(
-        "SELECT count(*) FROM calendar_planner_refinements WHERE receipt IS NOT NULL",
-        Int::class.java,
-      ),
-    )
-  }
-
-  @Test
-  fun `configured defaults and v2 normal override govern legacy generation agentic generation and refinement`() {
-    val owner = owner()
-    val excluded = UUID.randomUUID()
-    val allowed = UUID.randomUUID()
-    val fallback = UUID.randomUUID()
-    val gym = UUID.randomUUID()
-    db.update("UPDATE catalog_state SET active=true")
-    fun standard(id: UUID, equipment: List<String> = emptyList()) =
-      db.update(
-        "INSERT INTO standard_records(kind,id,revision,archived,payload) VALUES ('exercise',?,0,false,?::jsonb)",
-        id,
-        json.writeValueAsString(
-          mapOf(
-            "name" to id.toString(),
-            "type" to "STRENGTH",
-            "muscles" to listOf(mapOf("muscle" to "UPPER_CHEST", "contribution" to 100)),
-            "equipmentIds" to equipment,
-            "equipmentRequirementState" to "KNOWN",
-          )
-        ),
-      )
-    standard(excluded, equipment = listOf("bench"))
-    standard(allowed)
-    standard(fallback)
-    db.update(
-      "INSERT INTO standard_records(kind,id,revision,archived,payload) VALUES ('gym',?,9,false,?::jsonb)",
-      gym,
-      json.writeValueAsString(
-        mapOf(
-          "name" to "Hard exclusion gym",
-          "updatedAt" to capturedAt,
-          "exerciseIds" to emptyList<String>(),
-          "inventoryConfigured" to true,
-          "equipmentIds" to emptyList<String>(),
+    assertTrue(
+      raw.contentEquals(
+        db.queryForObject(
+          "SELECT raw_request FROM calendar_planner_refinements",
+          ByteArray::class.java,
         )
-      ),
-    )
-    plannerConfiguration.save(
-      plannerConfiguration
-        .snapshot()
-        .copy(defaultExerciseAccents = listOf(PlannerExerciseAccent(excluded.toString(), "NEVER")))
-    )
-    provider.handler = { input ->
-      assertFalse(input.context.contains(excluded.toString()))
-      providerResponse(allowed)
-    }
-    actions.calendar(owner, rawRequest())
-    assertEquals(1, provider.calls)
-
-    val accentId =
-      UUID.nameUUIDFromBytes(
-        "ValerochkaGym.planner-default-accents.v2:${owner.userId}".toByteArray(Charsets.UTF_8)
       )
+    )
+    assertEquals(0, provider.calls)
+  }
+
+  @Test
+  fun `expired typed refinement never changes its original proposal`() {
+    val owner = owner()
+    val target = exercise(owner)
+    val proposal = ready(owner).proposal
+    val raw = refineBytes(proposal, target)
+    val id = UUID.fromString(json.readTree(raw)["requestId"].asString())
+    jobs.submitV2Refinement(owner, proposal.proposalId, raw)
+    testClock.currentTime = capturedAt + 3_600_001
+    jobs.runNext()
+    assertEquals("EXPIRED", jobs.statusV2(owner, id).state)
+    assertEquals(1, proposals.detail(owner, proposal.proposalId).currentVersion)
+    assertEquals(1, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
+  }
+
+  @Test
+  fun `typed refinement publication rejects lost lease then recovers from captured bytes`() {
+    val owner = owner()
+    val target = exercise(owner)
+    val proposal = ready(owner).proposal
+    val raw = refineBytes(proposal, target)
+    val queued = jobs.submitV2Refinement(owner, proposal.proposalId, raw)
+    val gate = Gate()
+    hooks.finalLock = gate
+    val task = FutureTask { jobs.runNext() }
+    Thread.ofVirtual().start(task)
+    assertTrue(gate.reached.await(5, TimeUnit.SECONDS))
+    db.update(
+      "UPDATE calendar_draft_jobs SET lease_until=? WHERE request_id=?",
+      Timestamp(capturedAt - 1),
+      UUID.fromString(queued.requestId),
+    )
+    gate.open()
+    task.get(5, TimeUnit.SECONDS)
+    hooks.finalLock = null
+    assertEquals(1, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
+    jobs.runNext()
+    assertEquals("READY", jobs.statusV2(owner, UUID.fromString(queued.requestId)).state)
+  }
+
+  @Test
+  fun `owner NEVER and NORMAL govern deterministic creation and typed refinement`() {
+    val owner = owner()
+    val first = exercise(owner)
+    val second = exercise(owner)
     record(
       owner,
       "planner_exercise_accents",
-      accentId,
+      UUID.randomUUID(),
       mapOf(
-        "schemaVersion" to 1,
         "preferences" to
-          listOf(mapOf("exerciseId" to excluded.toString(), "preference" to "NORMAL")),
+          listOf(
+            mapOf("exerciseId" to first.toString(), "preference" to "NEVER"),
+            mapOf("exerciseId" to second.toString(), "preference" to "NORMAL"),
+          )
       ),
     )
-    provider.handler = { input ->
-      assertTrue(input.context.contains(excluded.toString()))
-      if (input.context.contains("planningContext")) refinedProviderResponse(excluded, allowed)
-      else providerResponse(excluded)
-    }
-    val created = actions.calendarV2(owner, rawRequest())
-    actions.refineCalendar(owner, created.proposal.proposalId, refinementRequest(UUID.randomUUID()))
-    assertEquals(3, provider.calls)
-
-    db.update(
-      "UPDATE records SET payload=?::jsonb WHERE user_id=? AND kind='planner_exercise_accents' AND id=?",
-      json.writeValueAsString(
-        mapOf(
-          "schemaVersion" to 1,
-          "preferences" to
-            listOf(mapOf("exerciseId" to excluded.toString(), "preference" to "MORE")),
-        )
-      ),
-      owner.userId,
-      accentId,
-    )
-    provider.handler = { input ->
-      assertFalse(input.context.contains(excluded.toString()))
-      if (input.context.contains("planningContext")) refinedProviderResponse(allowed, fallback)
-      else providerResponse(allowed)
-    }
-    val hardExcluded = actions.calendarV2(owner, rawRequest(gymIds = listOf(gym.toString())))
-    actions.refineCalendar(
-      owner,
-      hardExcluded.proposal.proposalId,
-      refinementRequest(UUID.randomUUID()),
-    )
-    assertEquals(5, provider.calls)
+    val result = ready(owner)
+    assertEquals(second.toString(), result.proposal.snapshot.draft.exercises.single().exerciseId)
+    val forbidden = refineBytes(result.proposal, first)
+    val job = jobs.submitV2Refinement(owner, result.proposal.proposalId, forbidden)
+    jobs.runNext()
+    assertEquals("IMPOSSIBLE", jobs.statusV2(owner, UUID.fromString(job.requestId)).state)
+    assertEquals(0, provider.calls)
   }
 
   private fun owner(): Identity {
@@ -1372,6 +1123,18 @@ class CalendarAiCaptureIntegrationTest {
           "muscles" to muscles,
           "equipmentIds" to equipment,
           "equipmentRequirementState" to if (known) "KNOWN" else "UNKNOWN",
+        ),
+      )
+      mappings.put(
+        owner,
+        id,
+        PlannerExerciseMappingDto(
+          id,
+          if (type == "STRENGTH") "HORIZONTAL_PUSH" else if (type == "TIMED") "CORE" else "CARDIO",
+          listOf("ACCESSORY", "CONDITIONING", "PRIMARY"),
+          DeterministicPlannerRuntime.goals.sorted(),
+          type,
+          equipment.sorted(),
         ),
       )
     }
@@ -1442,103 +1205,42 @@ class CalendarAiCaptureIntegrationTest {
   @Test
   fun `lost response and final barriers preserve exactly one terminal proposal outcome`() {
     val owner = owner()
-    val exercise = exercise(owner)
-    val request = rawRequest()
-    val providerGate = Gate()
-    provider.handler = {
-      providerGate.await()
-      providerResponse(exercise)
-    }
-    val first = FutureTask { actions.calendar(owner, request) }
-    Thread.ofVirtual().start(first)
-    assertTrue(providerGate.reached.await(5, TimeUnit.SECONDS))
-    assertEquals(
-      "ai_in_progress",
-      assertThrows<ApiException> { actions.calendar(owner, request) }.code,
-    )
-    providerGate.open()
-    val committed = first.get(5, TimeUnit.SECONDS)
-    assertEquals(committed, actions.calendar(owner, request))
-    assertEquals(1, provider.calls)
+    exercise(owner)
+    val raw = rawRequest()
+    val job = submitPlanner(owner, raw)
+    val gate = Gate()
+    hooks.finalLock = gate
+    val task = FutureTask { jobs.runNext() }
+    Thread.ofVirtual().start(task)
+    assertTrue(gate.reached.await(5, TimeUnit.SECONDS))
+    assertEquals("RUNNING", submitPlanner(owner, raw).state)
+    gate.open()
+    task.get(5, TimeUnit.SECONDS)
+    hooks.finalLock = null
+    val result = jobs.statusV2(owner, UUID.fromString(job.requestId))
+    assertEquals("READY", result.state)
+    assertEquals(result, submitPlanner(owner, raw))
+    jobs.runNext()
     assertEquals(1, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
-
-    reset()
-    val timeoutOwner = owner()
-    val timeoutExercise = exercise(timeoutOwner)
-    val timeoutRequest = rawRequest()
-    val finalLock = Gate()
-    hooks.finalLock = finalLock
-    provider.handler = { providerResponse(timeoutExercise) }
-    val timeout = FutureTask { actions.calendar(timeoutOwner, timeoutRequest) }
-    Thread.ofVirtual().start(timeout)
-    assertTrue(finalLock.reached.await(5, TimeUnit.SECONDS))
-    actions.cancelCalendar(timeoutOwner, timeoutRequest)
-    finalLock.open()
-    val timeoutError = assertThrows<Exception> { timeout.get(5, TimeUnit.SECONDS) }
-    assertEquals("ai_timeout", requireNotNull(timeoutError.cause as? ApiException).code)
-    assertEquals(
-      "CANCELLED",
-      db.queryForObject("SELECT state FROM calendar_ai_attempts", String::class.java),
-    )
-    assertEquals(0, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
-
-    reset()
-    val failureOwner = owner()
-    val failureExercise = exercise(failureOwner)
-    hooks.failProposalInsert = true
-    provider.handler = { providerResponse(failureExercise) }
-    assertEquals(
-      "ai_invalid_response",
-      assertThrows<ApiException> { actions.calendar(failureOwner, rawRequest()) }.code,
-    )
-    assertEquals(
-      "FAILED",
-      db.queryForObject("SELECT state FROM calendar_ai_attempts", String::class.java),
-    )
-    assertEquals(0, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
   }
 
   @Test
-  fun `v2 replay returns the committed frozen projection without another provider turn`() {
+  fun `V2 replay returns exact committed receipt without engine rerun`() {
     val owner = owner()
-    val exercise = exercise(owner)
-    record(
-      owner,
-      "planner_exercise_preferences",
-      UUID.randomUUID(),
-      mapOf(
-        "preferences" to listOf(mapOf("exerciseId" to exercise.toString(), "preference" to "MORE"))
-      ),
-    )
+    exercise(owner)
     val raw = rawRequest()
-    provider.handler = { input ->
-      // The agentic serializer must not reuse v1's measurement/notes-shaped context.
-      assertFalse(input.context.contains("\"mass\""))
-      assertFalse(input.context.contains("\"notes\""))
-      json.valueToTree(
-        mapOf(
-          "result" to
-            mapOf(
-              "name" to "Frozen v2 draft",
-              "exercises" to
-                listOf(
-                  mapOf(
-                    "exerciseId" to exercise.toString(),
-                    "restSeconds" to 240,
-                    "plannedSets" to List(10) { mapOf("reps" to 8, "durationSec" to null) },
-                  )
-                ),
-            )
-        )
-      )
-    }
-    val first = actions.calendarV2(owner, raw)
-    val replay = actions.calendarV2(owner, raw)
+    val first = ready(owner, raw)
+    val stored =
+      db.queryForObject("SELECT result::text FROM calendar_draft_jobs", String::class.java)!!
+    val replay = submitPlanner(owner, raw).result!!
     assertEquals(first, replay)
-    assertEquals(1, provider.calls)
-    val persisted =
-      db.queryForObject("SELECT v2_receipt::text FROM calendar_ai_attempts", String::class.java)!!
-    assertEquals(json.readTree(json.writeValueAsString(first)), json.readTree(persisted))
+    // Compare the wire DTO: tree conversion retains Long nodes, while parsed JSON can use Int.
+    assertEquals(first, json.readValue(stored, CalendarDraftResponse::class.java))
+    assertEquals(
+      stored,
+      db.queryForObject("SELECT result::text FROM calendar_draft_jobs", String::class.java),
+    )
+    assertEquals(0, provider.calls)
   }
 
   @Test
@@ -1547,18 +1249,18 @@ class CalendarAiCaptureIntegrationTest {
     val exercise = exercise(owner)
     provider.handler = { providerResponse(exercise) }
     val raw = rawRequest()
-    val first = jobs.submit(owner, raw)
+    val first = submitPlanner(owner, raw)
     assertEquals("QUEUED", first.state)
-    assertEquals(first, jobs.submit(owner, raw))
+    assertEquals(first, submitPlanner(owner, raw))
     assertEquals(0, provider.calls)
     assertEquals(0, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
     jobs.runNext()
-    val ready = jobs.status(owner, UUID.fromString(first.requestId))
+    val ready = jobs.statusV2(owner, UUID.fromString(first.requestId))
     assertEquals("READY", ready.state)
     assertEquals(first.requestId, ready.result!!.requestId)
-    assertEquals(ready, jobs.submit(owner, raw))
+    assertEquals(ready, submitPlanner(owner, raw))
     jobs.runNext()
-    assertEquals(1, provider.calls)
+    assertEquals(0, provider.calls)
     assertEquals(1, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
     assertEquals(
       0,
@@ -1576,28 +1278,28 @@ class CalendarAiCaptureIntegrationTest {
     val secondRequest = json.readTree(firstRaw) as ObjectNode
     secondRequest.put("requestId", UUID.randomUUID().toString())
     val secondRaw = json.writeValueAsBytes(secondRequest)
-    val first = jobs.submit(owner, firstRaw)
+    val first = submitPlanner(owner, firstRaw)
     testClock.currentTime++
-    val second = jobs.submit(owner, secondRaw)
+    val second = submitPlanner(owner, secondRaw)
 
     assertEquals("QUEUED", first.state)
     assertEquals("QUEUED", second.state)
     assertNotEquals(first.requestId, second.requestId)
-    assertEquals(first, jobs.submit(owner, firstRaw))
+    assertEquals(first, submitPlanner(owner, firstRaw))
     assertEquals(2, db.queryForObject("SELECT count(*) FROM calendar_draft_jobs", Int::class.java))
     assertEquals(0, provider.calls)
 
     jobs.runNext()
-    val firstReady = jobs.status(owner, UUID.fromString(first.requestId))
+    val firstReady = jobs.statusV2(owner, UUID.fromString(first.requestId))
     assertEquals("READY", firstReady.state)
-    assertEquals("QUEUED", jobs.status(owner, UUID.fromString(second.requestId)).state)
+    assertEquals("QUEUED", jobs.statusV2(owner, UUID.fromString(second.requestId)).state)
     jobs.runNext()
-    val secondReady = jobs.status(owner, UUID.fromString(second.requestId))
+    val secondReady = jobs.statusV2(owner, UUID.fromString(second.requestId))
     assertEquals("READY", secondReady.state)
-    assertEquals(firstReady, jobs.submit(owner, firstRaw))
-    assertEquals(secondReady, jobs.submit(owner, secondRaw))
+    assertEquals(firstReady, submitPlanner(owner, firstRaw))
+    assertEquals(secondReady, submitPlanner(owner, secondRaw))
     jobs.runNext()
-    assertEquals(2, provider.calls)
+    assertEquals(0, provider.calls)
     val results = listOf(firstReady.result!!, secondReady.result!!)
     assertEquals(listOf(first.requestId, second.requestId), results.map { it.requestId })
     val proposalIds = results.map { it.proposal.proposalId }.toSet()
@@ -1627,80 +1329,55 @@ class CalendarAiCaptureIntegrationTest {
 
   @Test
   fun `new ordinary job stays queued while an earlier running job publishes`() {
-    val owner = owner()
-    val exercise = exercise(owner)
-    val first = jobs.submit(owner, jobRequest())
-    val secondRaw = jobRequest()
-    val secondId = UUID.fromString(json.readTree(secondRaw)["requestId"].asString())
-    provider.handler = {
-      provider.handler = { providerResponse(exercise) }
-      assertEquals("RUNNING", jobs.status(owner, UUID.fromString(first.requestId)).state)
-      assertEquals("QUEUED", jobs.submit(owner, secondRaw).state)
-      assertEquals("RUNNING", jobs.status(owner, UUID.fromString(first.requestId)).state)
-      providerResponse(exercise)
+    lateinit var first: CalendarDraftJobResponse
+    lateinit var second: CalendarDraftJobResponse
+    lateinit var identity: Identity
+    blockedExecution { owner, current ->
+      identity = owner
+      first = current
+      testClock.currentTime++
+      second = submitPlanner(owner)
+      assertEquals("QUEUED", second.state)
     }
-
+    assertEquals("READY", jobs.statusV2(identity, UUID.fromString(first.requestId)).state)
+    assertEquals("QUEUED", jobs.statusV2(identity, UUID.fromString(second.requestId)).state)
     jobs.runNext()
-    val firstReady = jobs.status(owner, UUID.fromString(first.requestId))
-    assertEquals("READY", firstReady.state)
-    assertEquals("QUEUED", jobs.status(owner, secondId).state)
-    assertEquals(1, provider.calls)
-    jobs.runNext()
-    val secondReady = jobs.status(owner, secondId)
-    assertEquals("READY", secondReady.state)
-    assertEquals(firstReady, jobs.status(owner, UUID.fromString(first.requestId)))
-    assertNotEquals(
-      firstReady.result!!.proposal.proposalId,
-      secondReady.result!!.proposal.proposalId,
-    )
-    assertEquals(2, provider.calls)
+    assertEquals("READY", jobs.statusV2(identity, UUID.fromString(second.requestId)).state)
   }
 
   @Test
   fun `later job completing first does not overwrite an earlier running result`() {
-    val owner = owner()
-    val exercise = exercise(owner)
-    val first = jobs.submit(owner, jobRequest())
-    testClock.currentTime++
-    val second = jobs.submit(owner, jobRequest())
-    provider.handler = {
-      provider.handler = { providerResponse(exercise) }
+    lateinit var first: CalendarDraftJobResponse
+    lateinit var second: CalendarDraftJobResponse
+    lateinit var identity: Identity
+    blockedExecution { owner, current ->
+      identity = owner
+      first = current
+      testClock.currentTime++
+      second = submitPlanner(owner)
+      hooks.finalLock = null
       jobs.runNext()
-      assertEquals("READY", jobs.status(owner, UUID.fromString(second.requestId)).state)
-      assertEquals("RUNNING", jobs.status(owner, UUID.fromString(first.requestId)).state)
-      providerResponse(exercise)
+      assertEquals("READY", jobs.statusV2(owner, UUID.fromString(second.requestId)).state)
     }
-
-    jobs.runNext()
-    val firstReady = jobs.status(owner, UUID.fromString(first.requestId))
-    val secondReady = jobs.status(owner, UUID.fromString(second.requestId))
-    assertEquals("READY", firstReady.state)
-    assertEquals("READY", secondReady.state)
-    assertEquals(first.requestId, firstReady.result!!.requestId)
-    assertEquals(second.requestId, secondReady.result!!.requestId)
-    assertNotEquals(firstReady.result.proposal.proposalId, secondReady.result.proposal.proposalId)
-    assertEquals(2, provider.calls)
+    assertEquals("READY", jobs.statusV2(identity, UUID.fromString(first.requestId)).state)
+    assertEquals("READY", jobs.statusV2(identity, UUID.fromString(second.requestId)).state)
     assertEquals(2, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
   }
 
   @Test
   fun `failed job leaves another independent queued job able to finish`() {
     val owner = owner()
-    val exercise = exercise(owner)
-    val first = jobs.submit(owner, jobRequest())
+    exercise(owner)
+    val first = submitPlanner(owner)
     testClock.currentTime++
-    val second = jobs.submit(owner, jobRequest())
-    provider.handler = { throw aiError("ai_invalid_response") }
+    val second = submitPlanner(owner)
+    hooks.failProposalInsert = true
     jobs.runNext()
-    val failed = jobs.status(owner, UUID.fromString(first.requestId))
-    assertEquals("FAILED", failed.state)
-    assertEquals("QUEUED", jobs.status(owner, UUID.fromString(second.requestId)).state)
-
-    provider.handler = { providerResponse(exercise) }
+    hooks.failProposalInsert = false
+    assertEquals("FAILED", jobs.statusV2(owner, UUID.fromString(first.requestId)).state)
+    assertEquals("QUEUED", jobs.statusV2(owner, UUID.fromString(second.requestId)).state)
     jobs.runNext()
-    assertEquals("READY", jobs.status(owner, UUID.fromString(second.requestId)).state)
-    assertEquals(failed, jobs.status(owner, UUID.fromString(first.requestId)))
-    assertEquals(1, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
+    assertEquals("READY", jobs.statusV2(owner, UUID.fromString(second.requestId)).state)
   }
 
   @Test
@@ -1716,7 +1393,7 @@ class CalendarAiCaptureIntegrationTest {
     val current = jobs.submit(owner, json.writeValueAsBytes(c))
     assertEquals("SUPERSEDED", jobs.submit(owner, a).state)
     assertEquals("SUPERSEDED", jobs.submit(owner, b).state)
-    assertEquals("QUEUED", jobs.status(owner, UUID.fromString(current.requestId)).state)
+    assertEquals("FAILED", jobs.status(owner, UUID.fromString(current.requestId)).state)
     assertEquals(unrelated, jobs.status(owner, UUID.fromString(unrelated.requestId)))
     assertEquals(
       2,
@@ -1732,87 +1409,68 @@ class CalendarAiCaptureIntegrationTest {
     val owner = owner()
     val exercise = exercise(owner)
     provider.handler = { providerResponse(exercise) }
-    val job = jobs.submit(owner, rawRequest())
+    val job = submitPlanner(owner, rawRequest())
     db.update(
       "UPDATE calendar_draft_jobs SET state='RUNNING',executions=1,lease_token=?,lease_until=?",
       UUID.randomUUID(),
       Timestamp.from(Instant.ofEpochMilli(capturedAt - 1)),
     )
     jobs.runNext()
-    assertEquals("READY", jobs.status(owner, UUID.fromString(job.requestId)).state)
+    assertEquals("READY", jobs.statusV2(owner, UUID.fromString(job.requestId)).state)
     assertEquals(
       2,
       db.queryForObject("SELECT executions FROM calendar_draft_jobs", Int::class.java),
     )
     jobs.runNext()
-    assertEquals(1, provider.calls)
+    assertEquals(0, provider.calls)
   }
 
   @Test
   fun `restart retries are bounded`() {
     val owner = owner()
-    val job = jobs.submit(owner, rawRequest())
+    val job = submitPlanner(owner, rawRequest())
     db.update(
       "UPDATE calendar_draft_jobs SET state='RUNNING',executions=3,lease_token=?,lease_until=?",
       UUID.randomUUID(),
       Timestamp.from(Instant.ofEpochMilli(capturedAt - 1)),
     )
     jobs.runNext()
-    assertEquals("FAILED", jobs.status(owner, UUID.fromString(job.requestId)).state)
+    assertEquals("FAILED", jobs.statusV2(owner, UUID.fromString(job.requestId)).state)
     assertEquals(0, provider.calls)
   }
 
   @Test
-  fun `explicit replacement fences a late provider result and leaves another queued job intact`() {
-    val owner = owner()
-    val exercise = exercise(owner)
-    val old = jobs.submit(owner, rawRequest())
-    testClock.currentTime++
-    val unrelated = jobs.submit(owner, jobRequest())
-    val replacementRaw = jobRequest(listOf(old.requestId))
-    val replacementId = UUID.fromString(json.readTree(replacementRaw)["requestId"].asString())
-    provider.handler = {
-      jobs.submit(owner, replacementRaw)
-      providerResponse(exercise)
+  fun `explicit cancel fences late deterministic publication without touching independent request`() {
+    lateinit var identity: Identity
+    lateinit var old: CalendarDraftJobResponse
+    lateinit var unrelated: CalendarDraftJobResponse
+    blockedExecution { owner, current ->
+      identity = owner
+      old = current
+      testClock.currentTime++
+      unrelated = submitPlanner(owner)
+      jobs.cancel(owner, UUID.fromString(current.requestId), 2)
     }
+    assertEquals("SUPERSEDED", jobs.statusV2(identity, UUID.fromString(old.requestId)).state)
+    assertEquals("QUEUED", jobs.statusV2(identity, UUID.fromString(unrelated.requestId)).state)
     jobs.runNext()
-    assertEquals("SUPERSEDED", jobs.status(owner, UUID.fromString(old.requestId)).state)
-    assertEquals(0, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
-    assertEquals(unrelated, jobs.status(owner, UUID.fromString(unrelated.requestId)))
-    assertEquals("QUEUED", jobs.status(owner, replacementId).state)
-    provider.handler = { providerResponse(exercise) }
-    repeat(2) { jobs.runNext() }
-    assertEquals("READY", jobs.status(owner, UUID.fromString(unrelated.requestId)).state)
-    assertEquals("READY", jobs.status(owner, replacementId).state)
-    assertEquals(2, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
+    assertEquals("READY", jobs.statusV2(identity, UUID.fromString(unrelated.requestId)).state)
   }
 
   @Test
-  fun `explicit singular replacement preserves another ready job and prevents replaced approval`() {
+  fun `cancelling ready request fences its approval and preserves independent ready proposal`() {
     val owner = owner()
-    val exercise = exercise(owner)
-    provider.handler = { providerResponse(exercise) }
-    val job = jobs.submit(owner, rawRequest())
-    jobs.runNext()
-    val ready = jobs.status(owner, UUID.fromString(job.requestId)).result!!
-    val unrelated = jobs.submit(owner, jobRequest())
-    jobs.runNext()
-    val unrelatedReady = jobs.status(owner, UUID.fromString(unrelated.requestId))
-    val replacement = json.readTree(rawRequest()) as ObjectNode
-    replacement.put("replacesRequestId", job.requestId)
-    jobs.submit(owner, json.writeValueAsBytes(replacement))
-    val request =
-      tech.valerochkagym.controller.model.ApprovalRequest(
-        UUID.randomUUID().toString(),
-        1,
-        ready.proposal.snapshot.draft,
-      )
+    exercise(owner)
+    val first = ready(owner)
+    val other = ready(owner)
+    jobs.cancel(owner, UUID.fromString(first.requestId), 2)
+    val request = ApprovalRequest(UUID.randomUUID().toString(), 1, first.proposal.snapshot.draft)
     assertEquals(
       "proposal_stale",
       assertThrows<ApiException> {
           proposals.approve(
             owner,
-            ready.proposal.proposalId,
+            first.proposal.proposalId,
             json.writeValueAsBytes(request),
             "0".repeat(64),
             request,
@@ -1820,25 +1478,22 @@ class CalendarAiCaptureIntegrationTest {
         }
         .code,
     )
-    assertEquals(2, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
-    assertEquals("SUPERSEDED", jobs.status(owner, UUID.fromString(job.requestId)).state)
-    assertEquals(ready.proposal, proposals.detail(owner, ready.proposal.proposalId))
-    assertEquals("READY", unrelatedReady.state)
-    assertEquals(unrelatedReady, jobs.status(owner, UUID.fromString(unrelated.requestId)))
+    assertEquals("READY", jobs.statusV2(owner, UUID.fromString(other.requestId)).state)
+    assertEquals(first.proposal, proposals.detail(owner, first.proposal.proposalId))
   }
 
   @Test
   fun `changed history invalidates job before provider and other owner cannot see it`() {
     val owner = owner()
     val other = owner()
-    val job = jobs.submit(owner, rawRequest())
+    val job = submitPlanner(owner, rawRequest())
     assertEquals(
       404,
-      assertThrows<ApiException> { jobs.status(other, UUID.fromString(job.requestId)) }.status,
+      assertThrows<ApiException> { jobs.statusV2(other, UUID.fromString(job.requestId)) }.status,
     )
     db.update("UPDATE sync_heads SET revision=18 WHERE user_id=?", owner.userId)
     jobs.runNext()
-    assertEquals("STALE", jobs.status(owner, UUID.fromString(job.requestId)).state)
+    assertEquals("STALE", jobs.statusV2(owner, UUID.fromString(job.requestId)).state)
     assertEquals(0, provider.calls)
   }
 
@@ -1854,52 +1509,30 @@ class CalendarAiCaptureIntegrationTest {
   }
 
   @Test
-  fun `invalid provider output persists only fixed error code`() {
+  fun `publication failure persists only fixed code and rolls back explanation`() {
     val owner = owner()
     exercise(owner)
-    val previous = diagnostics.snapshot().map { it.id }.toSet()
-    provider.handler = { throw IllegalStateException("secret raw content") }
-    val job = jobs.submit(owner, rawRequest())
+    val job = submitPlanner(owner)
+    hooks.failProposalInsert = true
     jobs.runNext()
-    val failed = jobs.status(owner, UUID.fromString(job.requestId))
+    val failed = jobs.statusV2(owner, UUID.fromString(job.requestId))
     assertEquals("FAILED", failed.state)
     assertEquals("ai_invalid_response", failed.errorCode)
     assertNull(failed.result)
-    val run = diagnostics.snapshot().single { it.id !in previous }
-    assertEquals(
-      tech.valerochkagym.service.ai.AiDiagnosticFailureCategory.INTERNAL,
-      run.failureCategory,
-    )
-    assertFalse(json.writeValueAsString(run).contains("secret raw content"))
+    assertEquals(0, db.queryForObject("SELECT count(*) FROM planner_explanations", Int::class.java))
+    assertEquals(0, provider.calls)
   }
 
   @Test
-  fun `job diagnostics capture unavailable provider before calendar execution without private data`() {
+  fun `unavailable provider neither blocks planner nor emits provider diagnostics`() {
     val owner = owner()
     exercise(owner)
-    val previous = diagnostics.snapshot().map { it.id }.toSet()
-    val job = jobs.submit(owner, rawRequest())
     provider.available = false
-    jobs.runNext()
-    val failed = jobs.status(owner, UUID.fromString(job.requestId))
-    assertEquals("FAILED", failed.state)
-    assertEquals("ai_unavailable", failed.errorCode)
+    val before = diagnostics.snapshot().map { it.id }
+    val result = ready(owner)
+    assertEquals("RULE_BASED", result.proposal.source)
     assertEquals(0, provider.calls)
-    val run = diagnostics.snapshot().single { it.id !in previous }
-    assertEquals(tech.valerochkagym.service.ai.AiDiagnosticOutcome.FAILURE, run.outcome)
-    assertEquals(
-      tech.valerochkagym.service.ai.AiDiagnosticFailureCategory.PROVIDER_UNCONFIGURED,
-      run.failureCategory,
-    )
-    assertEquals(
-      listOf(tech.valerochkagym.service.ai.AiDiagnosticStage.CALENDAR_JOB),
-      run.stages.map { it.stage },
-    )
-    val encoded = json.writeValueAsString(run)
-    assertFalse(encoded.contains(owner.userId.toString()))
-    assertFalse(encoded.contains(owner.sessionId.toString()))
-    assertFalse(encoded.contains(job.requestId))
-    assertEquals(0, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
+    assertEquals(before, diagnostics.snapshot().map { it.id })
   }
 
   @Test
@@ -1919,18 +1552,18 @@ class CalendarAiCaptureIntegrationTest {
     val owner = owner()
     val exercise = exercise(owner)
     provider.handler = { providerResponse(exercise) }
-    val job = jobs.submit(owner, rawRequest())
+    val job = submitPlanner(owner, rawRequest())
     jobs.runNext()
     db.update("UPDATE sync_heads SET revision=18 WHERE user_id=?", owner.userId)
-    val stale = jobs.status(owner, UUID.fromString(job.requestId))
+    val stale = jobs.statusV2(owner, UUID.fromString(job.requestId))
     assertEquals("STALE", stale.state)
-    assertTrue(stale.result != null)
+    assertNull(stale.result)
   }
 
   @Test
   fun `revoked session cannot execute a queued job`() {
     val owner = owner()
-    val job = jobs.submit(owner, rawRequest())
+    val job = submitPlanner(owner, rawRequest())
     db.update(
       "UPDATE sessions SET revoked_at=? WHERE id=?",
       Timestamp.from(Instant.ofEpochMilli(capturedAt)),
@@ -1950,22 +1583,22 @@ class CalendarAiCaptureIntegrationTest {
 
   @Test
   fun `reclaimed lease fences late execution and inserts exactly one proposal`() {
-    val owner = owner()
-    val exercise = exercise(owner)
-    val job = jobs.submit(owner, rawRequest())
-    provider.handler = {
-      provider.handler = { providerResponse(exercise) }
+    lateinit var identity: Identity
+    lateinit var job: CalendarDraftJobResponse
+    blockedExecution { owner, current ->
+      identity = owner
+      job = current
+      hooks.finalLock = null
       db.update(
-        "UPDATE calendar_draft_jobs SET lease_until=?",
-        Timestamp.from(Instant.ofEpochMilli(capturedAt - 1)),
+        "UPDATE calendar_draft_jobs SET lease_until=? WHERE request_id=?",
+        Timestamp(capturedAt - 1),
+        UUID.fromString(job.requestId),
       )
       jobs.runNext()
-      providerResponse(exercise)
     }
-    jobs.runNext()
-    assertEquals("READY", jobs.status(owner, UUID.fromString(job.requestId)).state)
-    assertEquals(2, provider.calls)
+    assertEquals("READY", jobs.statusV2(identity, UUID.fromString(job.requestId)).state)
     assertEquals(1, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
+    assertEquals(0, provider.calls)
   }
 
   @Test
@@ -1987,9 +1620,9 @@ class CalendarAiCaptureIntegrationTest {
     val owner = owner()
     val exercise = exercise(owner)
     provider.handler = { providerResponse(exercise) }
-    val job = jobs.submit(owner, rawRequest())
+    val job = submitPlanner(owner, rawRequest())
     jobs.runNext()
-    val ready = jobs.status(owner, UUID.fromString(job.requestId)).result!!
+    val ready = jobs.statusV2(owner, UUID.fromString(job.requestId)).result!!
     testClock.currentTime = capturedAt + 3_600_001
     val request =
       tech.valerochkagym.controller.model.ApprovalRequest(
@@ -2112,212 +1745,174 @@ class CalendarAiCaptureIntegrationTest {
   }
 
   @Test
-  fun `agentic context keeps completed coverage while explanations ignore invented rationale`() {
+  fun `persisted explanation attributes repeated exercise to factual continuity`() {
     val owner = owner()
-    val first = exercise(owner)
-    val second = exercise(owner)
-    val last = UUID.randomUUID()
-    workout(owner, last, capturedAt - 3_600_000, capturedAt - 1_000, sets(first, 3, actual = 42.0))
-    val raw = json.readTree(rawRequest()) as ObjectNode
-    raw.put("availableDurationMinutes", 60)
-    provider.handler = { input ->
-      val context = json.readTree(input.context)
-      assertFalse(context.has("history"))
-      assertEquals(25, context["completedMuscleCoverage"]["last7Days"].size())
-      assertEquals(60, context["intent"]["desiredDurationMinutes"].asInt())
-      json.readTree(
-        """{"result":{"name":"Synthetic session","exercises":[
-        {"exerciseId":"$first","restSeconds":120,"plannedSets":[{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null}]},
-        {"exerciseId":"$second","restSeconds":120,"plannedSets":[{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null},{"reps":10,"durationSec":null}]}],
-        "rationale":{"selection":"invented","repeat":"NONE","shortfall":"NONE"}}}"""
-      )
-    }
-    val response = actions.calendar(owner, json.writeValueAsBytes(raw))
-    val explanation = explanations.read(owner, response.proposal.proposalId)
-    assertEquals(3150L, explanation.estimatedSeconds)
-    assertEquals(2880L, explanation.minimumSeconds)
-    assertEquals(listOf(first.toString()), explanation.repeatedExerciseIds)
-    assertEquals(capturedAt - 1000, explanation.lastFinishedAtMillis)
-    assertEquals("UNSPECIFIED", explanation.selectionReason)
-    assertEquals("UNSPECIFIED", explanation.repeatReason)
-    assertEquals("NONE", explanation.shortfallReason)
-    assertNull(response.proposal.snapshot.draft.exercises.first().plannedSets.first().weightKg)
-    assertEquals(1, provider.calls)
-    assertEquals(response, actions.calendar(owner, json.writeValueAsBytes(raw)))
-    assertEquals(1, db.queryForObject("SELECT count(*) FROM planner_explanations", Int::class.java))
-    assertEquals(
-      404,
-      assertThrows<ApiException> { explanations.read(owner(), response.proposal.proposalId) }.status,
-    )
-    assertFalse(json.valueToTree<JsonNode>(response.proposal).has("explanation"))
+    val target = exercise(owner)
+    workout(owner, UUID.randomUUID(), capturedAt - 100, capturedAt - 1, sets(target, 3))
+    val context = providerContext(owner)
+    assertTrue(context.has("completedMuscleCoverage"))
+    val result = ready(owner)
+    val explanation = explanations.readRaw(owner, result.proposal.proposalId)
+    assertEquals("RULE_BASED", explanation["selectionReason"].asString())
+    assertEquals("CONTINUITY", explanation["repeatReason"].asString())
+    assertEquals(0, provider.calls)
   }
 
   @Test
-  fun `creation and refinement send completed history in initial context and tool response`() {
+  fun `creation and refinement freeze factual history without notes or provider calls`() {
     val owner = owner()
-    val upper = exercise(owner, muscles = listOf(mapOf("muscle" to "LATS", "contribution" to 100)))
-    val lower = exercise(owner, muscles = listOf(mapOf("muscle" to "QUADS", "contribution" to 100)))
-    record(
+    val target = exercise(owner)
+    val replacement = exercise(owner)
+    workout(
       owner,
-      "profile",
       UUID.randomUUID(),
-      mapOf(
-        "trainingGoal" to "MUSCLE_GAIN",
-        "sex" to null,
-        "birthDate" to null,
-        "experienceLevel" to null,
-        "plannedSessionsPerWeek" to 3,
-        "preferredSessionDurationMinutes" to 45,
-        "manualConstraints" to null,
-        "equipmentIds" to emptyList<String>(),
+      capturedAt - 100,
+      capturedAt - 1,
+      sets(target, 3, actual = 50.0, actualReps = 10, note = "private-set-note"),
+    )
+    val result = ready(owner)
+    val firstSnapshot =
+      db.queryForObject(
+        "SELECT execution_snapshot::text FROM calendar_draft_jobs WHERE request_id=?",
+        String::class.java,
+        UUID.fromString(result.requestId),
+      )!!
+    assertTrue(json.readTree(firstSnapshot)["facts"].size() >= 3)
+    assertFalse(firstSnapshot.contains("private-set-note"))
+    val raw = refineBytes(result.proposal, replacement)
+    jobs.submitV2Refinement(owner, result.proposal.proposalId, raw)
+    jobs.runNext()
+    val refined = jobs.statusV2(owner, UUID.fromString(json.readTree(raw)["requestId"].asString()))
+    assertEquals("READY", refined.state)
+    assertEquals(0, provider.calls)
+  }
+
+  @Test
+  fun `new explicit variant produces independent ready proposal without repair model`() {
+    val owner = owner()
+    exercise(owner)
+    val first = ready(owner)
+    val raw = json.readTree(v2Raw()) as ObjectNode
+    raw.put("variant", 1)
+    val job = jobs.submitV2(owner, json.writeValueAsBytes(raw))
+    jobs.runNext()
+    val alternate = jobs.statusV2(owner, UUID.fromString(job.requestId))
+    assertEquals("READY", alternate.state)
+    assertNotEquals(first.proposal.proposalId, alternate.result!!.proposal.proposalId)
+    assertEquals(0, provider.calls)
+  }
+
+  @Test
+  fun `configuration changes do not rewrite an admitted immutable history snapshot`() {
+    val owner = owner()
+    exercise(owner)
+    val raw = rawRequest()
+    val job = submitPlanner(owner, raw)
+    val before =
+      db.queryForObject(
+        "SELECT execution_snapshot::text FROM calendar_draft_jobs",
+        String::class.java,
+      )
+    plannerConfiguration.save(plannerConfiguration.snapshot().copy(weightStepKg = 5.0))
+    jobs.runNext()
+    assertEquals("READY", jobs.statusV2(owner, UUID.fromString(job.requestId)).state)
+    assertEquals(
+      before,
+      db.queryForObject(
+        "SELECT execution_snapshot::text FROM calendar_draft_jobs",
+        String::class.java,
       ),
     )
-    val last = UUID.randomUUID()
-    workout(
-      owner,
-      UUID.randomUUID(),
-      capturedAt - 3 * 86_400_000L,
-      capturedAt - 3 * 86_400_000L + 1000,
-      sets(lower, 2),
-    )
-    workout(
-      owner,
-      last,
-      capturedAt - 2 * 86_400_000L,
-      capturedAt - 2 * 86_400_000L + 1000,
-      sets(upper, 3, actual = 50.0, actualReps = 10, note = "private-set-note"),
-      note = "private-workout-note",
-    )
-    val unfinished = UUID.randomUUID()
-    workout(owner, unfinished, capturedAt - 1000, capturedAt, sets(lower, 9))
-    db.update(
-      "UPDATE records SET payload=jsonb_set(payload,'{finishedAt}','null') WHERE user_id=? AND id=?",
-      owner.userId,
-      unfinished,
-    )
-    assertEquals(2, capture(owner).workouts.size)
-    // Active workouts intentionally prevent proposal publication; deletion also must not restore
-    // this unfinished session to the context used by creation or refinement.
-    db.update(
-      "UPDATE records SET deleted=true,payload=null WHERE user_id=? AND id=?",
-      owner.userId,
-      unfinished,
-    )
-    val other = owner()
-    workout(other, UUID.randomUUID(), capturedAt - 500, capturedAt, sets(upper, 99))
-    provider.historyCandidateIds = listOf(upper.toString())
-    provider.handler = { input ->
-      val context = json.readTree(input.context)
-      val planning = context["planningContext"] ?: context
-      val recent = planning["workoutHistory"]["recentWorkouts"]
-      assertEquals(2, recent.size())
-      assertEquals(upper.toString(), recent[0]["exercises"][0]["exerciseId"].asString())
-      assertEquals(3, recent[0]["exercises"][0]["completedSetCounts"]["work"].asInt())
-      assertEquals(100, recent[0]["exercises"][0]["currentMuscleContributions"]["LATS"].asInt())
-      assertEquals(lower.toString(), recent[1]["exercises"][0]["exerciseId"].asString())
-      val historyCall =
-        input.plannerTranscript.single { it.call.name == "get_candidate_details_and_history" }
-      val history = json.readTree(historyCall.result)["history"]
-      assertEquals("AVAILABLE", history["status"].asString())
-      assertEquals(1, history["recentWorkouts"].size())
-      assertEquals(
-        recent[0]["finishedLocalTime"],
-        history["recentWorkouts"][0]["finishedLocalTime"],
-      )
-      assertEquals(
-        3,
-        history["recentWorkouts"][0]["exercises"][0]["completedSetCounts"]["work"].asInt(),
-      )
-      val outgoing = input.context + historyCall.result.toString(Charsets.UTF_8)
-      listOf(
-          "private-set-note",
-          "private-workout-note",
-          last.toString(),
-          other.userId.toString(),
-          "actualWeightKg",
-          "actualReps",
-        )
-        .forEach { assertFalse(outgoing.contains(it), it) }
-      if (context.has("planningContext")) refinedProviderResponse(upper, lower)
-      else providerResponse(upper)
-    }
-    val created = actions.calendar(owner, rawRequest())
-    actions.refineCalendar(owner, created.proposal.proposalId, refinementRequest(UUID.randomUUID()))
-    assertEquals(2, provider.calls)
+    assertEquals(0, provider.calls)
   }
 
-  @Test
-  fun `agentic planner repairs a short plan through the validation tool`() {
-    val owner = owner()
-    val exercises = (1..6).map { exercise(owner) }
-    provider.repairRejected = true
-    provider.handler = { input ->
-      if (provider.calls == 1) shortProviderResponse(exercises.first())
-      else {
-        val feedback = json.readTree(input.plannerTranscript.last().result)
-        assertEquals("DURATION_TOO_SHORT", feedback["details"]["reason"].asString())
-        assertEquals(45L, feedback["details"]["actual"].asLong())
-        assertEquals(2160L, feedback["details"]["minimum"].asLong())
-        assertEquals(2700L, feedback["details"]["maximum"].asLong())
-        providerResponse(exercises.first())
-      }
-    }
-    val response = actions.calendar(owner, rawRequest())
-    assertEquals(2, provider.calls)
-    assertEquals("NONE", explanations.read(owner, response.proposal.proposalId).shortfallReason)
-    assertEquals(1, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
-    val diagnostic = diagnostics.snapshot().last()
-    assertEquals(tech.valerochkagym.service.ai.AiDiagnosticOutcome.SUCCESS, diagnostic.outcome)
-    val rejected =
-      diagnostic.events.single {
-        it.reason == tech.valerochkagym.service.ai.AiDiagnosticReason.DURATION_TOO_SHORT
-      }
-    assertEquals(45L, rejected.actual)
-    assertEquals(2160L, rejected.minimum)
-    assertEquals(2700L, rejected.maximum)
-    assertTrue(
-      diagnostic.events.any {
-        it.reason == tech.valerochkagym.service.ai.AiDiagnosticReason.PLAN_ACCEPTED
-      }
+  private fun configure(type: String = "STRENGTH", seconds: Int = 45) {
+    val original = plannerConfiguration.snapshot()
+    val slot =
+      PlannerPatternSlot(
+        "PRIMARY",
+        "Explicit fixture",
+        type,
+        sets = 3,
+        repsMin = 8,
+        repsMax = 12,
+        durationSeconds = if (type == "STRENGTH") 0 else seconds,
+        slotId = "slot",
+        movementClass =
+          if (type == "STRENGTH") "HORIZONTAL_PUSH" else if (type == "TIMED") "CORE" else "CARDIO",
+        targetTotalReps = if (type == "STRENGTH") 30 else null,
+        targetIntensityBasisPoints = if (type == "STRENGTH") 6949 else null,
+      )
+    plannerConfiguration.save(
+      original.copy(
+        collections =
+          original.collections.map { c ->
+            c.copy(
+              patterns =
+                listOf(PlannerPattern("${c.id}-fixture", "Fixture", "FULL_BODY", "", listOf(slot)))
+            )
+          }
+      )
     )
   }
 
-  @Test
-  fun `agentic validation repair can meet desired time with unchanged history capture`() {
+  private fun v2Raw(raw: ByteArray = rawRequest()): ByteArray {
+    val root = json.readTree(raw) as ObjectNode
+    listOf("preferences", "currentState", "replacesRequestId", "replacesRequestIds")
+      .forEach(root::remove)
+    root.put("includeNotes", false)
+    root.put("variant", 0)
+    return json.writeValueAsBytes(root)
+  }
+
+  private fun submitPlanner(
+    owner: Identity,
+    raw: ByteArray = rawRequest(),
+  ): CalendarDraftJobResponse = jobs.submitV2(owner, v2Raw(raw))
+
+  private fun ready(owner: Identity, raw: ByteArray = rawRequest()): CalendarDraftResponse {
+    val job = submitPlanner(owner, raw)
+    jobs.runNext()
+    val result = jobs.statusV2(owner, UUID.fromString(job.requestId))
+    assertEquals("READY", result.state, result.errorCode)
+    assertEquals(0, provider.calls)
+    return result.result!!
+  }
+
+  private fun refineBytes(
+    proposal: ProposalResponse,
+    target: UUID,
+    requestId: UUID = UUID.randomUUID(),
+  ) =
+    json.writeValueAsBytes(
+      PlannerV2RefinementRequest(
+        requestId,
+        0,
+        17,
+        9,
+        1,
+        proposal.snapshot.draft,
+        listOf(PlannerV2Change("REPLACE", "slot", "slot-1", target)),
+      )
+    )
+
+  private fun blockedExecution(action: (Identity, CalendarDraftJobResponse) -> Unit) {
     val owner = owner()
-    val exercises = (1..6).map { exercise(owner) }
-    provider.repairRejected = true
-    provider.handler = { input ->
-      if (provider.calls == 1) shortProviderResponse(exercises.first())
-      else {
-        assertEquals(
-          1,
-          input.plannerTranscript.count { it.call.name == "validate_and_finalize_plan" },
-        )
-        assertFalse(json.readTree(input.plannerTranscript.last().result)["valid"].asBoolean())
-        json.valueToTree(
-          mapOf(
-            "result" to
-              mapOf(
-                "name" to "Full session",
-                "exercises" to
-                  exercises.map { id ->
-                    mapOf(
-                      "exerciseId" to id.toString(),
-                      "restSeconds" to 60,
-                      "plannedSets" to List(4) { mapOf("reps" to 10, "durationSec" to null) },
-                    )
-                  },
-              )
-          )
-        )
-      }
+    exercise(owner)
+    configure()
+    val job = submitPlanner(owner)
+    val gate = Gate()
+    hooks.finalLock = gate
+    val task = FutureTask { jobs.runNext() }
+    Thread.ofVirtual().start(task)
+    assertTrue(gate.reached.await(5, TimeUnit.SECONDS))
+    try {
+      action(owner, job)
+    } finally {
+      gate.open()
     }
-    val response = actions.calendar(owner, rawRequest())
-    val explanation = explanations.read(owner, response.proposal.proposalId)
-    assertEquals(2, provider.calls)
-    assertEquals(2610, explanation.estimatedSeconds.toInt())
-    assertEquals("NONE", explanation.shortfallReason)
+    task.get(5, TimeUnit.SECONDS)
+    hooks.finalLock = null
   }
 
   private fun jobRequest(replacesRequestIds: List<String> = emptyList()): ByteArray {
@@ -2448,29 +2043,33 @@ class CalendarAiCaptureIntegrationTest {
     excludedEquipment: List<String> = emptyList(),
     priority: List<String> = listOf("UPPER_CHEST"),
   ): JsonNode {
-    var context: JsonNode? = null
-    provider.handler = { input ->
-      context = json.readTree(input.context)
-      throw aiError("ai_invalid_response")
-    }
-    assertEquals(
-      "ai_invalid_response",
-      assertThrows<ApiException> {
-          actions.calendar(owner, rawRequest(gymIds, excludedEquipment, priority))
-        }
-        .code,
+    val request =
+      json.readValue(
+        rawRequest(gymIds, excludedEquipment, priority),
+        CalendarDraftRequest::class.java,
+      )
+    val captured = contexts.captureCalendar(owner, 17, 9, request.timeZoneId, false, gymIds)
+    val selected =
+      CalendarCandidateSelector.eligible(
+        captured.candidates,
+        captured.gyms,
+        request,
+        captured.facts,
+        captured.profile?.trainingGoal,
+      )
+    return json.readTree(
+      CalendarPlannerContext.serializeAgentic(json, captured, request, selected, selected.size)
     )
-    return requireNotNull(context)
   }
 
   private fun projectedWeight(owner: Identity, exercise: UUID): Double? {
-    provider.handler = { providerResponse(exercise) }
-    val response = actions.calendar(owner, rawRequest())
-    return json
-      .valueToTree<JsonNode>(response)["proposal"]["snapshot"]["draft"]["exercises"][0][
-        "plannedSets"][0]["weightKg"]
-      .takeUnless { it.isNull }
-      ?.asDouble()
+    return PlannerWeightEngine.calculate(
+      capture(owner).facts,
+      exercise.toString(),
+      8,
+      capturedAt,
+      2.5,
+    )
   }
 
   private fun allMuscles() =

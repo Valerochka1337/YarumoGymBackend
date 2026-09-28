@@ -19,8 +19,8 @@ data class AiProfileContext(
 ) {
   companion object {
     fun fromSaved(payload: JsonNode, clock: Clock): AiProfileContext {
-      fun text(key: String) = payload[key].takeUnless { it.isNull }?.asString()
-      fun number(key: String) = payload[key].takeUnless { it.isNull }?.asInt()
+      fun text(key: String) = payload[key]?.takeUnless { it.isNull }?.asString()
+      fun number(key: String) = payload[key]?.takeUnless { it.isNull }?.asInt()
       return AiProfileContext(
         text("trainingGoal"),
         text("sex"),
@@ -31,7 +31,8 @@ data class AiProfileContext(
         number("plannedSessionsPerWeek"),
         number("preferredSessionDurationMinutes"),
         text("manualConstraints"),
-        payload["equipmentIds"].toList().map { it.asString() },
+        payload["equipmentIds"]?.takeUnless { it.isNull }?.toList()?.map { it.asString() }
+          ?: emptyList(),
       )
     }
   }

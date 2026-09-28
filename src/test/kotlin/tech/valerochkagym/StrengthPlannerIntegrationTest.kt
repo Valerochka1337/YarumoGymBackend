@@ -6,7 +6,6 @@ import java.time.ZoneOffset
 import java.util.UUID
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -23,6 +22,8 @@ import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.postgresql.PostgreSQLContainer
 import tech.valerochkagym.controller.advice.ApiException
+import tech.valerochkagym.controller.model.*
+import tech.valerochkagym.service.ai.*
 import tech.valerochkagym.service.ai.AiActionService
 import tech.valerochkagym.service.ai.AiProviderInput
 import tech.valerochkagym.service.ai.PlannerToolCallingProvider
@@ -30,8 +31,9 @@ import tech.valerochkagym.service.ai.PlannerTurn
 import tech.valerochkagym.service.model.Identity
 import tools.jackson.databind.JsonNode
 import tools.jackson.databind.ObjectMapper
+import tools.jackson.databind.node.ObjectNode
 
-/** Local fake-provider regressions for the compact STRENGTH planner boundary. */
+/** Provider-free strength capture, owner facts, eligibility and actual-weight regressions. */
 @Testcontainers
 @SpringBootTest(
   classes = [Application::class, StrengthPlannerIntegrationTest.Fakes::class],
@@ -91,6 +93,9 @@ class StrengthPlannerIntegrationTest {
     @Bean @Primary fun fixedStrengthPlannerClock() = FixedClock()
   }
 
+  @Autowired lateinit var jobs: CalendarDraftJobService
+  @Autowired lateinit var configuration: PlannerConfigurationService
+  @Autowired lateinit var mappings: PlannerMovementMappingService
   @Autowired lateinit var contexts: tech.valerochkagym.service.ai.AiContextReader
   @Autowired lateinit var actions: AiActionService
   @Autowired lateinit var provider: FakeProvider
@@ -105,10 +110,35 @@ class StrengthPlannerIntegrationTest {
     )
     db.update("UPDATE catalog_state SET revision=9,active=false")
     provider.calls = 0
+    db.update("DELETE FROM planner_configuration")
+    val value = configuration.snapshot()
+    val slot =
+      PlannerPatternSlot(
+        "PRIMARY",
+        "Explicit strength fixture",
+        sets = 3,
+        repsMin = 8,
+        repsMax = 12,
+        slotId = "strength",
+        movementClass = "HORIZONTAL_PUSH",
+        targetTotalReps = 30,
+        targetIntensityBasisPoints = 6949,
+      )
+    configuration.save(
+      value.copy(
+        collections =
+          value.collections.map { c ->
+            c.copy(
+              patterns =
+                listOf(PlannerPattern("${c.id}-test", "Test", "FULL_BODY", "", listOf(slot)))
+            )
+          }
+      )
+    )
   }
 
   @Test
-  fun `strength context sends all-muscle facts without raw weights and meets minimum duration`() {
+  fun `strength capture retains bounded owner history and computes historical weight without a provider`() {
     val owner = owner()
     val focus = exercise(owner)
     val current = exercise(owner)
@@ -136,44 +166,30 @@ class StrengthPlannerIntegrationTest {
     assertEquals(2, historical.latestFacts.size)
     assertEquals(listOf("HARD"), historical.efforts.map { it.effort })
 
-    provider.handler = { input ->
-      val context = json.readTree(input.context)
-      assertEquals(focus.toString(), context["selection"]["focusExerciseId"].asString())
-      assertFalse(context.has("history"))
-      assertFalse(context.has("mass"))
-      assertFalse(context.toString().contains("lastObservationIds"))
-      assertFalse(context.toString().contains("observationId"))
-      assertFalse(context.toString().contains(oldWorkout.toString()))
-      assertFalse(context.toString().contains(currentWorkout.toString()))
-      assertTrue(context.has("completedMuscleCoverage"))
-      assertTrue(context["completedMuscleCoverage"].has("last7Days"))
-      assertTrue(context["completedMuscleCoverage"].has("weeklyTrends"))
-      assertFalse(context.toString().contains("weight", ignoreCase = true))
-      assertFalse(context.toString().contains("volume", ignoreCase = true))
-      response(focus)
-    }
-
-    val result = actions.calendar(owner, request())
+    val result = ready(owner, request())
     assertEquals(
-      10,
+      3,
       json
         .valueToTree<JsonNode>(result)["proposal"]["snapshot"]["draft"]["exercises"][0][
           "plannedSets"]
         .size(),
     )
+    assertEquals(focus.toString(), result.proposal.snapshot.draft.exercises.single().exerciseId)
+    assertTrue(
+      result.proposal.snapshot.draft.exercises.single().plannedSets.all { it.weightKg != null }
+    )
+    assertEquals(0, provider.calls)
   }
 
   @Test
-  fun `strength planning accepts an eligible nonfocus exercise when a pattern adapts`() {
+  fun `strength planning uses eligible alternative when focus is explicitly excluded`() {
     val owner = owner()
     val focus = exercise(owner)
     val alternative = exercise(owner)
     profile(owner, "STRENGTH")
     strengthProfile(owner, listOf(focus to "HIGH"))
-    provider.handler = { response(alternative) }
-
-    val result = actions.calendar(owner, request())
-    assertEquals(1, provider.calls)
+    val result = ready(owner, request(listOf(focus.toString())))
+    assertEquals(0, provider.calls)
     assertEquals(
       alternative.toString(),
       json
@@ -195,10 +211,11 @@ class StrengthPlannerIntegrationTest {
       stale,
     )
 
-    assertEquals(
-      "ai_context_stale",
-      assertThrows<ApiException> { actions.calendar(owner, request()) }.code,
-    )
+    val job = submit(owner, request())
+    jobs.runNext()
+    val result = jobs.statusV2(owner, UUID.fromString(job.requestId))
+    assertEquals("IMPOSSIBLE", result.state)
+    assertEquals("NO_FEASIBLE_PLAN", result.errorCode)
     assertEquals(0, provider.calls)
     assertEquals(0, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
   }
@@ -220,16 +237,7 @@ class StrengthPlannerIntegrationTest {
       capturedAt - day,
       sets(live, 1, null, null, legacyWeight = 91.0, actualPresent = true),
     )
-    provider.handler = { input ->
-      val context = json.readTree(input.context)
-      assertEquals(live.toString(), context["selection"]["focusExerciseId"].asString())
-      assertFalse(context["candidates"].any { it["exerciseId"].asString() == stale.toString() })
-      assertTrue(context.has("completedMuscleCoverage"))
-      assertFalse(context.toString().contains("weight", ignoreCase = true))
-      response(live)
-    }
-
-    val result = actions.calendar(owner, request())
+    val result = ready(owner, request())
     assertTrue(
       json
         .valueToTree<JsonNode>(result)["proposal"]["snapshot"]["draft"]["exercises"][0][
@@ -248,14 +256,7 @@ class StrengthPlannerIntegrationTest {
       capturedAt - day,
       sets(target, 1, null, null, legacyWeight = 63.5, actualPresent = false),
     )
-    provider.handler = { input ->
-      val context = json.readTree(input.context)
-      assertFalse(context.has("strengthFacts"))
-      assertFalse(context["selection"].has("focusExerciseId"))
-      response(target)
-    }
-
-    val result = actions.calendar(owner, request())
+    val result = ready(owner, request())
     assertTrue(
       json
         .valueToTree<JsonNode>(result)["proposal"]["snapshot"]["draft"]["exercises"][0][
@@ -271,32 +272,22 @@ class StrengthPlannerIntegrationTest {
     val allowed = exercise(owner)
     profile(owner, "STRENGTH")
     strengthProfile(owner, listOf(excluded to "HIGH"))
-    provider.handler = { input ->
-      val context = json.readTree(input.context)
-      assertEquals(allowed.toString(), context["selection"]["focusExerciseId"].asString())
-      assertFalse(context["candidates"].any { it["exerciseId"].asString() == excluded.toString() })
-      assertFalse(context["strengthFacts"].toString().contains(excluded.toString()))
-      response(allowed)
-    }
-    actions.calendar(owner, request(listOf(excluded.toString())))
-    assertEquals(1, provider.calls)
+    val result = ready(owner, request(listOf(excluded.toString())))
+    assertEquals(allowed.toString(), result.proposal.snapshot.draft.exercises.single().exerciseId)
+    assertEquals(0, provider.calls)
   }
 
   @Test
-  fun `strength revision changes during provider work prevent proposal persistence`() {
+  fun `strength revision changes after capture prevent deterministic publication`() {
     val owner = owner()
     val focus = exercise(owner)
     profile(owner, "STRENGTH")
     strengthProfile(owner, listOf(focus to "HIGH"))
-    provider.handler = {
-      db.update("UPDATE sync_heads SET revision=18 WHERE user_id=?", owner.userId)
-      response(focus)
-    }
-    assertEquals(
-      "ai_context_stale",
-      assertThrows<ApiException> { actions.calendar(owner, request()) }.code,
-    )
-    assertEquals(1, provider.calls)
+    val job = submit(owner, request())
+    db.update("UPDATE sync_heads SET revision=18 WHERE user_id=?", owner.userId)
+    jobs.runNext()
+    assertEquals("STALE", jobs.statusV2(owner, UUID.fromString(job.requestId)).state)
+    assertEquals(0, provider.calls)
     assertEquals(0, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
   }
 
@@ -474,6 +465,37 @@ class StrengthPlannerIntegrationTest {
       id,
       json.writeValueAsString(payload),
     )
+  }
+
+  private fun submit(owner: Identity, raw: ByteArray): CalendarDraftJobResponse {
+    val captured = contexts.captureCalendar(owner, 17, 9, "UTC", false, emptyList())
+    captured.candidates.forEach { row ->
+      mappings.put(
+        owner,
+        UUID.fromString(row.id),
+        PlannerExerciseMappingDto(
+          UUID.fromString(row.id),
+          "HORIZONTAL_PUSH",
+          listOf("ACCESSORY", "PRIMARY"),
+          DeterministicPlannerRuntime.goals.sorted(),
+          "STRENGTH",
+          emptyList(),
+        ),
+      )
+    }
+    val request = json.readTree(raw) as ObjectNode
+    request.remove("currentState")
+    request.remove("preferences")
+    request.put("variant", 0)
+    return jobs.submitV2(owner, json.writeValueAsBytes(request))
+  }
+
+  private fun ready(owner: Identity, raw: ByteArray): CalendarDraftResponse {
+    val job = submit(owner, raw)
+    jobs.runNext()
+    val result = jobs.statusV2(owner, UUID.fromString(job.requestId))
+    assertEquals("READY", result.state, result.errorCode)
+    return result.result!!
   }
 
   private fun request(excluded: List<String> = emptyList()) =

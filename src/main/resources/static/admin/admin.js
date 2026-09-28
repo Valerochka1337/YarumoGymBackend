@@ -3,7 +3,7 @@ const EQUIPMENT_LABELS = {"barbell": "Штанга", "dumbbells": "Гантел�
 
 const $ = id => document.getElementById(id);
 const names = {ai:'ИИ · Провайдер и модели',overview:'Обзор',users:'Пользователи',exercise:'Упражнения',gym:'Залы',routine:'Программы',workout:'Тренировки',measurement:'Замеры',schedule:'Расписание',audit:'Журнал изменений'};
-names.planner = 'ИИ · Паттерны тренировок';
+names.planner = 'Планировщик тренировок';
 names['ai-diagnostics'] = 'ИИ · Диагностика';
 Object.assign(names, {'standard:exercise':'Стандартный каталог · Упражнения','standard:gym':'Стандартные залы','standard:routine':'Стандартные шаблоны','standard:equipment':'Оборудование'});
 const isStandard = () => view.startsWith('standard:');
@@ -106,7 +106,7 @@ async function load() {
   const version=++requestVersion;
   $('page-title').textContent=names[view];
   $('page-description').textContent=view==='ai' ? 'Подключение OpenAI-совместимого провайдера. Изменения применяются сразу после сохранения.' : view==='ai-diagnostics' ? 'Только чтение: последние попытки AI в текущем процессе.' : isStandard() ? 'Общие объекты доступны всем, включая офлайн. Архив сохраняет содержимое и ссылки.' : view==='overview' ? 'Пользователи, данные и последние действия — всё в одном месте.' : view==='audit' ? 'Кто, что и зачем изменил. История сохраняется вместе с версиями записей.' : view==='users' ? 'Аккаунты, способы входа и данные пользователей.' : 'Данные пользователей приложения. Правки появятся на устройствах при синхронизации.';
-  if(view==='planner') $('page-description').textContent='Коллекции заготовок, модель и параметры серверного планировщика. Запуск тренировок доступен только в приложении.';
+  if(view==='planner') $('page-description').textContent='Структуры и параметры детерминированного серверного планировщика. Запуск тренировок доступен только в приложении.';
   for(const nav of $('navigation').querySelectorAll('button')) { if(nav.dataset.view===view) nav.setAttribute('aria-current','page'); else nav.removeAttribute('aria-current'); }
   $('overview').hidden=view!=='overview'; $('listing').hidden=['overview','ai','planner','ai-diagnostics'].includes(view); $('ai-settings').hidden=!['ai','planner'].includes(view); $('ai-diagnostics').hidden=view!=='ai-diagnostics'; if(!['ai','planner'].includes(view)) $('ai-settings').replaceChildren(); if(view!=='ai-diagnostics') $('ai-diagnostics').replaceChildren();
   $('owner-banner').hidden=isStandard() || !owner || ['users','overview','ai','planner','ai-diagnostics'].includes(view);
@@ -118,7 +118,7 @@ async function load() {
   $('refresh').disabled=true; $('table-wrap').setAttribute('aria-busy','true');
   try {
     if(view==='ai') { $('ai-settings').replaceChildren(); const data=await api('/ai-settings'); if(version===requestVersion) renderAiSettings(data); return; }
-    if(view==='planner') { $('ai-settings').replaceChildren(); const [data,exercises]=await Promise.all([api('/planner-settings'),api('/planner-exercises')]); if(version===requestVersion) renderPlannerSettings(data,exercises); return; }
+    if(view==='planner') { $('ai-settings').replaceChildren(); const [data,exercises,mappings]=await Promise.all([api('/planner-settings'),api('/planner-exercises'),api('/planner-exercise-mappings')]); if(version===requestVersion) renderPlannerSettings(data,exercises,mappings.items); return; }
     if(view==='ai-diagnostics') { $('ai-diagnostics').replaceChildren(el('p',{class:'empty'},'Загружаем диагностику…')); const data=await api('/ai-diagnostics'); if(version===requestVersion) renderDiagnostics(data); return; }
     if(isStandard()) { await loadStandard(version); return; }
     if(view==='overview') { const data=await api('/summary'); if(version===requestVersion) renderOverview(data); return; }
@@ -532,7 +532,7 @@ function renderAiSettings(data) {
   $('ai-settings').replaceChildren(form);
 }
 
-function renderPlannerSettings(source, exercises=[]) {
+function renderPlannerSettings(source, exercises=[], mappingRows=[]) {
   const data=structuredClone(source);
   const form=el('form',{class:'planner-settings'});
   form.append(el('p',{class:'muted'},'Серверные настройки. Сохранение применяется к новым запросам из приложения. Каждый запрос использует свой снимок настроек.'));
@@ -550,13 +550,10 @@ function renderPlannerSettings(source, exercises=[]) {
     input.value=target[key]; input.addEventListener('change',()=>target[key]=input.value);
     parent.append(el('label',{},label,input)); return input;
   }
-  field(settings,data,'model','Модель (пусто — текущая модель текста)','text',{maxlength:200});
-  field(settings,data,'instructions','Методические инструкции','textarea',{maxlength:8000});
   const numbers=el('div',{class:'planner-grid'});
   for(const [key,label,min,max,step] of [
     ['historyDays','История, дней (до 28)',7,28,1],['detailDays','Подробно, дней (до 7)',1,7,1],
-    ['maxRounds','Максимум раундов',3,10,1],['maxToolCalls','Максимум инструментов',2,24,1],
-    ['timeoutSeconds','Таймаут, секунд',15,120,1],['weightStepKg','Шаг веса по умолчанию, кг',0.25,20,0.25],
+    ['weightStepKg','Шаг веса по умолчанию, кг',0.25,20,0.25],
   ]) field(numbers,data,key,label,'number',{min,max,step,required:true});
   settings.append(numbers); form.append(settings);
   const accents=el('fieldset',{},el('legend',{},'Акценты стандартных упражнений'));
@@ -592,11 +589,32 @@ function renderPlannerSettings(source, exercises=[]) {
     if(!rows.length) accentChoices.append(el('p',{class:'hint'},'Ничего не найдено'));
   }
   accentSearch.oninput=drawAccents;selectedOnly.onchange=drawAccents;accents.append(accentSearch,selectedLabel,accentChoices);drawAccents();form.append(accents);
+  const movementOptions=[['HORIZONTAL_PUSH','Горизонтальный жим'],['HORIZONTAL_PULL','Горизонтальная тяга'],['VERTICAL_PUSH','Вертикальный жим'],['VERTICAL_PULL','Вертикальная тяга'],['SQUAT','Присед'],['HIP_HINGE','Тазовый наклон'],['LUNGE','Выпад'],['CARRY','Перенос'],['CORE','Кор'],['CARDIO','Кардио'],['MOBILITY','Подвижность']];
+  const mappingBox=el('fieldset',{},el('legend',{},'Классификация стандартных упражнений'));
+  const mappingSearch=el('input',{type:'search',placeholder:'Найти упражнение','aria-label':'Найти классификацию'});
+  const mappingList=el('div');
+  function drawMappings(){
+    const q=mappingSearch.value.toLocaleLowerCase('ru');
+    mappingList.replaceChildren(...exercises.filter(x=>x.name.toLocaleLowerCase('ru').includes(q)).map(exercise=>{
+      const saved=mappingRows.find(x=>x.exerciseId===exercise.id);
+      const row=saved?structuredClone(saved):{exerciseId:exercise.id,movementClass:'',roles:[],supportedGoals:[],exerciseType:exercise.type,equipmentIds:exercise.equipmentIds||[]};
+      delete row.revision;
+      const group=el('details',{},el('summary',{},exercise.name+(saved?'':' · требуется классификация')));
+      select(group,row,'movementClass','Движение',[['','Выберите движение'],...movementOptions]);
+      function checks(key,title,options){const fieldset=el('fieldset',{},el('legend',{},title));options.forEach(([value,label])=>{const input=el('input',{type:'checkbox',checked:row[key].includes(value)});input.onchange=()=>{row[key]=input.checked?[...row[key],value].sort():row[key].filter(x=>x!==value);};fieldset.append(el('label',{},input,label));});group.append(fieldset);}
+      checks('roles','Роли',[['PRIMARY','Основное'],['ACCESSORY','Вспомогательное'],['CONDITIONING','Кондиционная работа']]);
+      checks('supportedGoals','Цели',[['STRENGTH','Сила'],['MUSCLE_GAIN','Набор мышц'],['FAT_LOSS','Похудение'],['GENERAL_FITNESS','Общая форма'],['ENDURANCE','Выносливость']]);
+      group.append(el('p',{class:'muted'},'Тип и оборудование берутся из карточки упражнения.'),button('Сохранить классификацию',async()=>{
+        try {const saved=await api('/planner-exercise-mappings/'+exercise.id,'PUT',row);mappingRows=mappingRows.filter(x=>x.exerciseId!==exercise.id).concat(saved);drawMappings();notice('Классификация сохранена');}catch(error){notice(error.message,true);}
+      }));return group;
+    }));
+  }
+  mappingSearch.oninput=drawMappings;mappingBox.append(mappingSearch,mappingList);drawMappings();form.append(mappingBox);
   const collections=el('div'); form.append(collections);
   const goalOptions=[['STRENGTH','Сила'],['MUSCLE_GAIN','Набор мышц'],['FAT_LOSS','Похудение'],['GENERAL_FITNESS','Общая форма'],['ENDURANCE','Выносливость'],['OTHER','Другое']];
   const focusOptions=[['FULL_BODY','Всё тело'],['UPPER','Верх'],['LOWER','Низ'],['PUSH','Жим'],['PULL','Тяга'],['CARDIO','Кардио'],['MIXED','Смешанная']];
   const newId=prefix=>prefix+'-'+crypto.randomUUID().slice(0,8);
-  const slot=()=>({role:'ACCESSORY',movement:'',exerciseType:'STRENGTH',exerciseCount:1,sets:3,repsMin:6,repsMax:12,restSeconds:120,durationSeconds:0});
+  const slot=()=>({role:'ACCESSORY',movement:'Новый слот',slotId:newId('slot'),movementClass:'HORIZONTAL_PUSH',allowedEquipmentIds:[],exerciseType:'STRENGTH',exerciseCount:1,sets:3,repsMin:6,repsMax:12,restSeconds:120,durationSeconds:60,preferredSetCount:3,preferredRestSeconds:120,targetTotalReps:27,targetIntensityBasisPoints:7000,targetActiveSeconds:180,allowedRestSeconds:[120],allowedActiveSeconds:[60]});
   function draw() {
     collections.replaceChildren();
     data.collections.forEach(collection=>{
@@ -604,7 +622,7 @@ function renderPlannerSettings(source, exercises=[]) {
       const body=el('div',{class:'planner-fields'}); box.append(body);
       field(body,collection,'name','Название коллекции','text',{required:true,maxlength:120});
       select(body,collection,'goal','Цель',goalOptions);
-      body.append(el('p',{class:'muted'},'Все сохранённые паттерны равноправны для AI. Он выбирает по цели, истории, приоритетам и фактическому порядку тренировок.'));
+      body.append(el('p',{class:'muted'},'Все сохранённые структуры равноправны. Планировщик выбирает по цели, истории, приоритетам и фактическому порядку тренировок.'));
       collection.patterns.forEach(pattern=>{
         const details=el('details',{class:'planner-pattern'},el('summary',{},pattern.name));
         const editor=el('div',{class:'planner-fields'}); details.append(editor);
@@ -617,13 +635,19 @@ function renderPlannerSettings(source, exercises=[]) {
           slots.replaceChildren();
           pattern.slots.forEach((item,index)=>{
             const group=el('fieldset',{},el('legend',{},'Слот '+(index+1)));
-            field(group,item,'role','Роль','text',{required:true,maxlength:80});
+            select(group,item,'role','Роль',[['PRIMARY','Основное'],['ACCESSORY','Вспомогательное'],['CONDITIONING','Кондиционная работа']]);
+            select(group,item,'movementClass','Тип движения',movementOptions);
             field(group,item,'movement','Движение / упражнение','text',{required:true,maxlength:300});
             select(group,item,'exerciseType','Тип',Object.entries(types));
             const grid=el('div',{class:'planner-grid'});
-            for(const [key,label,min,max] of [['exerciseCount','Упражнений',1,4],['sets','Подходов',1,8],['repsMin','Повторы от',1,50],['repsMax','Повторы до',1,50],['restSeconds','Отдых, сек',0,600],['durationSeconds','Длительность подхода, сек',0,7200]])
+            for(const [key,label,min,max] of [['exerciseCount','Упражнений',1,4],['sets','Подходов',1,20],['repsMin','Повторы от',1,30],['repsMax','Повторы до',1,30],['restSeconds','Отдых, сек',0,600],['durationSeconds','Длительность подхода, сек',0,7200]])
               field(grid,item,key,label,'number',{min,max,step:1,required:true});
-            group.append(grid,button('Удалить слот',()=>{pattern.slots.splice(index,1);drawSlots();})); slots.append(group);
+            for(const [key,label,min,max] of [['preferredSetCount','Предпочтительно подходов',1,20],['preferredRestSeconds','Предпочтительный отдых',0,600],['targetTotalReps','Целевые суммарные повторы',1,600],['targetIntensityBasisPoints','Целевая интенсивность, базисных пунктов',1,10000],['targetActiveSeconds','Целевая работа, секунд',1,14400]])
+              field(grid,item,key,label,'number',{min,max,step:1});
+            for(const [key,label] of [['allowedRestSeconds','Допустимый отдых, сек (через запятую)'],['allowedActiveSeconds','Допустимая длительность, сек (через запятую)']]){
+              const input=el('input',{type:'text',value:(item[key]||[]).join(',')});input.value=(item[key]||[]).join(',');input.oninput=()=>item[key]=input.value.split(',').filter(x=>x.trim()).map(Number);grid.append(el('label',{},label,input));
+            }
+            group.append(grid,button('Удалить слот' ,()=>{pattern.slots.splice(index,1);drawSlots();})); slots.append(group);
           });
         }
         drawSlots();
@@ -651,7 +675,7 @@ function renderPlannerSettings(source, exercises=[]) {
   form.addEventListener('submit',async event=>{
     event.preventDefault(); if(!form.reportValidity()) return;
     const version=requestVersion; submit.disabled=true; error.textContent='';
-    try {const saved=await api('/planner-settings','PUT',data);if(version===requestVersion){renderPlannerSettings(saved,exercises);notice('Настройки планировщика сохранены');}}
+    try {const saved=await api('/planner-settings','PUT',data);if(version===requestVersion){renderPlannerSettings(saved,exercises,mappingRows);notice('Настройки планировщика сохранены');}}
     catch(e){if(version===requestVersion) error.textContent=e.message;}
     finally{submit.disabled=false;}
   });

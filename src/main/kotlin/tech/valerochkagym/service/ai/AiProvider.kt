@@ -45,6 +45,8 @@ class UnconfiguredAiProvider : AiProvider {
 
 fun aiError(code: String): ApiException =
   when (code) {
+    "ai_invalid_request" ->
+      ApiException(400, code, "Обновите приложение для планирования тренировки")
     "ai_request_conflict" -> ApiException(409, code, "Этот идентификатор запроса уже использован")
     "ai_in_progress" -> ApiException(409, code, "Запрос AI ещё выполняется")
     "ai_interrupted" -> ApiException(409, code, "Предыдущая попытка была прервана")

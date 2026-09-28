@@ -108,6 +108,9 @@ class CalendarAiService(
     proposalId: UUID,
     raw: ByteArray,
   ): ProposalResponse {
+    val legacy = creator.detail(identity, proposalId)
+    if (legacy.source != "AI")
+      throw ApiException(404, "proposal_not_found", "Предложение не найдено")
     val request = parseRefinement(raw)
     if (
       !canonicalUuid(request.requestId) ||
@@ -118,19 +121,13 @@ class CalendarAiService(
         request.refinement.length !in 1..2000
     )
       bad("Некорректный запрос")
-    val runtime = frozenPlannerConfiguration()
+    val runtime = PlannerConfiguration()
     val reservation = reserveRefinement(identity, proposalId, request, raw, runtime)
     reservation.replay?.let {
       return it
     }
-    return try {
-      refineReserved(identity, proposalId, request, raw, reservation.deadlineAt, runtime)
-    } catch (error: Exception) {
-      // Keep the first raw binding even when provider/validation work fails. Retrying these same
-      // bytes is terminal rather than a new provider attempt; differing bytes always conflict.
-      abortRefinement(identity, UUID.fromString(request.requestId))
-      throw error
-    }
+    abortRefinement(identity, UUID.fromString(request.requestId))
+    throw aiError("ai_invalid_request")
   }
 
   /**
@@ -431,8 +428,8 @@ class CalendarAiService(
             deadlineAt = requireNotNull(existing).leaseUntil,
             replay = json.readValue(claim.receipt, ProposalResponse::class.java),
           )
-        RefinementReceiptPolicy.Claim.InProgress -> throw aiError("ai_in_progress")
-        RefinementReceiptPolicy.Claim.Interrupted -> throw aiError("ai_interrupted")
+        RefinementReceiptPolicy.Claim.InProgress -> RefinementReservation(deadlineAt = now)
+        RefinementReceiptPolicy.Claim.Interrupted -> RefinementReservation(deadlineAt = now)
         RefinementReceiptPolicy.Claim.Conflict -> throw aiError("ai_request_conflict")
       }
     }
@@ -509,9 +506,16 @@ class CalendarAiService(
     publicationGuard: () -> Unit = {},
     publish: (CalendarDraftResponse) -> Unit = {},
   ): CalendarDraftResponse =
-    diagnostics.observe(AiDiagnosticStage.CALENDAR_CREATE) {
-      createUnobserved(identity, raw, agentic, projectionCaptured, publicationGuard, publish)
+    diagnostics.observe(AiDiagnosticStage.CALENDAR_CREATE) { legacyCreate(identity, raw) }
+
+  private fun legacyCreate(identity: Identity, raw: ByteArray): CalendarDraftResponse {
+    val request = parse(raw, validateFuture = false)
+    val reserved = reserve(identity, request, raw.sha256(), PlannerConfiguration())
+    reserved.replay?.let {
+      return it
     }
+    terminalFailure(identity, request.requestId, aiError("ai_invalid_request"))
+  }
 
   private fun createUnobserved(
     identity: Identity,
@@ -1019,20 +1023,12 @@ class CalendarAiService(
             previous.state in
               setOf(CalendarAiAttemptState.PROCESSING, CalendarAiAttemptState.COMMITTING)
           ) {
-            if (!previous.leaseUntil.isAfter(now)) {
-              terminal(previous, CalendarAiAttemptState.INTERRUPTED, 409, "ai_interrupted")
-              return@execute Reserved(
-                previous.admittedAt,
-                previous.deadlineAt,
-                null,
-                aiError("ai_interrupted"),
-              )
-            }
+            terminal(previous, CalendarAiAttemptState.FAILED, 400, "ai_invalid_request")
             return@execute Reserved(
               previous.admittedAt,
               previous.deadlineAt,
               null,
-              aiError("ai_in_progress"),
+              aiError("ai_invalid_request"),
             )
           }
           if (previous.state == CalendarAiAttemptState.SUCCEEDED)
