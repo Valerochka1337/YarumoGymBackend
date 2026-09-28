@@ -605,7 +605,9 @@ class AiContextReader(
       sessionGuard.lock(identity)
       if (head.revision != revision || common.revision != catalogRevision)
         throw aiError("ai_context_stale")
-      require(exerciseIds.size <= 29) { "Strength capture permits at most 29 exercise IDs" }
+      require(exerciseIds.size <= STRENGTH_FACTS_BATCH_SIZE) {
+        "Strength capture permits at most 29 exercise IDs"
+      }
       val ids =
         exerciseIds.sorted().map {
           runCatching { java.util.UUID.fromString(it).toString() == it }
@@ -759,4 +761,8 @@ class AiContextReader(
         profile,
       )
     }!!
+
+  companion object {
+    internal const val STRENGTH_FACTS_BATCH_SIZE = 29
+  }
 }

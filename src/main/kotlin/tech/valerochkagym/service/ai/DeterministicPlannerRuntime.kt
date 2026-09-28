@@ -96,17 +96,26 @@ class DeterministicPlannerRuntime(
         runtime.defaultExerciseAccents.associate { it.exerciseId to it.accent },
         sources,
       )
+    // Admission holds the owner/catalog locks across all batches. Preserve the complete
+    // catalog while respecting the bounded historical lookup shared with the legacy planner.
     val history =
-      contexts
-        .captureStrengthPlannerFacts(
-          identity,
-          request.expectedRevision,
-          request.expectedCatalogRevision,
-          eligible.mapTo(mutableSetOf()) { it.getValue("exerciseId") as String },
-          captured.capturedAtMillis,
-          emptySet(),
-        )
-        .latestFacts
+      eligible
+        .map { it.getValue("exerciseId") as String }
+        .distinct()
+        .sorted()
+        .chunked(AiContextReader.STRENGTH_FACTS_BATCH_SIZE)
+        .flatMap { batch ->
+          contexts
+            .captureStrengthPlannerFacts(
+              identity,
+              request.expectedRevision,
+              request.expectedCatalogRevision,
+              batch.toSet(),
+              captured.capturedAtMillis,
+              emptySet(),
+            )
+            .latestFacts
+        }
     val facts =
       (captured.facts + captured.olderFacts + history).distinctBy {
         listOf(it.workoutId, it.sectionId, it.setIndex)

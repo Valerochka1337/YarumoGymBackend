@@ -81,6 +81,81 @@ class DeterministicPlannerIntegrationTest {
     hooks.failProposalInsert = false
   }
 
+  @ParameterizedTest
+  @ValueSource(ints = [29, 30, 59, 274])
+  fun `full catalogs preserve history beyond the first bounded batch and produce a proposal`(
+    size: Int
+  ) {
+    val owner = owner()
+    setupConfig()
+    val ids = List(size) { exercise(owner).toString() }.sorted()
+    val target = ids.last()
+    val finished = now - 100L * 86_400_000
+    val workoutId = UUID.randomUUID()
+    db.update(
+      "INSERT INTO records(user_id,kind,id,revision,deleted,payload) VALUES (?,'workout',?,17,false,?::jsonb)",
+      owner.userId,
+      workoutId,
+      json.writeValueAsString(
+        mapOf(
+          "startedAt" to finished - 3_600_000,
+          "finishedAt" to finished,
+          "exercises" to
+            listOf(
+              mapOf(
+                "sectionId" to UUID.randomUUID().toString(),
+                "exerciseId" to target,
+                "sets" to
+                  listOf(
+                    mapOf(
+                      "isCompleted" to true,
+                      "setType" to "WORK",
+                      "actualWeightKg" to 45.0,
+                      "actualReps" to 8,
+                      "completedAt" to finished - 1000,
+                    )
+                  ),
+              )
+            ),
+        )
+      ),
+    )
+    // Calendar capture also reads three older parents. Keep the target outside that
+    // fallback so its fact can only arrive through the final bounded history batch.
+    listOf(40L, 50L, 60L).forEach { daysAgo ->
+      val newerFinished = now - daysAgo * 86_400_000
+      db.update(
+        "INSERT INTO records(user_id,kind,id,revision,deleted,payload) VALUES (?,'workout',?,17,false,?::jsonb)",
+        owner.userId,
+        UUID.randomUUID(),
+        json.writeValueAsString(
+          mapOf(
+            "startedAt" to newerFinished - 3_600_000,
+            "finishedAt" to newerFinished,
+            "exercises" to emptyList<Any>(),
+          )
+        ),
+      )
+    }
+    val raw = request()
+    assertEquals("QUEUED", jobs.submitV2(owner, raw).state)
+    val stored =
+      db.queryForObject(
+        "SELECT execution_snapshot::text FROM calendar_draft_jobs WHERE owner_id=? AND request_id=?",
+        String::class.java,
+        owner.userId,
+        requestId(raw),
+      )!!
+    val snapshot = json.readValue(stored, PlannerExecutionSnapshot::class.java)
+    assertEquals(ids, snapshot.candidates.map { it.exerciseId })
+    assertEquals(45.0, snapshot.facts.single { it.exerciseId == target }.actualWeightKg)
+    jobs.runNext()
+    val ready = jobs.statusV2(owner, requestId(raw))
+    assertEquals("READY", ready.state)
+    assertEquals("RULE_BASED", ready.result!!.proposal.source)
+    assertEquals(0, provider.calls)
+  }
+
   @Test
   fun `persisted execution snapshot roundtrips and publishes through runtime`() {
     val owner = owner()
