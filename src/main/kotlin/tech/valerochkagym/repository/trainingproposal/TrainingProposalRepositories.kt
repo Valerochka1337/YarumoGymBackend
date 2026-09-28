@@ -13,6 +13,16 @@ interface TrainingProposalRepository : JpaRepository<TrainingProposalEntity, UUI
   @Query("select p from TrainingProposalEntity p where p.id = :id")
   fun writeLock(id: UUID): TrainingProposalEntity?
 
+  @Query(
+    "select p from TrainingProposalEntity p where p.recipientId = :recipientId and p.createdSequence < :before and (:v2 = true or p.source = tech.valerochkagym.repository.model.TrainingProposalSource.AI) order by p.createdSequence desc"
+  )
+  fun listVisible(
+    recipientId: UUID,
+    before: Long,
+    v2: Boolean,
+    pageable: Pageable,
+  ): List<TrainingProposalEntity>
+
   fun findByRecipientIdAndCreatedSequenceLessThanOrderByCreatedSequenceDesc(
     recipientId: UUID,
     before: Long,

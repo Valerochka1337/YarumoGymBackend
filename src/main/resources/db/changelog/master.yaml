@@ -101,3 +101,6 @@ databaseChangeLog:
   - include:
       file: 033-concurrent-calendar-draft-jobs.sql
       relativeToChangelogFile: true
+  - include:
+      file: 034-deterministic-planner.sql
+      relativeToChangelogFile: true

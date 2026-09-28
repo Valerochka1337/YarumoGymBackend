@@ -203,6 +203,7 @@ class TrainingProposalService(
     expectedOwnerRevision: Long,
     expectedCatalogRevision: Long,
     draft: ApprovalDraft,
+    source: TrainingProposalSource = TrainingProposalSource.AI,
   ): ProposalResponse {
     val normalized = validator.normalize(draft)
     return tx.execute {
@@ -223,7 +224,7 @@ class TrainingProposalService(
         proposals.saveAndFlush(
           TrainingProposalEntity(
             recipientId = identity.userId,
-            source = TrainingProposalSource.AI,
+            source = source,
             status = TrainingProposalStatus.PENDING,
             currentVersion = 1,
             createdAt = now,
@@ -300,15 +301,16 @@ class TrainingProposalService(
     recordValidator.archivedReferences(candidate, aggregate, emptySet())
   }
 
-  fun list(identity: Identity, limit: Int, cursor: String?): ProposalListResponse {
+  fun list(
+    identity: Identity,
+    limit: Int,
+    cursor: String?,
+    protocol: Int = 2,
+  ): ProposalListResponse {
     if (limit !in 1..50) bad("Некорректный размер страницы")
     val before = cursor?.let { cursor(identity.userId, it) } ?: Long.MAX_VALUE
     val page =
-      proposals.findByRecipientIdAndCreatedSequenceLessThanOrderByCreatedSequenceDesc(
-        identity.userId,
-        before,
-        PageRequest.of(0, limit + 1),
-      )
+      proposals.listVisible(identity.userId, before, protocol == 2, PageRequest.of(0, limit + 1))
     val emitted = mutableListOf<Pair<TrainingProposalEntity, ProposalResponse>>()
     for ((index, entity) in page.take(limit).withIndex()) {
       val item = proposal(entity, currentVersion(entity))

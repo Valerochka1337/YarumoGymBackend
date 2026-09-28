@@ -221,7 +221,7 @@ class AiIntegrationTest {
   }
 
   @Test
-  fun `calendar draft persists one pending proposal and replays its original receipt`() {
+  fun `legacy calendar create persists terminal binding without invoking provider`() {
     val a = owner()
     val exercise = UUID.randomUUID()
     db.update(
@@ -252,14 +252,14 @@ class AiIntegrationTest {
         "preferences" to null,
       )
     val first = call("/v1/ai/calendar-drafts", a, body)
-    assertEquals(200, first.statusCode(), first.body())
+    assertEquals(400, first.statusCode(), first.body())
     val replay = call("/v1/ai/calendar-drafts", a, body)
-    assertEquals(200, replay.statusCode(), replay.body())
+    assertEquals(400, replay.statusCode(), replay.body())
     assertEquals(first.body(), replay.body())
-    assertEquals(1, provider.calls)
-    assertEquals(1, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
+    assertEquals(0, provider.calls)
+    assertEquals(0, db.queryForObject("SELECT count(*) FROM training_proposals", Int::class.java))
     assertEquals(
-      "SUCCEEDED",
+      "FAILED",
       db.queryForObject("SELECT state FROM calendar_ai_attempts", String::class.java),
     )
   }

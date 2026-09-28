@@ -18,6 +18,8 @@ data class PlannerConfiguration(
   val maxToolCalls: Int = 12,
   val timeoutSeconds: Int = 45,
   val weightStepKg: Double = 2.5,
+  /** Persisted execution limits are captured by each deterministic run. */
+  val deterministicLimits: DeterministicPlannerLimits = DeterministicPlannerLimits(),
   val collections: List<PlannerPatternCollection> = PlannerPatternDefaults.collections(),
   val defaultExerciseAccents: List<PlannerExerciseAccent> = emptyList(),
 )
@@ -51,6 +53,18 @@ data class PlannerPatternSlot(
   val repsMax: Int = 12,
   val restSeconds: Int = 120,
   val durationSeconds: Int = 0,
+  val slotId: String = "",
+  val movementClass: String = "",
+  val allowedEquipmentIds: List<String> = emptyList(),
+  val preferredSetCount: Int = sets,
+  val preferredRestSeconds: Int = restSeconds,
+  val targetTotalReps: Int? =
+    if (exerciseType == "STRENGTH") sets * ((repsMin + repsMax) / 2) else null,
+  val targetIntensityBasisPoints: Int? = if (exerciseType == "STRENGTH") 7000 else null,
+  val targetActiveSeconds: Int? = if (exerciseType != "STRENGTH") durationSeconds * sets else null,
+  val allowedRestSeconds: List<Int> = listOf(restSeconds),
+  val allowedActiveSeconds: List<Int> =
+    if (durationSeconds > 0) listOf(durationSeconds) else emptyList(),
 )
 
 /**
@@ -73,7 +87,30 @@ class PlannerConfigurationService(
         "SELECT payload FROM planner_configuration WHERE id = 1",
         String::class.java,
       )!!
-    return json.readValue(raw, PlannerConfiguration::class.java)
+    return json.readValue(raw, PlannerConfiguration::class.java).let { value ->
+      // Upgrade only known built-in IDs; never infer custom slot semantics from prose.
+      val defaults =
+        PlannerPatternDefaults.collections().flatMap { it.patterns }.associateBy { it.id }
+      value.copy(
+        collections =
+          value.collections.map { c ->
+            c.copy(
+              patterns =
+                c.patterns.map { p ->
+                  p.copy(
+                    slots =
+                      p.slots.mapIndexed { i, slot ->
+                        val seed = defaults[p.id]?.slots?.getOrNull(i)
+                        if (slot.movementClass.isBlank() && seed != null)
+                          slot.copy(slotId = seed.slotId, movementClass = seed.movementClass)
+                        else slot
+                      }
+                  )
+                }
+            )
+          }
+      )
+    }
   }
 
   @Transactional
@@ -152,7 +189,7 @@ class PlannerConfigurationService(
     if (
       value.collections.map { it.id }.distinct().size != value.collections.size ||
         value.collections.map { it.goal }.distinct().size != value.collections.size ||
-        !value.collections.any { it.goal == "GENERAL_FITNESS" }
+        !value.collections.map { it.goal }.containsAll(DeterministicPlannerRuntime.goals)
     )
       bad("Коллекции должны иметь уникальные ID и цели; общая форма обязательна")
     val allPatterns = value.collections.flatMap { it.patterns }.map { it.id }
@@ -173,20 +210,54 @@ class PlannerConfigurationService(
             !text(pattern.description, 2000, true) ||
             pattern.focus !in
               setOf("FULL_BODY", "UPPER", "LOWER", "PUSH", "PULL", "CARDIO", "MIXED") ||
-            pattern.slots.size !in 1..12
+            pattern.slots.size !in 1..12 ||
+            pattern.slots.sumOf { it.exerciseCount } > 12 ||
+            pattern.slots
+              .map { it.slotId }
+              .filter { it.isNotEmpty() }
+              .let { it.distinct().size != it.size }
         )
           bad("Проверьте описание паттерна")
         pattern.slots.forEach { slot ->
           if (
             !text(slot.role, 80) ||
+              slot.movementClass !in
+                setOf(
+                  "HORIZONTAL_PUSH",
+                  "HORIZONTAL_PULL",
+                  "VERTICAL_PUSH",
+                  "VERTICAL_PULL",
+                  "SQUAT",
+                  "HIP_HINGE",
+                  "LUNGE",
+                  "CARRY",
+                  "CORE",
+                  "CARDIO",
+                  "MOBILITY",
+                ) ||
+              (slot.slotId.isNotEmpty() && !id(slot.slotId)) ||
+              slot.allowedEquipmentIds.size > 200 ||
+              slot.allowedEquipmentIds.any { it.isBlank() || it.length > 255 } ||
               !text(slot.movement, 300) ||
               slot.exerciseType !in setOf("STRENGTH", "TIMED", "CARDIO") ||
               slot.exerciseCount !in 1..4 ||
-              slot.sets !in 1..8 ||
+              slot.sets !in 1..20 ||
               slot.restSeconds !in 0..600 ||
-              slot.repsMin !in 1..50 ||
-              slot.repsMax !in slot.repsMin..50 ||
+              slot.repsMin !in 1..30 ||
+              slot.repsMax !in slot.repsMin..30 ||
               slot.durationSeconds !in 0..7200 ||
+              slot.preferredSetCount !in 1..20 ||
+              slot.preferredRestSeconds !in 0..600 ||
+              slot.allowedRestSeconds.isEmpty() ||
+              slot.allowedRestSeconds.distinct().size != slot.allowedRestSeconds.size ||
+              slot.allowedRestSeconds.any { it !in 0..600 } ||
+              (slot.exerciseType == "STRENGTH" &&
+                (slot.targetTotalReps !in 1..600 ||
+                  slot.targetIntensityBasisPoints !in 1..10000)) ||
+              (slot.exerciseType != "STRENGTH" &&
+                (slot.targetActiveSeconds !in 1..14400 ||
+                  slot.allowedActiveSeconds.isEmpty() ||
+                  slot.allowedActiveSeconds.any { it !in 1..14400 })) ||
               (slot.exerciseType != "STRENGTH" && slot.durationSeconds < 10)
           )
             bad("Проверьте параметры слота")

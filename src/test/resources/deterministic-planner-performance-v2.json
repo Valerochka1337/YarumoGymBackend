@@ -1,0 +1,11 @@
+{
+  "fixtureVersion": 1,
+  "structures": 16,
+  "selectionsPerStructure": 5,
+  "candidatesPerFamily": 16,
+  "families": ["SQUAT", "HORIZONTAL_PUSH", "HORIZONTAL_PULL", "CORE", "CARDIO"],
+  "warmupIterations": 10,
+  "measuredIterations": 50,
+  "maximumDurationSeconds": 3600,
+  "targetP95Millis": 1000
+}

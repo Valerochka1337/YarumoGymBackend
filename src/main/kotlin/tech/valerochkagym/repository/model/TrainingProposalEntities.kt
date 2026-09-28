@@ -8,7 +8,8 @@ import org.hibernate.annotations.JdbcTypeCode
 import org.hibernate.type.SqlTypes
 
 enum class TrainingProposalSource {
-  AI
+  AI,
+  RULE_BASED,
 }
 
 enum class TrainingProposalStatus {
@@ -24,7 +25,9 @@ enum class TrainingProposalStatus {
 class TrainingProposalEntity(
   @Id var id: UUID = UUID.randomUUID(),
   var recipientId: UUID = UUID(0, 0),
-  @Enumerated(EnumType.STRING) var source: TrainingProposalSource = TrainingProposalSource.AI,
+  @Enumerated(EnumType.STRING)
+  @Column(length = 16)
+  var source: TrainingProposalSource = TrainingProposalSource.AI,
   @Enumerated(EnumType.STRING) var status: TrainingProposalStatus = TrainingProposalStatus.PENDING,
   var currentVersion: Int = 1,
   @Column(insertable = false, updatable = false) var createdSequence: Long = 0,

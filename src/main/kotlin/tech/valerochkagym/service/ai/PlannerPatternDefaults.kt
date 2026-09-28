@@ -152,6 +152,23 @@ object PlannerPatternDefaults {
           }
         val slots =
           movements.mapIndexed { index, movement -> work(movement, index >= 2) }.toMutableList()
+        if (goal == "GENERAL_FITNESS" && variant == "full-a") {
+          // Isometric core work is explicitly time-based, not a strength repetition surrogate.
+          slots[3] =
+            PlannerPatternSlot(
+              "ACCESSORY",
+              "Удержание корпуса",
+              "TIMED",
+              1,
+              3,
+              1,
+              1,
+              45,
+              45,
+              targetActiveSeconds = 135,
+              allowedActiveSeconds = listOf(30, 45, 60),
+            )
+        }
         if (variant == "muscular") {
           slots.replaceAll { it.copy(sets = 2, repsMin = 12, repsMax = 20, restSeconds = 60) }
         }
@@ -184,7 +201,36 @@ object PlannerPatternDefaults {
           "Редактируемая заготовка. " +
             (if (hypertrophy) "Распредели рабочий объём по истории. " else "") +
             "Сохрани подходящие акцентные упражнения; адаптируй состав и объём под время, оснащение, опыт и выполненные занятия.",
-          slots,
+          slots.mapIndexed { index, slot ->
+            val movements =
+              when (variant) {
+                "full-a" -> listOf("SQUAT", "HORIZONTAL_PUSH", "HORIZONTAL_PULL", "CORE")
+                "full-b" -> listOf("HIP_HINGE", "VERTICAL_PULL", "VERTICAL_PUSH", "LUNGE")
+                "upper-a" ->
+                  listOf("HORIZONTAL_PUSH", "HORIZONTAL_PULL", "VERTICAL_PULL", "VERTICAL_PUSH")
+                "upper-b" ->
+                  listOf("VERTICAL_PUSH", "VERTICAL_PULL", "HORIZONTAL_PUSH", "HORIZONTAL_PULL")
+                "lower-a",
+                "legs" -> listOf("SQUAT", "HIP_HINGE", "LUNGE", "CORE")
+                "lower-b" -> listOf("HIP_HINGE", "LUNGE", "SQUAT", "CORE")
+                "push" -> listOf("HORIZONTAL_PUSH", "VERTICAL_PUSH", "HORIZONTAL_PUSH", "CORE")
+                "pull" -> listOf("VERTICAL_PULL", "HORIZONTAL_PULL", "VERTICAL_PULL", "CORE")
+                "short",
+                "muscular",
+                "mixed" -> listOf("SQUAT", "HORIZONTAL_PUSH", "HORIZONTAL_PULL")
+                else -> emptyList()
+              }
+            slot.copy(
+              slotId = "$id-$variant-slot-${index + 1}",
+              movementClass = if (slot.exerciseType == "CARDIO") "CARDIO" else movements[index],
+              preferredSetCount = slot.sets,
+              preferredRestSeconds = slot.restSeconds,
+              targetTotalReps =
+                if (slot.exerciseType == "STRENGTH") slot.sets * ((slot.repsMin + slot.repsMax) / 2)
+                else null,
+              allowedRestSeconds = listOf(slot.restSeconds),
+            )
+          },
         )
       }
     return PlannerPatternCollection(id, goal, name, patterns)
